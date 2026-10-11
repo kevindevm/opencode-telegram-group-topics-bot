@@ -5,6 +5,7 @@ export const BOT_COMMAND = {
   NEW: "new",
   ABORT: "abort",
   SESSIONS: "sessions",
+  RECENT: "recent",
   LAST: "last",
   TTS: "tts",
   PROJECTS: "projects",
@@ -25,6 +26,7 @@ export const DM_ALLOWED_COMMANDS: readonly BotCommandName[] = [
   BOT_COMMAND.START,
   BOT_COMMAND.HELP,
   BOT_COMMAND.STATUS,
+  BOT_COMMAND.RECENT,
   BOT_COMMAND.OPENCODE_START,
   BOT_COMMAND.OPENCODE_STOP,
 ];

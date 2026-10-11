@@ -11,6 +11,7 @@ const LEGACY_CONTEXT_CANCEL_CALLBACK = "compact:cancel";
 const INLINE_MENU_KINDS = [
   "project",
   "session",
+  "recent",
   "model",
   "agent",
   "variant",

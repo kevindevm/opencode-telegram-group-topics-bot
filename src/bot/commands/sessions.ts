@@ -11,6 +11,7 @@ import {
   setCurrentAgent,
   setCurrentModel,
   setCurrentProject,
+  type ProjectInfo,
 } from "../../settings/manager.js";
 import { clearAllInteractionState } from "../../interaction/cleanup.js";
 import { INTERACTION_CLEAR_REASON } from "../../interaction/constants.js";
@@ -262,6 +263,153 @@ export async function sessionsCommand(ctx: CommandContext<Context>) {
   }
 }
 
+export interface SessionTopicTarget {
+  id: string;
+  title: string;
+}
+
+/**
+ * Opens an existing session in a freshly created forum topic bound to the
+ * given project. Returns true when the chat is a group General forum and the
+ * session was handled there, false otherwise (DM/global callers continue with
+ * their own selection flow). Shared by /sessions and /recent.
+ */
+export async function openSessionInNewTopic(
+  ctx: Context,
+  session: SessionTopicTarget,
+  project: ProjectInfo,
+  scopeKey: string,
+  scope: { threadId?: number | null } | null,
+): Promise<boolean> {
+  const inGeneralForum = Boolean(ctx.chat && isGeneralForumScope(ctx));
+  if (!inGeneralForum || !ctx.chat) {
+    return false;
+  }
+
+  const chat = ctx.chat;
+  const existingBinding = getTopicBindingBySessionId(session.id);
+  if (existingBinding && existingBinding.chatId === chat.id) {
+    const existingLink = buildTopicThreadLink(chat, existingBinding.threadId);
+    if (existingLink) {
+      clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
+      await ctx.answerCallbackQuery();
+      await ctx.reply(
+        t(BOT_I18N_KEY.SESSIONS_BOUND_TOPIC_LINK, {
+          title: session.title,
+          topic: existingBinding.topicName ?? String(existingBinding.threadId),
+          url: existingLink,
+        }),
+        getThreadSendOptions(scope?.threadId ?? null),
+      );
+      await ctx.deleteMessage().catch(() => {});
+      return true;
+    }
+  }
+
+  const createdTopic = await ctx.api.createForumTopic(
+    chat.id,
+    formatTopicTitle(
+      formatSessionDisplayTitle(session.title),
+      formatSessionDisplayTitle(session.title),
+    ),
+    {
+      icon_color: TOPIC_COLORS.BLUE,
+    },
+  );
+
+  const topicThreadId = createdTopic.message_thread_id;
+  const topicScopeKey = createScopeKeyFromParams({
+    chatId: chat.id,
+    threadId: topicThreadId,
+    context: SCOPE_CONTEXT.GROUP_TOPIC,
+  });
+
+  const sessionInfo: SessionInfo = {
+    id: session.id,
+    title: session.title,
+    directory: project.worktree,
+  };
+
+  setCurrentProject(project, topicScopeKey);
+  setCurrentSession(sessionInfo, topicScopeKey);
+  setCurrentAgent(await resolveProjectAgent(getStoredAgent(scopeKey), scopeKey), topicScopeKey);
+  setCurrentModel(getStoredModel(scopeKey), topicScopeKey);
+
+  registerTopicSessionBinding({
+    scopeKey: topicScopeKey,
+    chatId: chat.id,
+    threadId: topicThreadId,
+    sessionId: session.id,
+    projectId: project.id,
+    projectWorktree: project.worktree,
+    topicName: formatTopicTitle(session.title, session.title),
+    status: TOPIC_SESSION_STATUS.ACTIVE,
+  });
+
+  summaryAggregator.setSession(session.id);
+  clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
+  clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, topicScopeKey);
+
+  if (!pinnedMessageManager.isInitialized(topicScopeKey)) {
+    pinnedMessageManager.initialize(ctx.api, chat.id, topicScopeKey, topicThreadId);
+  }
+
+  keyboardManager.initialize(ctx.api, chat.id, topicScopeKey);
+
+  try {
+    await pinnedMessageManager.onSessionChange(session.id, session.title, topicScopeKey);
+    await pinnedMessageManager.loadContextFromHistory(
+      session.id,
+      project.worktree,
+      topicScopeKey,
+    );
+  } catch (err) {
+    logger.error("[Sessions] Error preparing topic pinned message", err);
+  }
+
+  const topicContextInfo =
+    pinnedMessageManager.getContextInfo(topicScopeKey) ??
+    keyboardManager.getContextInfo(topicScopeKey) ??
+    (pinnedMessageManager.getContextLimit(topicScopeKey) > 0
+      ? { tokensUsed: 0, tokensLimit: pinnedMessageManager.getContextLimit(topicScopeKey) }
+      : null);
+  const topicModel = getStoredModel(topicScopeKey);
+  const topicAgent = await resolveProjectAgent(getStoredAgent(topicScopeKey), topicScopeKey);
+  const variantName = formatVariantForButton(topicModel.variant || "default");
+  const topicKeyboard = createMainKeyboard(
+    topicAgent,
+    topicModel,
+    topicContextInfo ?? undefined,
+    variantName,
+  );
+
+  await ctx.api.sendMessage(
+    chat.id,
+    t(BOT_I18N_KEY.NEW_TOPIC_CREATED, { title: session.title }),
+    {
+      ...getThreadSendOptions(topicThreadId),
+      reply_markup: topicKeyboard,
+    },
+  );
+
+  const topicLink = buildTopicThreadLink(chat, topicThreadId);
+  if (!topicLink) {
+    throw new Error("Unable to build topic link");
+  }
+
+  await ctx.answerCallbackQuery();
+  await ctx.reply(
+    t(BOT_I18N_KEY.SESSIONS_CREATED_TOPIC_LINK, {
+      title: session.title,
+      topic: formatTopicTitle(session.title, session.title),
+      url: topicLink,
+    }),
+    getThreadSendOptions(scope?.threadId ?? null),
+  );
+  await ctx.deleteMessage().catch(() => {});
+  return true;
+}
+
 export async function handleSessionSelect(ctx: Context): Promise<boolean> {
   const scopeKey = getScopeKeyFromContext(ctx);
   const scope = getScopeFromContext(ctx);
@@ -329,128 +477,7 @@ export async function handleSessionSelect(ctx: Context): Promise<boolean> {
       throw error || new Error("Failed to get session details");
     }
 
-    const inGeneralForum = Boolean(ctx.chat && isGeneralForumScope(ctx));
-    if (inGeneralForum && ctx.chat) {
-      const existingBinding = getTopicBindingBySessionId(session.id);
-      if (existingBinding && existingBinding.chatId === ctx.chat.id) {
-        const existingLink = buildTopicThreadLink(ctx.chat, existingBinding.threadId);
-        if (existingLink) {
-          clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
-          await ctx.answerCallbackQuery();
-          await ctx.reply(
-            t(BOT_I18N_KEY.SESSIONS_BOUND_TOPIC_LINK, {
-              title: session.title,
-              topic: existingBinding.topicName ?? String(existingBinding.threadId),
-              url: existingLink,
-            }),
-            getThreadSendOptions(scope?.threadId ?? null),
-          );
-          await ctx.deleteMessage().catch(() => {});
-          return true;
-        }
-      }
-
-      const createdTopic = await ctx.api.createForumTopic(
-        ctx.chat.id,
-        formatTopicTitle(
-          formatSessionDisplayTitle(session.title),
-          formatSessionDisplayTitle(session.title),
-        ),
-        {
-          icon_color: TOPIC_COLORS.BLUE,
-        },
-      );
-
-      const topicThreadId = createdTopic.message_thread_id;
-      const topicScopeKey = createScopeKeyFromParams({
-        chatId: ctx.chat.id,
-        threadId: topicThreadId,
-        context: SCOPE_CONTEXT.GROUP_TOPIC,
-      });
-
-      const sessionInfo: SessionInfo = {
-        id: session.id,
-        title: session.title,
-        directory: currentProject.worktree,
-      };
-
-      setCurrentProject(currentProject, topicScopeKey);
-      setCurrentSession(sessionInfo, topicScopeKey);
-      setCurrentAgent(await resolveProjectAgent(getStoredAgent(scopeKey), scopeKey), topicScopeKey);
-      setCurrentModel(getStoredModel(scopeKey), topicScopeKey);
-
-      registerTopicSessionBinding({
-        scopeKey: topicScopeKey,
-        chatId: ctx.chat.id,
-        threadId: topicThreadId,
-        sessionId: session.id,
-        projectId: currentProject.id,
-        projectWorktree: currentProject.worktree,
-        topicName: formatTopicTitle(session.title, session.title),
-        status: TOPIC_SESSION_STATUS.ACTIVE,
-      });
-
-      summaryAggregator.setSession(session.id);
-      clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
-      clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, topicScopeKey);
-
-      if (!pinnedMessageManager.isInitialized(topicScopeKey)) {
-        pinnedMessageManager.initialize(ctx.api, ctx.chat.id, topicScopeKey, topicThreadId);
-      }
-
-      keyboardManager.initialize(ctx.api, ctx.chat.id, topicScopeKey);
-
-      try {
-        await pinnedMessageManager.onSessionChange(session.id, session.title, topicScopeKey);
-        await pinnedMessageManager.loadContextFromHistory(
-          session.id,
-          currentProject.worktree,
-          topicScopeKey,
-        );
-      } catch (err) {
-        logger.error("[Sessions] Error preparing topic pinned message", err);
-      }
-
-      const topicContextInfo =
-        pinnedMessageManager.getContextInfo(topicScopeKey) ??
-        keyboardManager.getContextInfo(topicScopeKey) ??
-        (pinnedMessageManager.getContextLimit(topicScopeKey) > 0
-          ? { tokensUsed: 0, tokensLimit: pinnedMessageManager.getContextLimit(topicScopeKey) }
-          : null);
-      const topicModel = getStoredModel(topicScopeKey);
-      const topicAgent = await resolveProjectAgent(getStoredAgent(topicScopeKey), topicScopeKey);
-      const variantName = formatVariantForButton(topicModel.variant || "default");
-      const topicKeyboard = createMainKeyboard(
-        topicAgent,
-        topicModel,
-        topicContextInfo ?? undefined,
-        variantName,
-      );
-
-      await ctx.api.sendMessage(
-        ctx.chat.id,
-        t(BOT_I18N_KEY.NEW_TOPIC_CREATED, { title: session.title }),
-        {
-          ...getThreadSendOptions(topicThreadId),
-          reply_markup: topicKeyboard,
-        },
-      );
-
-      const topicLink = buildTopicThreadLink(ctx.chat, topicThreadId);
-      if (!topicLink) {
-        throw new Error("Unable to build topic link");
-      }
-
-      await ctx.answerCallbackQuery();
-      await ctx.reply(
-        t(BOT_I18N_KEY.SESSIONS_CREATED_TOPIC_LINK, {
-          title: session.title,
-          topic: formatTopicTitle(session.title, session.title),
-          url: topicLink,
-        }),
-        getThreadSendOptions(scope?.threadId ?? null),
-      );
-      await ctx.deleteMessage().catch(() => {});
+    if (await openSessionInNewTopic(ctx, session, currentProject, scopeKey, scope)) {
       return true;
     }
 

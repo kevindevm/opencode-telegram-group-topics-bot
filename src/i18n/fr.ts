@@ -18,6 +18,7 @@ export const fr: I18nDictionary = {
   "cmd.description.commands": "Commandes personnalisées",
   "cmd.description.opencode_start": "Démarrer le serveur OpenCode",
   "cmd.description.opencode_stop": "Arrêter le serveur OpenCode",
+  "cmd.description.recent": "Voir les sessions récentes de tous les projets",
   "cmd.description.reload": "Recharger la configuration du serveur OpenCode (V2 uniquement)",
   "cmd.description.help": "Aide",
   "cmd.description.open": "Ajouter un projet en parcourant les dossiers",

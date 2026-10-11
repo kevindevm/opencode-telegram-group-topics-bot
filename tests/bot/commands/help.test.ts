@@ -51,6 +51,7 @@ describe("bot/commands/help", () => {
     expect(commands.map((item) => item.command)).toEqual([
       "start",
       "status",
+      "recent",
       "opencode_start",
       "opencode_stop",
       "help",

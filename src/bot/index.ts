@@ -17,6 +17,7 @@ import {
   VARIANT_BUTTON_TEXT_PATTERN,
 } from "./message-patterns.js";
 import { sessionsCommand, handleSessionSelect } from "./commands/sessions.js";
+import { recentCommand, handleRecentSelect } from "./commands/recent.js";
 import { createNewCommand } from "./commands/new.js";
 import { projectsCommand, handleProjectSelect } from "./commands/projects.js";
 import { openCommand, handleOpenCallback } from "./commands/open.js";
@@ -1355,6 +1356,7 @@ export function createBot(): Bot<Context> {
   bot.command(BOT_COMMAND.TASK, taskCommand);
   bot.command(BOT_COMMAND.TASKLIST, taskListCommand);
   bot.command(BOT_COMMAND.SESSIONS, sessionsCommand);
+  bot.command(BOT_COMMAND.RECENT, recentCommand);
   bot.command(BOT_COMMAND.NEW, createNewCommand({ ensureEventSubscription }));
   bot.command(BOT_COMMAND.ABORT, abortCommand);
   bot.command(BOT_COMMAND.RENAME, renameCommand);
@@ -1375,6 +1377,7 @@ export function createBot(): Bot<Context> {
     try {
       const handledInlineCancel = await handleInlineMenuCancel(ctx);
       const handledSession = await handleSessionSelect(ctx);
+      const handledRecent = await handleRecentSelect(ctx);
       const handledProject = await handleProjectSelect(ctx);
       const handledOpen = await handleOpenCallback(ctx);
       const handledTaskList = await handleTaskListCallback(ctx);
@@ -1393,12 +1396,13 @@ export function createBot(): Bot<Context> {
       });
 
       logger.debug(
-        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, session=${handledSession}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
+        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, session=${handledSession}, recent=${handledRecent}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
       );
 
       if (
         !handledInlineCancel &&
         !handledSession &&
+        !handledRecent &&
         !handledProject &&
         !handledOpen &&
         !handledTaskList &&

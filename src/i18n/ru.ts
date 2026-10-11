@@ -17,6 +17,7 @@ export const ru: I18nDictionary = {
   "cmd.description.cleanup": "Закрыть устаревшие темы",
   "cmd.description.opencode_start": "Запустить OpenCode сервер",
   "cmd.description.opencode_stop": "Остановить OpenCode сервер",
+  "cmd.description.recent": "Browse recent sessions across projects",
   "cmd.description.reload": "Reload the OpenCode server configuration (V2 only)",
   "cmd.description.help": "Справка",
   "cmd.description.open": "Добавить проект через обзор папок",
@@ -300,6 +301,11 @@ export const ru: I18nDictionary = {
   "reload.success": "✅ OpenCode configuration reloaded.",
   "reload.failed": "❌ Failed to reload the OpenCode configuration.",
   "reload.v1_not_supported": "⚠️ /reload needs an OpenCode V2 server (set OPENCODE_SERVER_VERSION=v2).",
+
+  "recent.heading": "Recent sessions across projects:",
+  "recent.empty": "📭 No recent sessions found.",
+  "recent.selected": "✅ Session selected: {title} ({project})",
+  "recent.topic_locked": "⚠️ /recent works in General or DM, not inside a session topic.",
 
   "agent.changed_callback": "Режим изменен: {name}",
   "agent.changed_message": "✅ Режим изменен на: {name}",

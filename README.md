@@ -168,6 +168,7 @@ If that works, your group workspace is ready.
 | `/new`            | Create a new session topic                              |
 | `/abort`          | Abort the current task                                  |
 | `/sessions`       | Browse and switch between recent sessions               |
+| `/recent`         | Browse recent sessions across projects                  |
 | `/projects`       | Switch between OpenCode projects                        |
 | `/tts`            | Toggle audio replies globally                           |
 | `/rename`         | Rename the current session                              |

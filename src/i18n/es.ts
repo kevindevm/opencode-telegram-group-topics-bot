@@ -17,6 +17,7 @@ export const es: I18nDictionary = {
   "cmd.description.cleanup": "Cerrar temas obsoletos",
   "cmd.description.opencode_start": "Iniciar servidor OpenCode",
   "cmd.description.opencode_stop": "Detener servidor OpenCode",
+  "cmd.description.recent": "Ver sesiones recientes de todos los proyectos",
   "cmd.description.reload": "Recargar la configuración del servidor OpenCode (solo V2)",
   "cmd.description.help": "Ayuda",
   "cmd.description.open": "Añadir proyecto navegando directorios",
@@ -310,6 +311,12 @@ export const es: I18nDictionary = {
   "reload.failed": "❌ No se pudo recargar la configuración de OpenCode.",
   "reload.v1_not_supported":
     "⚠️ /reload necesita un servidor OpenCode V2 (ajusta OPENCODE_SERVER_VERSION=v2).",
+
+  "recent.heading": "Sesiones recientes de todos los proyectos:",
+  "recent.empty": "📭 No hay sesiones recientes.",
+  "recent.selected": "✅ Sesión elegida: {title} ({project})",
+  "recent.topic_locked":
+    "⚠️ /recent funciona en General o por privado, no dentro de un topic de sesión.",
 
   "agent.changed_callback": "Modo cambiado: {name}",
   "agent.changed_message": "✅ Modo cambiado a: {name}",

@@ -23,6 +23,7 @@ export const id: I18nDictionary = {
   "cmd.description.cleanup": "Close stale topic threads",
   "cmd.description.opencode_start": "Mulai server OpenCode",
   "cmd.description.opencode_stop": "Hentikan server OpenCode",
+  "cmd.description.recent": "Browse recent sessions across projects",
   "cmd.description.reload": "Reload the OpenCode server configuration (V2 only)",
   "cmd.description.help": "Bantuan",
   "cmd.description.open": "Tambah proyek dengan menelusuri direktori",
@@ -255,6 +256,11 @@ export const id: I18nDictionary = {
   "reload.success": "✅ OpenCode configuration reloaded.",
   "reload.failed": "❌ Failed to reload the OpenCode configuration.",
   "reload.v1_not_supported": "⚠️ /reload needs an OpenCode V2 server (set OPENCODE_SERVER_VERSION=v2).",
+
+  "recent.heading": "Recent sessions across projects:",
+  "recent.empty": "📭 No recent sessions found.",
+  "recent.selected": "✅ Session selected: {title} ({project})",
+  "recent.topic_locked": "⚠️ /recent works in General or DM, not inside a session topic.",
 
   "agent.changed_callback": "Agent changed: {name}",
   "agent.changed_message": "✅ Agent diubah menjadi: {name}",
