@@ -21,6 +21,10 @@ const mocked = vi.hoisted(() => ({
   keyboardGetKeyboardMock: vi.fn(() => ({ inline_keyboard: [] })),
   keyboardUpdateContextMock: vi.fn(),
   keyboardGetContextInfoMock: vi.fn(() => null),
+  agentResolveProjectAgentMock: vi.fn(async (agent: string) => agent),
+  agentGetStoredAgentMock: vi.fn(() => "builder"),
+  modelGetStoredModelMock: vi.fn(() => ({ providerID: "openai", modelID: "gpt-5" })),
+  modelSetCurrentModelMock: vi.fn(),
   pinnedIsInitializedMock: vi.fn(() => false),
   pinnedInitializeMock: vi.fn(),
   pinnedOnSessionChangeMock: vi.fn(),
@@ -43,6 +47,20 @@ vi.mock("../../../src/opencode/client.js", () => ({
 
 vi.mock("../../../src/settings/manager.js", () => ({
   getCurrentProject: vi.fn(() => mocked.currentProject),
+  setCurrentProject: vi.fn(),
+  setCurrentAgent: vi.fn(),
+  setCurrentModel: vi.fn(),
+  getScopedSessions: vi.fn(() => ({})),
+}));
+
+vi.mock("../../../src/agent/manager.js", () => ({
+  resolveProjectAgent: mocked.agentResolveProjectAgentMock,
+  getStoredAgent: mocked.agentGetStoredAgentMock,
+}));
+
+vi.mock("../../../src/model/manager.js", () => ({
+  getStoredModel: mocked.modelGetStoredModelMock,
+  setCurrentModel: mocked.modelSetCurrentModelMock,
 }));
 
 vi.mock("../../../src/project/directory.js", () => ({
@@ -51,6 +69,11 @@ vi.mock("../../../src/project/directory.js", () => ({
 
 vi.mock("../../../src/session/manager.js", () => ({
   setCurrentSession: mocked.setCurrentSessionMock,
+}));
+
+vi.mock("../../../src/topic/manager.js", () => ({
+  getTopicBindingBySessionId: vi.fn(() => undefined),
+  registerTopicSessionBinding: vi.fn(),
 }));
 
 vi.mock("../../../src/summary/aggregator.js", () => ({
@@ -141,6 +164,7 @@ function createCallbackContext(data: string, messageId: number): Context {
       sendMessage: vi.fn().mockResolvedValue({ message_id: 888 }),
       deleteMessage: vi.fn().mockResolvedValue(true),
       editMessageText: vi.fn().mockResolvedValue(true),
+      createForumTopic: vi.fn().mockResolvedValue({ message_thread_id: 5 }),
     },
   } as unknown as Context;
 }
@@ -199,6 +223,10 @@ describe("bot/commands/sessions", () => {
     mocked.keyboardUpdateContextMock.mockReset();
     mocked.keyboardGetContextInfoMock.mockReset();
     mocked.keyboardGetContextInfoMock.mockReturnValue(null);
+    mocked.agentResolveProjectAgentMock.mockReset();
+    mocked.agentGetStoredAgentMock.mockReset();
+    mocked.modelGetStoredModelMock.mockReset();
+    mocked.modelSetCurrentModelMock.mockReset();
     mocked.pinnedIsInitializedMock.mockReset();
     mocked.pinnedIsInitializedMock.mockReturnValue(false);
     mocked.pinnedInitializeMock.mockReset();
@@ -434,5 +462,44 @@ describe("bot/commands/sessions", () => {
     expect(handled).toBe(true);
     expect(ctx.answerCallbackQuery).toHaveBeenCalled();
     expect(ctx.reply).not.toHaveBeenCalledWith(t("sessions.select_error"), expect.anything());
+  });
+
+  it("explains missing topic rights when General cannot create the session topic", async () => {
+    mocked.sessionGetMock.mockResolvedValueOnce({
+      data: {
+        id: "session-9",
+        title: "General Session",
+      },
+      error: null,
+    });
+
+    interactionManager.start(
+      {
+        kind: "inline",
+        expectedInput: "callback",
+        metadata: {
+          menuKind: "session",
+          messageId: 456,
+        },
+      },
+      "111:1",
+    );
+    const ctx = createCallbackContext("session:session-9", 456);
+    (ctx as { chat?: unknown }).chat = { id: 111, type: "supergroup", is_forum: true };
+    ((ctx.callbackQuery as { message?: unknown }).message as { message_thread_id?: number })
+      .message_thread_id = 1;
+    (
+      ctx.api.createForumTopic as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(
+      new Error(
+        "Call to 'createForumTopic' failed! (400: Bad Request: not enough rights to create a topic)",
+      ),
+    );
+
+    const handled = await handleSessionSelect(ctx);
+
+    expect(handled).toBe(true);
+    expect(ctx.reply).toHaveBeenCalledWith(t("new.topic_create_no_rights"), expect.anything());
+    expect(mocked.setCurrentSessionMock).not.toHaveBeenCalled();
   });
 });

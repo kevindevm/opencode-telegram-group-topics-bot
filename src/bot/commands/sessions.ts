@@ -306,16 +306,40 @@ export async function openSessionInNewTopic(
     }
   }
 
-  const createdTopic = await ctx.api.createForumTopic(
-    chat.id,
-    formatTopicTitle(
-      formatSessionDisplayTitle(session.title),
-      formatSessionDisplayTitle(session.title),
-    ),
-    {
-      icon_color: TOPIC_COLORS.BLUE,
-    },
-  );
+  const createdTopic = await (async () => {
+    try {
+      return await ctx.api.createForumTopic(
+        chat.id,
+        formatTopicTitle(
+          formatSessionDisplayTitle(session.title),
+          formatSessionDisplayTitle(session.title),
+        ),
+        {
+          icon_color: TOPIC_COLORS.BLUE,
+        },
+      );
+    } catch (error) {
+      logger.error("[Sessions] Error creating forum topic for existing session", error);
+      await ctx.answerCallbackQuery();
+      if (getErrorText(error).includes(TELEGRAM_ERROR_MARKER.NOT_ENOUGH_RIGHTS_CREATE_TOPIC)) {
+        await ctx.reply(
+          t(BOT_I18N_KEY.NEW_TOPIC_CREATE_NO_RIGHTS),
+          getThreadSendOptions(scope?.threadId ?? null),
+        );
+      } else {
+        await ctx.reply(
+          t(BOT_I18N_KEY.NEW_TOPIC_CREATE_ERROR),
+          getThreadSendOptions(scope?.threadId ?? null),
+        );
+      }
+      await ctx.deleteMessage().catch(() => {});
+      return null;
+    }
+  })();
+
+  if (!createdTopic) {
+    return true;
+  }
 
   const topicThreadId = createdTopic.message_thread_id;
   const topicScopeKey = createScopeKeyFromParams({
