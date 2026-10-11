@@ -2,6 +2,7 @@ import { CommandContext, Context } from "grammy";
 import { opencodeClient } from "../../opencode/client.js";
 import { classifyPromptSubmitError } from "../../opencode/prompt-submit-error.js";
 import { setCurrentSession, SessionInfo } from "../../session/manager.js";
+import { projectDirectoryExists } from "../../project/directory.js";
 import { ingestSessionInfoForCache } from "../../session/cache-manager.js";
 import {
   TOPIC_SESSION_STATUS,
@@ -151,6 +152,11 @@ export function createNewCommand(deps: NewCommandDeps) {
       const currentProject = getCurrentProject(scopeKey);
       if (!currentProject) {
         await ctx.reply(t("new.project_not_selected"));
+        return;
+      }
+
+      if (!(await projectDirectoryExists(currentProject.worktree))) {
+        await ctx.reply(t("projects.worktree_missing"));
         return;
       }
 

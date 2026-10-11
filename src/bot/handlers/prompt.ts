@@ -1,6 +1,6 @@
-import { access } from "node:fs/promises";
 import { Bot, Context } from "grammy";
 import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/v2";
+import { projectDirectoryExists } from "../../project/directory.js";
 import { opencodeClient } from "../../opencode/client.js";
 import { classifyPromptSubmitError } from "../../opencode/prompt-submit-error.js";
 import { clearSession, getCurrentSession, setCurrentSession } from "../../session/manager.js";
@@ -395,15 +395,6 @@ async function isSessionBusy(sessionId: string, directory: string): Promise<bool
     return sessionStatus.type === "busy";
   } catch (err) {
     logger.warn("[Bot] Error checking session status before prompt:", err);
-    return false;
-  }
-}
-
-async function projectDirectoryExists(directory: string): Promise<boolean> {
-  try {
-    await access(directory);
-    return true;
-  } catch {
     return false;
   }
 }

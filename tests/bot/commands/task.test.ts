@@ -7,6 +7,7 @@ import { t } from "../../../src/i18n/index.js";
 
 const mocked = vi.hoisted(() => ({
   getCurrentProjectMock: vi.fn(),
+  projectDirectoryExistsMock: vi.fn(() => Promise.resolve(true)),
   getStoredModelMock: vi.fn(),
   getStoredAgentMock: vi.fn(),
   parseTaskScheduleMock: vi.fn(),
@@ -20,6 +21,10 @@ const mocked = vi.hoisted(() => ({
 
 vi.mock("../../../src/settings/manager.js", () => ({
   getCurrentProject: mocked.getCurrentProjectMock,
+}));
+
+vi.mock("../../../src/project/directory.js", () => ({
+  projectDirectoryExists: mocked.projectDirectoryExistsMock,
 }));
 
 vi.mock("../../../src/model/manager.js", () => ({
@@ -75,6 +80,8 @@ describe("bot/commands/task", () => {
     taskCreationManager.clearAll();
     interactionManager.clear("test_setup", "-100123:77");
     mocked.getCurrentProjectMock.mockReset();
+    mocked.projectDirectoryExistsMock.mockReset();
+    mocked.projectDirectoryExistsMock.mockResolvedValue(true);
     mocked.getStoredModelMock.mockReset();
     mocked.getStoredAgentMock.mockReset();
     mocked.parseTaskScheduleMock.mockReset();
@@ -320,5 +327,15 @@ describe("bot/commands/task", () => {
 
     expect(handled).toBe(false);
     expect(taskCreationManager.isActive("-100123:77")).toBe(true);
+  });
+
+  it("answers with a notice when the current project directory is gone", async () => {
+    mocked.projectDirectoryExistsMock.mockResolvedValue(false);
+
+    const ctx = createContext("/task", 77);
+    await taskCommand(ctx as never);
+
+    expect(ctx.reply).toHaveBeenCalledWith(t("projects.worktree_missing"));
+    expect(taskCreationManager.isActive("-100123:77")).toBe(false);
   });
 });

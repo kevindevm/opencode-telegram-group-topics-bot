@@ -1,6 +1,11 @@
 import { Event, ToolState } from "@opencode-ai/sdk/v2";
 import type { CodeFileData } from "./formatter.js";
-import { normalizePathForDisplay, prepareCodeFile } from "./formatter.js";
+import {
+  formatPatchFileLine,
+  getPatchFileChanges,
+  normalizePathForDisplay,
+  prepareCodeFile,
+} from "./formatter.js";
 import type { Question } from "../question/types.js";
 import type { PermissionRequest } from "../permission/types.js";
 import type { FileChange } from "../pinned/types.js";
@@ -29,9 +34,15 @@ export interface ToolInfo {
   hasFileAttachment?: boolean;
 }
 
+export interface ToolFileEntry {
+  fileData: CodeFileData | null;
+  line?: string;
+  fileChange?: FileChange | null;
+}
+
 export interface ToolFileInfo extends ToolInfo {
   hasFileAttachment: true;
-  fileData: CodeFileData;
+  files: ToolFileEntry[];
 }
 
 type ToolCallback = (toolInfo: ToolInfo) => void;
@@ -101,9 +112,8 @@ type FileChangeCallback = (change: FileChange, sessionId: string) => void;
 
 type ClearedCallback = () => void;
 
-interface PreparedToolFileContext {
-  fileData: CodeFileData | null;
-  fileChange: FileChange | null;
+interface PreparedToolFiles {
+  files: ToolFileEntry[];
 }
 
 interface ApplyPatchSection {
@@ -1217,7 +1227,7 @@ class SummaryAggregator {
         if (!this.processedToolStates.has(completedKey)) {
           this.processedToolStates.add(completedKey);
 
-          const preparedFileContext = this.prepareToolFileContext(
+          const preparedFiles = this.prepareToolFiles(
             part.tool,
             input,
             title,
@@ -1233,22 +1243,27 @@ class SummaryAggregator {
             input,
             title,
             metadata: toolMetadata,
-            hasFileAttachment: !!preparedFileContext.fileData,
+            hasFileAttachment: preparedFiles.files.some((entry) => entry.fileData),
           };
 
-          if (preparedFileContext.fileData && this.onToolFileCallback) {
+          const filesWithData = preparedFiles.files.filter((entry) => entry.fileData);
+          if (filesWithData.length > 0 && this.onToolFileCallback) {
             logger.debug(
-              `[Aggregator] Sending ${part.tool} file: ${preparedFileContext.fileData.filename} (${preparedFileContext.fileData.buffer.length} bytes)`,
+              `[Aggregator] Sending ${part.tool} files: ${filesWithData
+                .map((entry) => entry.fileData?.filename ?? "?")
+                .join(", ")}`,
             );
             this.onToolFileCallback({
               ...toolData,
               hasFileAttachment: true,
-              fileData: preparedFileContext.fileData,
+              files: preparedFiles.files,
             });
           }
 
-          if (preparedFileContext.fileChange && this.onFileChangeCallback) {
-            this.onFileChangeCallback(preparedFileContext.fileChange, toolData.sessionId);
+          for (const entry of preparedFiles.files) {
+            if (entry.fileChange && this.onFileChangeCallback) {
+              this.onFileChangeCallback(entry.fileChange, toolData.sessionId);
+            }
           }
         }
       }
@@ -1260,12 +1275,12 @@ class SummaryAggregator {
     this.lastUpdated = Date.now();
   }
 
-  private prepareToolFileContext(
+  private prepareToolFiles(
     tool: string,
     input: { [key: string]: unknown } | undefined,
     title: string | undefined,
     metadata: { [key: string]: unknown } | undefined,
-  ): PreparedToolFileContext {
+  ): PreparedToolFiles {
     if (tool === "write" && input) {
       const filePath =
         typeof input.filePath === "string" ? normalizePathForDisplay(input.filePath) : "";
@@ -1273,16 +1288,20 @@ class SummaryAggregator {
       const content = hasContent ? (input.content as string) : "";
 
       if (!filePath || !hasContent) {
-        return { fileData: null, fileChange: null };
+        return { files: [] };
       }
 
       return {
-        fileData: prepareCodeFile(content, filePath, "write"),
-        fileChange: {
-          file: filePath,
-          additions: content.split("\n").length,
-          deletions: 0,
-        },
+        files: [
+          {
+            fileData: prepareCodeFile(content, filePath, "write"),
+            fileChange: {
+              file: filePath,
+              additions: content.split("\n").length,
+              deletions: 0,
+            },
+          },
+        ],
       };
     }
 
@@ -1297,20 +1316,40 @@ class SummaryAggregator {
       const diffText = typeof editMetadata.diff === "string" ? editMetadata.diff : "";
 
       if (!filePath || !diffText) {
-        return { fileData: null, fileChange: null };
+        return { files: [] };
       }
 
       return {
-        fileData: prepareCodeFile(diffText, filePath, "edit"),
-        fileChange: {
-          file: filePath,
-          additions: editMetadata.filediff?.additions || 0,
-          deletions: editMetadata.filediff?.deletions || 0,
-        },
+        files: [
+          {
+            fileData: prepareCodeFile(diffText, filePath, "edit"),
+            fileChange: {
+              file: filePath,
+              additions: editMetadata.filediff?.additions || 0,
+              deletions: editMetadata.filediff?.deletions || 0,
+            },
+          },
+        ],
       };
     }
 
     if (tool === "apply_patch") {
+      // Prefer the per-file list OpenCode reports: one document per changed file.
+      const patchChanges = getPatchFileChanges(metadata);
+      if (patchChanges.length > 0) {
+        return {
+          files: patchChanges.map((change) => ({
+            fileData: change.diff ? prepareCodeFile(change.diff, change.path, "edit") : null,
+            line: formatPatchFileLine(change),
+            fileChange: {
+              file: change.path,
+              additions: change.additions,
+              deletions: change.deletions,
+            },
+          })),
+        };
+      }
+
       const patchMetadata = metadata as
         | {
             filediff?: { file?: string; additions?: number; deletions?: number };
@@ -1346,7 +1385,7 @@ class SummaryAggregator {
       const diffText = matchedApplyPatchSection?.patchText || rawDiffText;
 
       if (!filePath) {
-        return { fileData: null, fileChange: null };
+        return { files: [] };
       }
 
       const fileChange = patchMetadata?.filediff
@@ -1367,12 +1406,16 @@ class SummaryAggregator {
           : null;
 
       return {
-        fileData: diffText ? prepareCodeFile(diffText, filePath, "edit") : null,
-        fileChange,
+        files: [
+          {
+            fileData: diffText ? prepareCodeFile(diffText, filePath, "edit") : null,
+            fileChange,
+          },
+        ],
       };
     }
 
-    return { fileData: null, fileChange: null };
+    return { files: [] };
   }
 
   private hashString(str: string): string {

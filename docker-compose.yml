@@ -1,0 +1,25 @@
+services:
+  opencode-group-topics-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opencode-telegram-group-topics-bot
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - NODE_ENV=production
+      - OPENCODE_API_URL=${OPENCODE_API_URL:-http://127.0.0.1:4096}
+      - OPENCODE_TELEGRAM_HOME=/app/data
+      - OPENCODE_TELEGRAM_CONTAINER=1
+    env_file:
+      - .env
+    volumes:
+      - opencode-group-topics-bot-data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  opencode-group-topics-bot-data:

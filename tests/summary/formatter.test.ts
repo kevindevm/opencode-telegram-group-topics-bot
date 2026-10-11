@@ -246,6 +246,41 @@ describe("summary/formatter", () => {
     expect(text).toBe("🩹 apply_patch README.md (+3)");
   });
 
+  it("formats a completed apply_patch with metadata.files as one line per file", () => {
+    const text = formatToolInfo({
+      sessionId: "s1",
+      messageId: "m7",
+      callId: "c7",
+      tool: "apply_patch",
+      state: { status: "completed" } as never,
+      metadata: {
+        files: [
+          { filePath: "src/a.ts", diff: "+added\n-old" },
+          { relativePath: "src/b.ts", patch: "+one\n+two" },
+          { additions: 5 },
+        ],
+      },
+    });
+
+    expect(text).toBe("🩹 apply_patch src/a.ts (+1 -1)\n🩹 apply_patch src/b.ts (+2)");
+  });
+
+  it("names only the first file without counts while apply_patch is running", () => {
+    const text = formatToolInfo({
+      sessionId: "s1",
+      messageId: "m8",
+      callId: "c8",
+      tool: "apply_patch",
+      state: { status: "running" } as never,
+      metadata: {
+        files: [{ filePath: "src/a.ts", diff: "+added" }],
+        filediff: { file: "src/a.ts", additions: 9, deletions: 9 },
+      },
+    });
+
+    expect(text).toBe("🩹 apply_patch src/a.ts");
+  });
+
   it("prepares file payloads for write/edit and skips oversized content", () => {
     const writeFile = prepareCodeFile("const x = 1;", "src/app.ts", "write");
     expect(writeFile).not.toBeNull();

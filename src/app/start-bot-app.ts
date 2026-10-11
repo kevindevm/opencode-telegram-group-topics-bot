@@ -3,11 +3,13 @@ import { readFile } from "node:fs/promises";
 
 import { cleanupBotRuntime, createBot } from "../bot/index.js";
 import { config } from "../config.js";
+import { explainServerVersionMismatch, probeOpencodeServer } from "../opencode/client.js";
 import { reconcileStoredModelSelection } from "../model/manager.js";
 import { loadSettings } from "../settings/manager.js";
 import { processManager } from "../process/manager.js";
 import { warmupSessionDirectoryCache } from "../session/cache-manager.js";
 import { createScheduledTaskRuntime } from "../scheduled-task/runtime.js";
+import { HealthServer } from "./services/health-server-service.js";
 import { getRuntimeMode } from "../runtime/mode.js";
 import { getRuntimePaths } from "../runtime/paths.js";
 import { clearServiceStateFile } from "../service/manager.js";
@@ -44,9 +46,24 @@ export async function startBotApp(): Promise<void> {
   await reconcileStoredModelSelection();
   await warmupSessionDirectoryCache();
 
+  try {
+    const probe = await probeOpencodeServer(config.opencode.serverVersion);
+    if (probe.kind === "found") {
+      logger.info(
+        `[OpenCode] Server answered as API ${probe.version} (OpenCode ${probe.serverVersion}) at ${config.opencode.apiUrl}`,
+      );
+    } else {
+      await explainServerVersionMismatch();
+    }
+  } catch (error) {
+    logger.debug("[OpenCode] Startup server probe failed", error);
+  }
+
   const bot = createBot();
   const scheduledTaskRuntime = createScheduledTaskRuntime(bot);
   scheduledTaskRuntime.start();
+  const healthServer = new HealthServer();
+  await healthServer.start(config.server.healthPort, version);
 
   let shutdownStarted = false;
   let serviceStateCleared = false;
@@ -86,6 +103,7 @@ export async function startBotApp(): Promise<void> {
     logger.info(`[App] Received ${signal}, shutting down...`);
     cleanupBotRuntime(`app_shutdown_${signal.toLowerCase()}`);
     scheduledTaskRuntime.stop();
+    void healthServer.stop();
 
     shutdownTimeout = setTimeout(() => {
       logger.warn(`[App] Shutdown did not finish in ${SHUTDOWN_TIMEOUT_MS}ms, forcing exit.`);
@@ -131,6 +149,7 @@ export async function startBotApp(): Promise<void> {
     }
     cleanupBotRuntime("app_shutdown_complete");
     scheduledTaskRuntime.stop();
+    await healthServer.stop();
     await clearManagedServiceState().catch((error) => {
       logger.warn("[App] Failed to clear managed service state", error);
     });

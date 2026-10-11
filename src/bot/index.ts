@@ -364,13 +364,20 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
         const target = getTargetBySessionId(sessionId);
         const projectWorktree = target ? getCurrentProject(target.scopeKey)?.worktree : undefined;
         const toolMessage = formatToolInfo(fileInfo, projectWorktree);
-        const caption = prepareDocumentCaption(toolMessage || fileInfo.fileData.caption);
 
         await liveStream.sealCurrentMessage(sessionId, false, true);
-        await sendSessionDocumentMessage(sessionId, {
-          ...fileInfo.fileData,
-          caption,
-        });
+        for (const entry of fileInfo.files) {
+          if (!entry.fileData) {
+            continue;
+          }
+          const caption = prepareDocumentCaption(
+            entry.line || toolMessage || entry.fileData.caption,
+          );
+          await sendSessionDocumentMessage(sessionId, {
+            ...entry.fileData,
+            caption,
+          });
+        }
       } catch (err) {
         logger.error("Failed to send file to Telegram:", err);
       }

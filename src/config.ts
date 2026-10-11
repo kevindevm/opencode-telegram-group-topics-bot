@@ -1,11 +1,11 @@
 import dotenv from "dotenv";
 import { getRuntimePaths } from "./runtime/paths.js";
+import { isContainerRuntime } from "./runtime/container.js";
+import { BOT_HEALTH_PORT_ENV, resolveHealthPort } from "./runtime/health-port.js";
 import { normalizeLocale, type Locale } from "./i18n/index.js";
 
 const runtimePaths = getRuntimePaths();
 dotenv.config({ path: runtimePaths.envFilePath, quiet: true });
-
-export type MessageFormatMode = "raw" | "markdown";
 
 function getEnvVar(key: string, required: boolean = true): string {
   const value = process.env[key];
@@ -55,6 +55,28 @@ function getOptionalLocaleEnvVar(key: string, defaultValue: Locale): Locale {
   return normalizeLocale(value, defaultValue);
 }
 
+export type MessageFormatMode = "raw" | "markdown";
+
+export type OpencodeServerVersion = "v1" | "v2";
+
+const DEFAULT_OPENCODE_API_URLS: Record<OpencodeServerVersion, string> = {
+  v1: "http://localhost:4096",
+  v2: "http://127.0.0.1:49374",
+};
+
+function getOptionalOpencodeServerVersionEnvVar(
+  key: string,
+  defaultValue: OpencodeServerVersion,
+): OpencodeServerVersion {
+  const value = getEnvVar(key, false);
+
+  if (!value) {
+    return defaultValue;
+  }
+
+  return value.trim().toLowerCase() === "v2" ? "v2" : "v1";
+}
+
 function getOptionalBooleanEnvVar(key: string, defaultValue: boolean): boolean {
   const value = getEnvVar(key, false);
 
@@ -100,7 +122,12 @@ export const config = {
     proxyUrl: getEnvVar("TELEGRAM_PROXY_URL", false),
   },
   opencode: {
-    apiUrl: getEnvVar("OPENCODE_API_URL", false) || "http://localhost:4096",
+    serverVersion: getOptionalOpencodeServerVersionEnvVar("OPENCODE_SERVER_VERSION", "v1"),
+    apiUrl:
+      getEnvVar("OPENCODE_API_URL", false) ||
+      DEFAULT_OPENCODE_API_URLS[
+        getOptionalOpencodeServerVersionEnvVar("OPENCODE_SERVER_VERSION", "v1")
+      ],
     username: getEnvVar("OPENCODE_SERVER_USERNAME", false) || "opencode",
     password: getEnvVar("OPENCODE_SERVER_PASSWORD", false),
     model: {
@@ -110,6 +137,7 @@ export const config = {
   },
   server: {
     logLevel: getEnvVar("LOG_LEVEL", false) || "info",
+    healthPort: resolveHealthPort(getEnvVar(BOT_HEALTH_PORT_ENV, false), isContainerRuntime()),
   },
   bot: {
     sessionsListLimit: getOptionalPositiveIntEnvVar("SESSIONS_LIST_LIMIT", 10),

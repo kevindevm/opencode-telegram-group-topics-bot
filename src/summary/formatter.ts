@@ -453,10 +453,12 @@ function getToolDetails(
     case "read":
     case "edit":
     case "write":
-    case "apply_patch":
       const filePath = input.path || input.filePath;
       if (typeof filePath === "string") return normalizePathForDisplay(filePath, projectWorktree);
       break;
+    case "apply_patch":
+      // Only a file path names a patch: its other input is the patch text itself
+      return getFirstPatchFileFromInput(input, projectWorktree);
     case "bash":
       if (typeof input.command === "string") return input.command;
       break;
@@ -573,6 +575,105 @@ function countDiffChangesFromText(text: string): { additions: number; deletions:
   return { additions, deletions };
 }
 
+function extractFirstFileFromPatchText(patchText: string): string {
+  const match = /^\*\*\* (?:Add|Update|Delete) File:[ \t]*(.+?)\s*$/m.exec(patchText);
+  return match?.[1] ?? "";
+}
+
+function getFirstPatchFileFromInput(
+  input: { [key: string]: unknown },
+  projectWorktree?: string,
+): string {
+  const filePath = input.path || input.filePath;
+  if (typeof filePath === "string" && filePath) {
+    return normalizePathForDisplay(filePath, projectWorktree);
+  }
+
+  const fileFromPatch =
+    typeof input.patchText === "string" ? extractFirstFileFromPatchText(input.patchText) : "";
+  return fileFromPatch ? normalizePathForDisplay(fileFromPatch, projectWorktree) : "";
+}
+
+function isPatchRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export interface PatchFileChange {
+  path: string;
+  additions: number;
+  deletions: number;
+  diff: string;
+}
+
+/** Every file a finished apply_patch changed, from the per-file list OpenCode reports. */
+export function getPatchFileChanges(
+  metadata: { [key: string]: unknown } | undefined,
+  projectWorktree?: string,
+): PatchFileChange[] {
+  if (!metadata || !Array.isArray(metadata.files)) {
+    return [];
+  }
+
+  const changes: PatchFileChange[] = [];
+  for (const entry of metadata.files) {
+    if (!isPatchRecord(entry)) {
+      continue;
+    }
+
+    const rawPath = [entry.movePath, entry.relativePath, entry.filePath, entry.file].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (!rawPath) {
+      continue;
+    }
+
+    const diff =
+      typeof entry.diff === "string"
+        ? entry.diff
+        : typeof entry.patch === "string"
+          ? entry.patch
+          : "";
+    const counts = diff
+      ? countDiffChangesFromText(diff)
+      : {
+          additions: typeof entry.additions === "number" ? entry.additions : 0,
+          deletions: typeof entry.deletions === "number" ? entry.deletions : 0,
+        };
+
+    changes.push({ path: normalizePathForDisplay(rawPath, projectWorktree), ...counts, diff });
+  }
+
+  return changes;
+}
+
+export function formatPatchFileLine(change: PatchFileChange): string {
+  return `${getToolIcon("apply_patch")} apply_patch ${change.path}${formatDiffLineInfo(change)}`;
+}
+
+function getFirstPatchFile(toolInfo: ToolInfo, projectWorktree?: string): string {
+  const [firstChange] = getPatchFileChanges(toolInfo.metadata, projectWorktree);
+  if (firstChange) {
+    return firstChange.path;
+  }
+
+  const filediff =
+    isPatchRecord(toolInfo.metadata?.filediff) &&
+    typeof toolInfo.metadata.filediff.file === "string" &&
+    toolInfo.metadata.filediff.file
+      ? (toolInfo.metadata.filediff as { file: string })
+      : undefined;
+  if (filediff?.file) {
+    return normalizePathForDisplay(filediff.file, projectWorktree);
+  }
+
+  const fileFromTitle = toolInfo.title ? extractFirstUpdatedFileFromTitle(toolInfo.title) : "";
+  if (fileFromTitle) {
+    return normalizePathForDisplay(fileFromTitle, projectWorktree);
+  }
+
+  return toolInfo.input ? getFirstPatchFileFromInput(toolInfo.input, projectWorktree) : "";
+}
+
 function extractFirstUpdatedFileFromTitle(title: string): string {
   for (const rawLine of title.split("\n")) {
     const line = rawLine.trim();
@@ -601,6 +702,15 @@ export function formatToolInfo(toolInfo: ToolInfo, projectWorktree?: string): st
     return `${toolIcon} ${tool} (${todos.length})\n\n${todosList}`;
   }
 
+  const isCompleted = "status" in toolInfo.state && toolInfo.state.status === "completed";
+
+  if (tool === "apply_patch" && isCompleted) {
+    const changes = getPatchFileChanges(toolInfo.metadata, projectWorktree);
+    if (changes.length > 0) {
+      return changes.map(formatPatchFileLine).join("\n");
+    }
+  }
+
   let details = title || getToolDetails(tool, input, projectWorktree);
   const toolIcon = getToolIcon(tool);
 
@@ -614,18 +724,7 @@ export function formatToolInfo(toolInfo: ToolInfo, projectWorktree?: string): st
   }
 
   if (tool === "apply_patch") {
-    const filediff =
-      toolInfo.metadata && "filediff" in toolInfo.metadata
-        ? (toolInfo.metadata.filediff as { file?: string })
-        : undefined;
-    if (filediff?.file) {
-      details = normalizePathForDisplay(filediff.file, projectWorktree);
-    } else if (title) {
-      const fileFromTitle = extractFirstUpdatedFileFromTitle(title);
-      if (fileFromTitle) {
-        details = normalizePathForDisplay(fileFromTitle, projectWorktree);
-      }
-    }
+    details = getFirstPatchFile(toolInfo, projectWorktree);
   }
 
   const detailsStr = details ? ` ${details}` : "";
@@ -636,8 +735,9 @@ export function formatToolInfo(toolInfo: ToolInfo, projectWorktree?: string): st
     lineInfo = ` (+${lines})`;
   }
 
+  // A patch still running or failed names its first file only, without counts
   if (
-    (tool === "edit" || tool === "apply_patch") &&
+    (tool === "edit" || (tool === "apply_patch" && isCompleted)) &&
     toolInfo.metadata &&
     "filediff" in toolInfo.metadata
   ) {
@@ -646,7 +746,7 @@ export function formatToolInfo(toolInfo: ToolInfo, projectWorktree?: string): st
     lineInfo = formatDiffLineInfo(filediff);
   }
 
-  if (tool === "apply_patch" && !lineInfo) {
+  if (tool === "apply_patch" && isCompleted && !lineInfo) {
     const diffText =
       toolInfo.metadata && typeof toolInfo.metadata.diff === "string"
         ? toolInfo.metadata.diff
@@ -669,7 +769,9 @@ export function formatCompactToolInfo(
   projectWorktree?: string,
 ): string {
   const formatted = formatToolInfo(toolInfo, projectWorktree);
-  const normalized = formatted?.replace(/\s*\n+\s*/g, " ").trim() ?? "";
+  // Like every other tool there, a patch names one target: its first file
+  const shown = toolInfo.tool === "apply_patch" ? formatted?.split("\n")[0] : formatted;
+  const normalized = shown?.replace(/\s*\n+\s*/g, " ").trim() ?? "";
 
   if (!normalized) {
     return fallback;

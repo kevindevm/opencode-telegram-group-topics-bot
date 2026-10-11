@@ -3,6 +3,7 @@ import { InlineKeyboard } from "grammy";
 import { opencodeClient } from "../../opencode/client.js";
 import { resolveProjectAgent } from "../../agent/manager.js";
 import { setCurrentSession, SessionInfo } from "../../session/manager.js";
+import { projectDirectoryExists } from "../../project/directory.js";
 import { formatSessionDisplayTitle } from "../../session/title-format.js";
 import {
   TOPIC_SESSION_STATUS,
@@ -226,6 +227,11 @@ export async function sessionsCommand(ctx: CommandContext<Context>) {
 
     if (!currentProject) {
       await ctx.reply(t("sessions.project_not_selected"));
+      return;
+    }
+
+    if (!(await projectDirectoryExists(currentProject.worktree))) {
+      await ctx.reply(t("projects.worktree_missing"));
       return;
     }
 

@@ -9,6 +9,7 @@ const mocked = vi.hoisted(() => ({
     id: "project-1",
     worktree: "/repo",
   } as { id: string; worktree: string; name?: string } | null,
+  projectDirectoryExistsMock: vi.fn(() => Promise.resolve(true)),
   sessionListMock: vi.fn(),
   sessionGetMock: vi.fn(),
   sessionMessagesMock: vi.fn(),
@@ -42,6 +43,10 @@ vi.mock("../../../src/opencode/client.js", () => ({
 
 vi.mock("../../../src/settings/manager.js", () => ({
   getCurrentProject: vi.fn(() => mocked.currentProject),
+}));
+
+vi.mock("../../../src/project/directory.js", () => ({
+  projectDirectoryExists: mocked.projectDirectoryExistsMock,
 }));
 
 vi.mock("../../../src/session/manager.js", () => ({
@@ -170,6 +175,8 @@ describe("bot/commands/sessions", () => {
       worktree: "/repo",
     };
 
+    mocked.projectDirectoryExistsMock.mockReset();
+    mocked.projectDirectoryExistsMock.mockResolvedValue(true);
     mocked.sessionListMock.mockReset();
     mocked.sessionGetMock.mockReset();
     mocked.sessionMessagesMock.mockReset();
@@ -206,6 +213,16 @@ describe("bot/commands/sessions", () => {
     mocked.pinnedRefreshContextLimitMock.mockReset();
     mocked.pinnedRefreshContextLimitMock.mockResolvedValue(undefined);
     mocked.safeBackgroundTaskMock.mockReset();
+  });
+
+  it("answers with a notice when the current project directory is gone", async () => {
+    mocked.projectDirectoryExistsMock.mockResolvedValue(false);
+
+    const ctx = createCommandContext();
+    await sessionsCommand(ctx as never);
+
+    expect(ctx.reply).toHaveBeenCalledWith(t("projects.worktree_missing"));
+    expect(mocked.sessionListMock).not.toHaveBeenCalled();
   });
 
   it("shows next-page button when sessions exceed page size", async () => {

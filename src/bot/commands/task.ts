@@ -7,6 +7,7 @@ import { CHAT_TYPE, TELEGRAM_CHAT_FIELD } from "../constants.js";
 import { buildTopicThreadLink } from "../utils/topic-link.js";
 import { t } from "../../i18n/index.js";
 import { getCurrentProject } from "../../settings/manager.js";
+import { projectDirectoryExists } from "../../project/directory.js";
 import { interactionManager } from "../../interaction/manager.js";
 import { taskCreationManager } from "../../scheduled-task/creation-manager.js";
 import { parseTaskSchedule } from "../../scheduled-task/schedule-parser.js";
@@ -122,6 +123,11 @@ export async function taskCommand(ctx: CommandContext<Context>): Promise<void> {
 
   if (!currentProject) {
     await ctx.reply(t("task.project_not_selected"));
+    return;
+  }
+
+  if (!(await projectDirectoryExists(currentProject.worktree))) {
+    await ctx.reply(t("projects.worktree_missing"));
     return;
   }
 

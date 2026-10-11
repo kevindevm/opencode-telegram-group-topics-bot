@@ -43,6 +43,7 @@ const mocked = vi.hoisted(() => ({
     threadId === null ? {} : { message_thread_id: threadId },
   ),
   registerTopicSessionBindingMock: vi.fn(),
+  projectDirectoryExistsMock: vi.fn(() => Promise.resolve(true)),
   syncTopicTitleForSessionMock: vi.fn(),
   formatTopicTitleMock: vi.fn((_topicName: string, sessionTitle: string) => sessionTitle),
   buildTopicMessageLinkMock: vi.fn(() => "https://t.me/c/123/555"),
@@ -64,6 +65,10 @@ vi.mock("../../../src/opencode/client.js", () => ({
 
 vi.mock("../../../src/session/manager.js", () => ({
   setCurrentSession: mocked.setCurrentSessionMock,
+}));
+
+vi.mock("../../../src/project/directory.js", () => ({
+  projectDirectoryExists: mocked.projectDirectoryExistsMock,
 }));
 
 vi.mock("../../../src/session/cache-manager.js", () => ({
@@ -229,6 +234,7 @@ describe("bot/commands/new", () => {
     mocked.createScopeKeyFromParamsMock.mockReset();
     mocked.getThreadSendOptionsMock.mockClear();
     mocked.registerTopicSessionBindingMock.mockReset();
+    mocked.projectDirectoryExistsMock.mockReset();
     mocked.syncTopicTitleForSessionMock.mockReset();
     mocked.formatTopicTitleMock.mockReset();
     mocked.buildTopicMessageLinkMock.mockReset();
@@ -241,6 +247,7 @@ describe("bot/commands/new", () => {
       id: "project-1",
       worktree: "/repo/culinary-commander",
     });
+    mocked.projectDirectoryExistsMock.mockResolvedValue(true);
     mocked.pinnedIsInitializedMock.mockReturnValue(false);
     mocked.pinnedOnSessionChangeMock.mockResolvedValue(undefined);
     mocked.pinnedGetContextLimitMock.mockReturnValue(0);
@@ -356,6 +363,20 @@ describe("bot/commands/new", () => {
     await command(ctx as never);
 
     expect(ctx.reply).toHaveBeenCalledWith("new.create_error");
+    expect(ctx.api.createForumTopic).not.toHaveBeenCalled();
+  });
+
+  it("answers with a notice when the current project directory is gone", async () => {
+    const ensureEventSubscription = vi.fn().mockResolvedValue(undefined);
+    const command = createNewCommand({ ensureEventSubscription });
+    const ctx = createContext();
+
+    mocked.projectDirectoryExistsMock.mockResolvedValue(false);
+
+    await command(ctx as never);
+
+    expect(ctx.reply).toHaveBeenCalledWith("projects.worktree_missing");
+    expect(mocked.sessionCreateMock).not.toHaveBeenCalled();
     expect(ctx.api.createForumTopic).not.toHaveBeenCalled();
   });
 });

@@ -948,17 +948,23 @@ describe("summary/aggregator", () => {
       sessionId: string;
       tool: string;
       hasFileAttachment: boolean;
-      fileData: {
-        filename: string;
-        buffer: Buffer;
-      };
+      files: Array<{
+        fileData: {
+          filename: string;
+          buffer: Buffer;
+        } | null;
+        line?: string;
+      }>;
     };
 
     expect(filePayload.sessionId).toBe("session-1");
     expect(filePayload.tool).toBe("apply_patch");
     expect(filePayload.hasFileAttachment).toBe(true);
-    expect(filePayload.fileData.filename).toBe("edit_one.ts.txt");
-    expect(filePayload.fileData.buffer.toString("utf8")).toContain("Edit File/Path: src/one.ts");
+    expect(filePayload.files).toHaveLength(1);
+    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_one.ts.txt");
+    expect(filePayload.files[0]?.fileData?.buffer.toString("utf8")).toContain(
+      "Edit File/Path: src/one.ts",
+    );
   });
 
   it("sends apply_patch file using title and patchText fallback", () => {
@@ -1010,15 +1016,20 @@ describe("summary/aggregator", () => {
 
     const filePayload = onToolFile.mock.calls[0][0] as {
       hasFileAttachment: boolean;
-      fileData: {
-        filename: string;
-        buffer: Buffer;
-      };
+      files: Array<{
+        fileData: {
+          filename: string;
+          buffer: Buffer;
+        } | null;
+      }>;
     };
 
     expect(filePayload.hasFileAttachment).toBe(true);
-    expect(filePayload.fileData.filename).toBe("edit_README.md.txt");
-    expect(filePayload.fileData.buffer.toString("utf8")).toContain("Edit File/Path: README.md");
+    expect(filePayload.files).toHaveLength(1);
+    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_README.md.txt");
+    expect(filePayload.files[0]?.fileData?.buffer.toString("utf8")).toContain(
+      "Edit File/Path: README.md",
+    );
   });
 
   it("limits apply_patch fallback attachment content to the matched file section", () => {
@@ -1080,17 +1091,86 @@ describe("summary/aggregator", () => {
     expect(onToolFile).toHaveBeenCalledTimes(1);
 
     const filePayload = onToolFile.mock.calls[0][0] as {
-      fileData: {
-        filename: string;
-        buffer: Buffer;
-      };
+      files: Array<{
+        fileData: {
+          filename: string;
+          buffer: Buffer;
+        } | null;
+      }>;
     };
 
-    const content = filePayload.fileData.buffer.toString("utf8");
-    expect(filePayload.fileData.filename).toBe("edit_README.md.txt");
+    const content = filePayload.files[0]?.fileData?.buffer.toString("utf8") ?? "";
+    expect(filePayload.files).toHaveLength(1);
+    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_README.md.txt");
     expect(content).toContain("Edit File/Path: README.md");
     expect(content).toContain("new readme");
     expect(content).not.toContain("src/one.ts");
     expect(content).not.toContain("new code");
+  });
+
+  it("sends one line and one document per file for apply_patch metadata.files", () => {
+    const onToolFile = vi.fn();
+    summaryAggregator.setOnToolFile(onToolFile);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-4",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-4",
+          sessionID: "session-1",
+          messageID: "message-4",
+          type: "tool",
+          callID: "call-apply-patch-files",
+          tool: "apply_patch",
+          state: {
+            status: "completed",
+            metadata: {
+              files: [
+                {
+                  filePath: "src/a.ts",
+                  diff: ["@@ -1,1 +1,2 @@", " old", "+new"].join("\n"),
+                },
+                {
+                  relativePath: "src/b.ts",
+                  patch: ["@@ -1,1 +1,2 @@", " old", "+new"].join("\n"),
+                },
+              ],
+            },
+          },
+        },
+      },
+    } as unknown as Event);
+
+    expect(onToolFile).toHaveBeenCalledTimes(1);
+
+    const filePayload = onToolFile.mock.calls[0][0] as {
+      hasFileAttachment: boolean;
+      files: Array<{
+        fileData: { filename: string; buffer: Buffer } | null;
+        line?: string;
+      }>;
+    };
+
+    expect(filePayload.hasFileAttachment).toBe(true);
+    expect(filePayload.files).toHaveLength(2);
+    expect(filePayload.files[0]?.line).toBe("🩹 apply_patch src/a.ts (+1)");
+    expect(filePayload.files[1]?.line).toBe("🩹 apply_patch src/b.ts (+1)");
+    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_a.ts.txt");
+    expect(filePayload.files[1]?.fileData?.filename).toBe("edit_b.ts.txt");
+    expect(filePayload.files[0]?.fileData?.buffer.toString("utf8")).not.toContain("src/b.ts");
+    expect(filePayload.files[1]?.fileData?.buffer.toString("utf8")).not.toContain("src/a.ts");
   });
 });

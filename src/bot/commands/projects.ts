@@ -2,6 +2,7 @@ import { CommandContext, Context } from "grammy";
 import { InlineKeyboard } from "grammy";
 import { getCurrentProject } from "../../settings/manager.js";
 import { getProjects } from "../../project/manager.js";
+import { filterProjectsWithExistingDirectories } from "../../project/directory.js";
 import { syncSessionDirectoryCache } from "../../session/cache-manager.js";
 import { clearAllInteractionState } from "../../interaction/cleanup.js";
 import { INTERACTION_CLEAR_REASON } from "../../interaction/constants.js";
@@ -260,7 +261,7 @@ export async function projectsCommand(ctx: CommandContext<Context>) {
     }
 
     await syncSessionDirectoryCache();
-    const projects = await getProjects();
+    const projects = await filterProjectsWithExistingDirectories(await getProjects());
 
     if (projects.length === 0) {
       await ctx.reply(t("projects.empty"));
@@ -306,7 +307,11 @@ export async function handleProjectSelect(ctx: Context): Promise<boolean> {
     }
 
     try {
-      const projects = getVisibleProjectsForScope(ctx, await getProjects(), scopeKey);
+      const projects = getVisibleProjectsForScope(
+        ctx,
+        await filterProjectsWithExistingDirectories(await getProjects()),
+        scopeKey,
+      );
       if (projects.length === 0) {
         await ctx.answerCallbackQuery();
         await ctx.reply(t("projects.empty"), getThreadSendOptions(scope?.threadId ?? null));
@@ -347,7 +352,11 @@ export async function handleProjectSelect(ctx: Context): Promise<boolean> {
   }
 
   try {
-    const projects = getVisibleProjectsForScope(ctx, await getProjects(), scopeKey);
+    const projects = getVisibleProjectsForScope(
+      ctx,
+      await filterProjectsWithExistingDirectories(await getProjects()),
+      scopeKey,
+    );
     const selectedProject = projects.find((p) => p.id === projectId);
 
     if (!selectedProject) {

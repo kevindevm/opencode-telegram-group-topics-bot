@@ -295,7 +295,7 @@ class PinnedMessageManager {
 
       if (!error && data && data.length > 0) {
         context.state.changedFiles = data.map((d) => ({
-          file: d.file,
+          file: d.file ?? "",
           additions: d.additions,
           deletions: d.deletions,
         }));

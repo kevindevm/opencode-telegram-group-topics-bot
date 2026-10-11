@@ -15,7 +15,7 @@ The app works as a bridge between Telegram and a locally running OpenCode server
 - The app listens to OpenCode SSE events
 - Results are aggregated and sent back in Telegram-friendly format
 
-No public inbound ports are required for normal usage.
+No public inbound ports are required for normal usage. The optional loopback health endpoint (`BOT_HEALTH_PORT`; off by default, `3100` in the Docker image) binds to `127.0.0.1` only.
 
 ## Target Usage Scenario
 
@@ -90,6 +90,7 @@ No public inbound ports are required for normal usage.
 - Configurable max code file size in KB (default: 100)
 - Optional STT settings for voice transcription (`STT_API_URL`, `STT_API_KEY`, `STT_MODEL`, `STT_LANGUAGE`)
 - Optional TTS credentials for global audio replies (`TTS_API_URL`, `TTS_API_KEY`, `TTS_MODEL`, `TTS_VOICE`); reply behavior is toggled with `/tts`
+- Optional loopback health endpoint for Docker and orchestrators (`BOT_HEALTH_PORT`; off by default, `3100` in the Docker image)
 
 ## Current Product Scope
 
@@ -169,6 +170,8 @@ Open tasks for upcoming iterations:
 - [x] Support sending text files from Telegram to OpenCode (code, configs, etc.)
 - [x] Add scheduled tasks
 - [ ] Provide a Docker image and basic container deployment guide
+  - [x] `Dockerfile` + `docker-compose.yml` (+ Desktop override) with loopback health endpoint and `HEALTHCHECK`
+  - [x] Multi-arch GHCR publishing (`linux/amd64`, `linux/arm64`) via `container-image.yml`
 - [x] Add voice transcription
 
 ## Possible Improvements

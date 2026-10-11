@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 
-Languages: English (`en`), Deutsch (`de`), Espanol (`es`), Francais (`fr`), Russkiy (`ru`), [Jian ti Zhong wen (`zh-CN` 中文说明)](./README.zh-CN.md)
+Languages: English (`en`), Deutsch (`de`), Espanol (`es`), Francais (`fr`), Bahasa Indonesia (`id`), Russkiy (`ru`), Türkçe (`tr`), [Jian ti Zhong wen (`zh-CN` 中文说明)](./README.zh-CN.md)
 
 A Telegram bot for [OpenCode](https://opencode.ai) that turns one Telegram supergroup into a multi-session mobile workspace.
 
@@ -91,6 +91,34 @@ npm run dev
 ```
 
 `dist/cli.js` is the compiled CLI entrypoint produced by `npm run build`.
+
+#### Option D: Docker
+
+```bash
+git clone https://github.com/shanekunz/opencode-telegram-group-topics-bot.git
+cd opencode-telegram-group-topics-bot
+cp .env.example .env
+# fill in TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID, OPENCODE_MODEL_PROVIDER, OPENCODE_MODEL_ID
+docker compose up -d --build
+```
+
+`.env` stays on the host. It is injected at runtime and is not copied into the image.
+
+Config and runtime state live in the `opencode-group-topics-bot-data` volume (`OPENCODE_TELEGRAM_HOME=/app/data` inside the container).
+
+**Linux** (OpenCode on the host at `127.0.0.1:4096`): the default compose file uses `network_mode: host`, so the container reaches your host OpenCode server and sees the same project paths.
+
+**Docker Desktop** (macOS/Windows): host networking is unavailable, so use the override file, which reaches OpenCode through `host.docker.internal`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.desktop.yml up -d --build
+```
+
+Note that on Docker Desktop the container cannot see host project paths or spawn `opencode` itself: run `opencode serve` on the host and prefer `/projects` paths that resolve inside the container (mount your repos with an extra `volumes` entry if needed). `/opencode_start` and `/opencode_stop` are host-only features.
+
+#### Published container images
+
+Stable releases are published to `ghcr.io/shanekunz/opencode-telegram-group-topics-bot:<version>` and `ghcr.io/shanekunz/opencode-telegram-group-topics-bot:latest` for `linux/amd64` and `linux/arm64`. Release candidates receive only their exact version tag. After the first package is created, set its GHCR visibility to public in the repository's Packages settings.
 
 ### 5. Complete the Setup Wizard
 
@@ -189,7 +217,7 @@ Installed-mode config paths:
 | `OPENCODE_SERVER_PASSWORD`         | Server auth password                                                                 |    No    | -                        |
 | `OPENCODE_MODEL_PROVIDER`          | Default model provider                                                               |   Yes    | `opencode`               |
 | `OPENCODE_MODEL_ID`                | Default model ID                                                                     |   Yes    | `big-pickle`             |
-| `BOT_LOCALE`                       | Bot UI language (`en`, `de`, `es`, `fr`, `ru`, `zh`)                                 |    No    | `en`                     |
+| `BOT_LOCALE`                       | Bot UI language (`en`, `de`, `es`, `fr`, `id`, `ru`, `tr`, `zh`)                         |    No    | `en`                     |
 | `SESSIONS_LIST_LIMIT`              | Sessions per page in `/sessions`                                                     |    No    | `10`                     |
 | `PROJECTS_LIST_LIMIT`              | Projects per page in `/projects`                                                     |    No    | `10`                     |
 | `COMMANDS_LIST_LIMIT`              | Commands per page in `/commands`                                                     |    No    | `10`                     |
@@ -210,6 +238,7 @@ Installed-mode config paths:
 | `TTS_MODEL`                        | TTS model name passed to `/audio/speech`                                             |    No    | `gpt-4o-mini-tts`        |
 | `TTS_VOICE`                        | OpenAI-compatible TTS voice name                                                     |    No    | `alloy`                  |
 | `LOG_LEVEL`                        | Log level (`debug`, `info`, `warn`, `error`)                                         |    No    | `info`                   |
+| `BOT_HEALTH_PORT`                  | Port of the internal health endpoint (`/health`, `/health/live`, `/health/ready`) on `127.0.0.1`; `0` disables it | No | off; `3100` in Docker |
 
 Keep your `.env` private. It contains your bot token.
 
@@ -259,7 +288,7 @@ To add favorites, open the OpenCode TUI and press `Cmd+F` / `Ctrl+F` on a model.
 
 Only the Telegram user whose ID matches `TELEGRAM_ALLOWED_USER_ID` can use the bot.
 
-Since the bot runs locally and connects to your local OpenCode server, there is no exposed public service beyond Telegram itself.
+Since the bot runs locally and connects to your local OpenCode server, there is no exposed public service beyond Telegram itself. The optional health endpoint (`BOT_HEALTH_PORT`) binds to `127.0.0.1` only and serves read-only status.
 
 ## Development
 
