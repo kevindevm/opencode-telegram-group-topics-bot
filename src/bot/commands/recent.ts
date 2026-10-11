@@ -151,12 +151,8 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
 
     let project = getCurrentProject(scopeKey);
     if (!project) {
-      await ctx.answerCallbackQuery();
-      await ctx.reply(
-        t("sessions.select_project_first"),
-        getThreadSendOptions(scope?.threadId ?? null),
-      );
-      return true;
+      await switchToProject(ctx, entry.project, INTERACTION_CLEAR_REASON.PROJECT_SWITCHED);
+      project = entry.project;
     }
 
     if (project.worktree !== entry.directory) {

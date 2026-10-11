@@ -203,4 +203,18 @@ describe("bot/commands/recent", () => {
     expect(mocked.switchToProjectMock).toHaveBeenCalledTimes(1);
     expect(mocked.openSessionInNewTopicMock).toHaveBeenCalledTimes(1);
   });
+
+  it("adopts the entry project when none is selected", async () => {
+    mocked.getCurrentProjectMock.mockReturnValue(null);
+    const ctx = createCallbackContext("recent:s1");
+
+    await expect(handleRecentSelect(ctx as never)).resolves.toBe(true);
+
+    expect(mocked.switchToProjectMock).toHaveBeenCalledTimes(1);
+    expect(mocked.openSessionInNewTopicMock).toHaveBeenCalledTimes(1);
+    expect(ctx.reply).not.toHaveBeenCalledWith(
+      t("sessions.select_project_first"),
+      expect.anything(),
+    );
+  });
 });
