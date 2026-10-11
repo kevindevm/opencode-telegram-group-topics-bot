@@ -1,6 +1,7 @@
 import { CommandContext, Context } from "grammy";
 import { opencodeClient } from "../../opencode/client.js";
 import { getCurrentSession } from "../../session/manager.js";
+import { formatSessionDisplayTitle } from "../../session/title-format.js";
 import { getCurrentProject, isTtsEnabled } from "../../settings/manager.js";
 import { fetchCurrentAgent } from "../../agent/manager.js";
 import { getAgentDisplayName } from "../../agent/types.js";
@@ -90,7 +91,11 @@ export async function statusCommand(ctx: CommandContext<Context>) {
 
     // Add model information
     const currentModel = fetchCurrentModel(scopeKey);
-    const modelDisplay = formatModelForDisplay(currentModel.providerID, currentModel.modelID);
+    const modelDisplay = formatModelForDisplay(
+      currentModel.providerID,
+      currentModel.modelID,
+      currentModel.variant,
+    );
     message += `${t("status.line.model", { model: modelDisplay })}\n`;
 
     const currentProject = getCurrentProject(scopeKey);
@@ -104,7 +109,7 @@ export async function statusCommand(ctx: CommandContext<Context>) {
 
     const currentSession = getCurrentSession(scopeKey);
     if (currentSession) {
-      message += `\n${t("status.session_selected", { title: currentSession.title })}\n`;
+      message += `\n${t("status.session_selected", { title: formatSessionDisplayTitle(currentSession.title) })}\n`;
     } else {
       message += `\n${t("status.session_not_selected")}\n`;
       message += t("status.session_hint");

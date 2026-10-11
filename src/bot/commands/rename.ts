@@ -1,6 +1,7 @@
 import { CommandContext, Context, InlineKeyboard } from "grammy";
 import { opencodeClient } from "../../opencode/client.js";
 import { getCurrentSession, setCurrentSession } from "../../session/manager.js";
+import { formatSessionDisplayTitle } from "../../session/title-format.js";
 import { renameManager } from "../../rename/manager.js";
 import { interactionManager } from "../../interaction/manager.js";
 import { INTERACTION_CLEAR_REASON } from "../../interaction/constants.js";
@@ -58,7 +59,7 @@ export async function renameCommand(ctx: CommandContext<Context>): Promise<void>
 
     const keyboard = new InlineKeyboard().text(t("rename.button.cancel"), "rename:cancel");
 
-    const message = await ctx.reply(t("rename.prompt", { title: displayedTitle }), {
+    const message = await ctx.reply(t("rename.prompt", { title: formatSessionDisplayTitle(displayedTitle) }), {
       reply_markup: keyboard,
       ...getThreadSendOptions(scope?.threadId ?? null),
     });

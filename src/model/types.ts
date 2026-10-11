@@ -42,8 +42,17 @@ export function formatModelForButton(providerID: string, modelID: string): strin
  * Format model for display in messages (full format)
  * @param providerID Provider ID
  * @param modelID Model ID
- * @returns Formatted string "providerID / modelID"
+ * @param variant Optional variant ID (shown as "provider / model (variant)")
+ * @returns Formatted string "providerID / modelID" with optional variant suffix
  */
-export function formatModelForDisplay(providerID: string, modelID: string): string {
-  return `${providerID} / ${modelID}`;
+export function formatModelForDisplay(
+  providerID: string,
+  modelID: string,
+  variant?: string | null,
+): string {
+  const name = `${providerID} / ${modelID}`;
+  if (variant) {
+    return `${name} (${variant})`;
+  }
+  return name;
 }

@@ -492,7 +492,9 @@ class PinnedMessageManager {
     const currentModel = getStoredModel(scopeKey);
     const modelName =
       currentModel.providerID && currentModel.modelID
-        ? `${currentModel.providerID}/${currentModel.modelID}`
+        ? currentModel.variant
+          ? `${currentModel.providerID}/${currentModel.modelID} (${currentModel.variant})`
+          : `${currentModel.providerID}/${currentModel.modelID}`
         : t("pinned.unknown");
     const projectDisplayName = state.projectBranch
       ? `${state.projectName}: ${state.projectBranch}`

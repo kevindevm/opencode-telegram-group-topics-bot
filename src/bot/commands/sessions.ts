@@ -3,6 +3,7 @@ import { InlineKeyboard } from "grammy";
 import { opencodeClient } from "../../opencode/client.js";
 import { resolveProjectAgent } from "../../agent/manager.js";
 import { setCurrentSession, SessionInfo } from "../../session/manager.js";
+import { formatSessionDisplayTitle } from "../../session/title-format.js";
 import {
   TOPIC_SESSION_STATUS,
   getCurrentProject,
@@ -345,7 +346,10 @@ export async function handleSessionSelect(ctx: Context): Promise<boolean> {
 
       const createdTopic = await ctx.api.createForumTopic(
         ctx.chat.id,
-        formatTopicTitle(session.title, session.title),
+        formatTopicTitle(
+          formatSessionDisplayTitle(session.title),
+          formatSessionDisplayTitle(session.title),
+        ),
         {
           icon_color: TOPIC_COLORS.BLUE,
         },

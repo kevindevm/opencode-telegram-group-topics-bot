@@ -38,8 +38,14 @@ export async function downloadTelegramFile(api: Api, fileId: string): Promise<Do
 
   // Use proxy if configured
   if (config.telegram.proxyUrl) {
-    const { HttpsProxyAgent } = await import("https-proxy-agent");
-    fetchOptions.agent = new HttpsProxyAgent(config.telegram.proxyUrl);
+    const proxyUrl = config.telegram.proxyUrl;
+    if (proxyUrl.startsWith("socks")) {
+      const { SocksProxyAgent } = await import("socks-proxy-agent");
+      fetchOptions.agent = new SocksProxyAgent(proxyUrl);
+    } else {
+      const { HttpsProxyAgent } = await import("https-proxy-agent");
+      fetchOptions.agent = new HttpsProxyAgent(proxyUrl);
+    }
   }
 
   const response = await fetch(fileUrl, fetchOptions);

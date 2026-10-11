@@ -34,6 +34,7 @@ import { TOPIC_COLORS } from "../../topic/colors.js";
 import { registerTopicSessionBinding } from "../../topic/manager.js";
 import { syncTopicTitleForSession } from "../../topic/title-sync.js";
 import { formatTopicTitle } from "../../topic/title-format.js";
+import { formatSessionDisplayTitle } from "../../session/title-format.js";
 import {
   BOT_I18N_KEY,
   CHAT_TYPE,
@@ -168,7 +169,10 @@ export function createNewCommand(deps: NewCommandDeps) {
       }
 
       const initialPrompt = parseNewCommandPrompt(ctx);
-      const topicTitle = formatTopicTitle(session.title, session.title);
+      const topicTitle = formatTopicTitle(
+        formatSessionDisplayTitle(session.title),
+        formatSessionDisplayTitle(session.title),
+      );
 
       const createdTopic = await (async () => {
         try {
@@ -262,7 +266,7 @@ export function createNewCommand(deps: NewCommandDeps) {
 
       const topicReadyMessage = await ctx.api.sendMessage(
         ctx.chat!.id,
-        t(BOT_I18N_KEY.NEW_TOPIC_CREATED, { title: session.title }),
+        t(BOT_I18N_KEY.NEW_TOPIC_CREATED, { title: formatSessionDisplayTitle(session.title) }),
         {
           ...getThreadSendOptions(topicThreadId),
           reply_markup: keyboard,
