@@ -17,6 +17,7 @@ export const ru: I18nDictionary = {
   "cmd.description.cleanup": "Закрыть устаревшие темы",
   "cmd.description.opencode_start": "Запустить OpenCode сервер",
   "cmd.description.opencode_stop": "Остановить OpenCode сервер",
+  "cmd.description.reload": "Reload the OpenCode server configuration (V2 only)",
   "cmd.description.help": "Справка",
   "cmd.description.open": "Добавить проект через обзор папок",
 
@@ -294,6 +295,11 @@ export const ru: I18nDictionary = {
   "opencode_stop.success": "✅ OpenCode Server успешно остановлен",
   "opencode_stop.error":
     "🔴 Произошла ошибка при остановке сервера.\n\nПроверьте логи приложения для подробностей.",
+
+  "reload.reloading": "🔄 Reloading OpenCode configuration…",
+  "reload.success": "✅ OpenCode configuration reloaded.",
+  "reload.failed": "❌ Failed to reload the OpenCode configuration.",
+  "reload.v1_not_supported": "⚠️ /reload needs an OpenCode V2 server (set OPENCODE_SERVER_VERSION=v2).",
 
   "agent.changed_callback": "Режим изменен: {name}",
   "agent.changed_message": "✅ Режим изменен на: {name}",

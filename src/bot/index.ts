@@ -25,6 +25,7 @@ import { handleTaskListCallback, taskListCommand } from "./commands/tasklist.js"
 import { abortCommand } from "./commands/abort.js";
 import { opencodeStartCommand } from "./commands/opencode-start.js";
 import { opencodeStopCommand } from "./commands/opencode-stop.js";
+import { reloadCommand } from "./commands/reload.js";
 import { renameCommand, handleRenameCancel, handleRenameTextAnswer } from "./commands/rename.js";
 import {
   commandsCommand,
@@ -1348,6 +1349,7 @@ export function createBot(): Bot<Context> {
   bot.command(BOT_COMMAND.TTS, ttsCommand);
   bot.command(BOT_COMMAND.OPENCODE_START, opencodeStartCommand);
   bot.command(BOT_COMMAND.OPENCODE_STOP, opencodeStopCommand);
+  bot.command(BOT_COMMAND.RELOAD, reloadCommand);
   bot.command(BOT_COMMAND.PROJECTS, projectsCommand);
   bot.command(BOT_COMMAND.OPEN, openCommand);
   bot.command(BOT_COMMAND.TASK, taskCommand);

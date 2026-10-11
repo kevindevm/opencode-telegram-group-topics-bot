@@ -16,6 +16,7 @@ export const en = {
   "cmd.description.cleanup": "Close stale topic threads",
   "cmd.description.opencode_start": "Start OpenCode server",
   "cmd.description.opencode_stop": "Stop OpenCode server",
+  "cmd.description.reload": "Reload the OpenCode server configuration (V2 only)",
   "cmd.description.help": "Help",
   "cmd.description.open": "Add a project by browsing directories",
 
@@ -331,6 +332,12 @@ export const en = {
   "opencode_stop.success": "✅ OpenCode Server stopped successfully",
   "opencode_stop.error":
     "🔴 An error occurred while stopping server.\n\nCheck application logs for details.",
+
+  "reload.reloading": "🔄 Reloading OpenCode configuration…",
+  "reload.success": "✅ OpenCode configuration reloaded.",
+  "reload.failed": "❌ Failed to reload the OpenCode configuration.",
+  "reload.v1_not_supported":
+    "⚠️ /reload needs an OpenCode V2 server (set OPENCODE_SERVER_VERSION=v2).",
 
   "agent.changed_callback": "Agent changed: {name}",
   "agent.changed_message": "✅ Agent changed to: {name}",

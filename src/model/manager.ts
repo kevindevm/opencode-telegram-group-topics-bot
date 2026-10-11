@@ -293,6 +293,19 @@ export function __resetModelCatalogCacheForTests(): void {
   modelCatalogFetchInFlight = null;
 }
 
+/** Drops the cached catalog so the next read refetches it from the server. */
+export function resetModelCatalogCache(): void {
+  cachedValidModelKeys = null;
+  modelCatalogCacheExpiresAt = 0;
+  modelCatalogFetchInFlight = null;
+}
+
+/** Refetches the model catalog and reconciles stored scoped selections. */
+export async function refreshModelCatalog(): Promise<void> {
+  resetModelCatalogCache();
+  await reconcileStoredModelSelection();
+}
+
 /**
  * Get list of favorite models from OpenCode local state file
  * Falls back to env default model if file is unavailable or empty

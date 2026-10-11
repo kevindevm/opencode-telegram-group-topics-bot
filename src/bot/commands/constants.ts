@@ -16,6 +16,7 @@ export const BOT_COMMAND = {
   SKILLS: "skills",
   OPENCODE_START: "opencode_start",
   OPENCODE_STOP: "opencode_stop",
+  RELOAD: "reload",
 } as const;
 
 export type BotCommandName = (typeof BOT_COMMAND)[keyof typeof BOT_COMMAND];

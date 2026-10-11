@@ -17,6 +17,7 @@ export const de: I18nDictionary = {
   "cmd.description.cleanup": "Veraltete Themen schließen",
   "cmd.description.opencode_start": "OpenCode-Server starten",
   "cmd.description.opencode_stop": "OpenCode-Server stoppen",
+  "cmd.description.reload": "Reload the OpenCode server configuration (V2 only)",
   "cmd.description.help": "Hilfe",
   "cmd.description.open": "Projekt durch Ordner-Auswahl hinzufügen",
 
@@ -304,6 +305,11 @@ export const de: I18nDictionary = {
   "opencode_stop.success": "✅ OpenCode-Server erfolgreich gestoppt",
   "opencode_stop.error":
     "🔴 Beim Stoppen des Servers ist ein Fehler aufgetreten.\n\nSiehe Anwendungslogs für Details.",
+
+  "reload.reloading": "🔄 Reloading OpenCode configuration…",
+  "reload.success": "✅ OpenCode configuration reloaded.",
+  "reload.failed": "❌ Failed to reload the OpenCode configuration.",
+  "reload.v1_not_supported": "⚠️ /reload needs an OpenCode V2 server (set OPENCODE_SERVER_VERSION=v2).",
 
   "agent.changed_callback": "Modus geändert: {name}",
   "agent.changed_message": "✅ Modus geändert zu: {name}",

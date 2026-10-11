@@ -176,6 +176,7 @@ If that works, your group workspace is ready.
 | `/tasklist`       | List and delete scheduled tasks for the current project |
 | `/opencode_start` | Start the OpenCode server remotely                      |
 | `/opencode_stop`  | Stop the OpenCode server remotely                       |
+| `/reload`         | Reload the OpenCode server config (V2 only)             |
 | `/help`           | Show available commands                                 |
 
 Any normal text message in a session topic is treated as a prompt when no blocking interaction is active.
