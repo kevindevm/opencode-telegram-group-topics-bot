@@ -18,13 +18,16 @@ const mocked = vi.hoisted(() => ({
   getTopicBindingByScopeKeyMock: vi.fn(),
   safeBackgroundTaskMock: vi.fn(),
   sessionStatusMock: vi.fn(),
+  sessionGetMock: vi.fn(),
   sessionPromptAsyncMock: vi.fn(),
+  setCurrentModelMock: vi.fn(),
 }));
 
 vi.mock("../../../src/opencode/client.js", () => ({
   opencodeClient: {
     session: {
       status: mocked.sessionStatusMock,
+      get: mocked.sessionGetMock,
       create: vi.fn(),
       promptAsync: mocked.sessionPromptAsyncMock,
     },
@@ -45,6 +48,7 @@ vi.mock("../../../src/session/cache-manager.js", () => ({
 vi.mock("../../../src/settings/manager.js", () => ({
   getCurrentProject: mocked.getCurrentProjectMock,
   isTtsEnabled: mocked.isTtsEnabledMock,
+  setCurrentModel: mocked.setCurrentModelMock,
 }));
 
 vi.mock("../../../src/agent/manager.js", () => ({
@@ -182,7 +186,12 @@ describe("bot/handlers/prompt", () => {
     mocked.getTopicBindingByScopeKeyMock.mockReset();
     mocked.safeBackgroundTaskMock.mockReset();
     mocked.sessionStatusMock.mockReset();
+    mocked.sessionGetMock.mockReset();
     mocked.sessionPromptAsyncMock.mockReset();
+    mocked.setCurrentModelMock.mockReset();
+
+    process.env.OPENCODE_MODEL_PROVIDER = "opencode";
+    process.env.OPENCODE_MODEL_ID = "big-pickle";
 
     mocked.getCurrentProjectMock.mockReturnValue({ id: "project-1", worktree: "/repo/app" });
     mocked.isTtsEnabledMock.mockReturnValue(false);
@@ -200,6 +209,14 @@ describe("bot/handlers/prompt", () => {
     mocked.getTopicBindingByScopeKeyMock.mockReturnValue({ sessionId: "session-1" });
     mocked.sessionStatusMock.mockResolvedValue({
       data: { "session-1": { type: "idle" } },
+      error: null,
+    });
+    mocked.sessionGetMock.mockResolvedValue({
+      data: {
+        id: "session-1",
+        title: "Session",
+        model: { providerID: "openai", id: "gpt-5", variant: "fast" },
+      },
       error: null,
     });
     mocked.sessionPromptAsyncMock.mockResolvedValue({ error: null });
@@ -317,5 +334,40 @@ describe("bot/handlers/prompt", () => {
 
     expect(consumePromptResponseMode("session-1")).toBe("text_and_tts");
     expect(mocked.isTtsEnabledMock).toHaveBeenCalledWith();
+  });
+
+  it("keeps the live model of an existing session when scope still has the configured default", async () => {
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.getStoredModelMock.mockReturnValue({
+      providerID: "opencode",
+      modelID: "big-pickle",
+      variant: "default",
+    });
+    mocked.sessionGetMock.mockResolvedValueOnce({
+      data: {
+        id: "session-1",
+        title: "Session",
+        model: { providerID: "openai", id: "gpt-5.5", variant: "default" },
+      },
+      error: null,
+    });
+
+    const ctx = createContext();
+
+    await processUserPrompt(ctx, "Test", {
+      bot: {} as Bot<Context>,
+      ensureEventSubscription: vi.fn(),
+    });
+
+    expect(mocked.setCurrentModelMock).toHaveBeenCalledWith(
+      { providerID: "openai", modelID: "gpt-5.5", variant: "default" },
+      "-100123:555",
+    );
+    expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: { providerID: "openai", modelID: "gpt-5.5" },
+        variant: "default",
+      }),
+    );
   });
 });

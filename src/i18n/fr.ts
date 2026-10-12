@@ -20,6 +20,19 @@ export const fr: I18nDictionary = {
   "cmd.description.opencode_stop": "Arrêter le serveur OpenCode",
   "cmd.description.recent": "Voir les sessions récentes de tous les projets",
   "cmd.description.reload": "Recharger la configuration du serveur OpenCode (V2 uniquement)",
+  "refresh.last_message": "📋 Last message: {preview}",
+  "refresh.subscribed": "✅ Subscribed to session events",
+  "refresh.no_topic": "⚠️ No topic linked",
+
+  "pcuser.echo": "🧑 {text}",
+
+  "background.session_fallback": "session {id}",
+  "background.assistant_response": "🔔 Assistant replied in background session: {session}",
+  "background.question_asked": "❓ Background session needs an answer: {session}",
+  "background.permission_asked": "🔐 Background session requested permissions: {session}",
+  "background.open_session_button": "Open session",
+    "cmd.description.refresh": "Refresh session information",
+
   "cmd.description.help": "Aide",
   "cmd.description.open": "Ajouter un projet en parcourant les dossiers",
   "common.unknown": "inconnu",

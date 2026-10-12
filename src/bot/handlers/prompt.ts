@@ -4,11 +4,12 @@ import { projectDirectoryExists } from "../../project/directory.js";
 import { opencodeClient } from "../../opencode/client.js";
 import { classifyPromptSubmitError } from "../../opencode/prompt-submit-error.js";
 import { clearSession, getCurrentSession, setCurrentSession } from "../../session/manager.js";
+import { markForwardedPrompt } from "../../session/forwarded-prompts.js";
 import { ingestSessionInfoForCache } from "../../session/cache-manager.js";
-import { getCurrentProject } from "../../settings/manager.js";
-import { isTtsEnabled } from "../../settings/manager.js";
+import { getCurrentProject, isTtsEnabled, setCurrentModel } from "../../settings/manager.js";
 import { getStoredAgent, resolveProjectAgent } from "../../agent/manager.js";
 import { getStoredModel } from "../../model/manager.js";
+import type { ModelInfo } from "../../model/types.js";
 import { formatVariantForButton } from "../../variant/manager.js";
 import { createMainKeyboard } from "../utils/keyboard.js";
 import { keyboardManager } from "../../keyboard/manager.js";
@@ -60,6 +61,23 @@ type PromptErrorLogContext = {
   variant: string;
   promptLength: number;
   fileCount: number;
+};
+
+type StoredPromptModel = {
+  providerID?: string | null;
+  modelID?: string | null;
+  variant?: string | null;
+};
+
+type LiveSessionModel = {
+  providerID?: string | null;
+  id?: string | null;
+  modelID?: string | null;
+  variant?: string | null;
+};
+
+type LiveSessionWithSelection = {
+  model?: LiveSessionModel | null;
 };
 
 interface QueuedPromptRequest {
@@ -136,6 +154,13 @@ function truncateQueuedPromptPreview(text: string): string {
   return `${text.slice(0, QUEUED_PROMPT_PREVIEW_MAX_LENGTH - 3).trimEnd()}...`;
 }
 
+function getRequestText(request: QueuedPromptRequest): string {
+  const textPart = request.promptOptions.parts.find(
+    (part): part is TextPartInput => part.type === "text",
+  );
+  return textPart?.text.trim() ?? "";
+}
+
 function getQueuedPromptPreview(request: QueuedPromptRequest): string {
   const textParts = request.promptOptions.parts
     .filter((part): part is TextPartInput => part.type === "text")
@@ -166,7 +191,7 @@ async function sendQueuedPromptStartedNotice(
 function buildPromptRequest(
   currentSession: { id: string; directory: string },
   currentAgent: string | null,
-  storedModel: { providerID?: string | null; modelID?: string | null; variant?: string | null },
+  storedModel: StoredPromptModel,
   text: string,
   fileParts: FilePartInput[],
 ): { promptOptions: PromptRequestOptions; promptErrorLogContext: PromptErrorLogContext } {
@@ -215,6 +240,72 @@ function buildPromptRequest(
       fileCount: fileParts.length,
     },
   };
+}
+
+function isConfiguredDefaultModel(model: StoredPromptModel): boolean {
+  const provider = process.env.OPENCODE_MODEL_PROVIDER;
+  const modelId = process.env.OPENCODE_MODEL_ID;
+  if (!provider || !modelId) {
+    return false;
+  }
+
+  return (
+    model.providerID === provider &&
+    model.modelID === modelId
+  );
+}
+
+function toPromptModelInfo(model: LiveSessionModel | null | undefined): ModelInfo | null {
+  const providerID = model?.providerID;
+  const modelID = model?.id ?? model?.modelID;
+  if (!providerID || !modelID) {
+    return null;
+  }
+
+  return {
+    providerID,
+    modelID,
+    variant: model.variant ?? "default",
+  };
+}
+
+function samePromptModel(left: StoredPromptModel, right: StoredPromptModel): boolean {
+  return (
+    left.providerID === right.providerID &&
+    left.modelID === right.modelID &&
+    (left.variant ?? "default") === (right.variant ?? "default")
+  );
+}
+
+async function resolveModelForExistingPrompt(
+  currentSession: { id: string; directory: string },
+  scopeKey: string,
+  storedModel: StoredPromptModel,
+): Promise<StoredPromptModel> {
+  if (!isConfiguredDefaultModel(storedModel)) {
+    return storedModel;
+  }
+
+  const { data: liveSession, error } = await opencodeClient.session.get({
+    sessionID: currentSession.id,
+    directory: currentSession.directory,
+  });
+
+  if (error || !liveSession) {
+    logger.warn("[Bot] Failed to read live session model before prompt:", error);
+    return storedModel;
+  }
+
+  const liveModel = toPromptModelInfo((liveSession as LiveSessionWithSelection).model);
+  if (!liveModel || samePromptModel(storedModel, liveModel)) {
+    return storedModel;
+  }
+
+  logger.info(
+    `[Bot] Using live session model for existing prompt: ${liveModel.providerID}/${liveModel.modelID}`,
+  );
+  setCurrentModel(liveModel, scopeKey);
+  return liveModel;
 }
 
 function setActivePromptResponseMode(sessionId: string, responseMode: PromptResponseMode): void {
@@ -361,6 +452,7 @@ export async function dispatchNextQueuedPrompt(sessionId: string): Promise<boole
     }
 
     await sendQueuedPromptStartedNotice(botInstance, nextRequest);
+    markForwardedPrompt(sessionId, getRequestText(nextRequest));
     submitPromptRequest(botInstance, {
       ...nextRequest,
       notifyOnQueue: false,
@@ -573,7 +665,11 @@ export async function processUserPrompt(
   const sessionIsBusy = await isSessionBusy(currentSession.id, currentSession.directory);
   if (sessionIsBusy) {
     const currentAgent = await resolveProjectAgent(getStoredAgent(scopeKey), scopeKey);
-    const storedModel = getStoredModel(scopeKey);
+    const storedModel = await resolveModelForExistingPrompt(
+      currentSession,
+      scopeKey,
+      getStoredModel(scopeKey),
+    );
     const queuedRequest = buildPromptRequest(
       currentSession,
       currentAgent,
@@ -590,6 +686,7 @@ export async function processUserPrompt(
       promptErrorLogContext: queuedRequest.promptErrorLogContext,
       notifyOnQueue: true,
     });
+    markForwardedPrompt(currentSession.id, text);
 
     logger.info(
       `[Bot] Queued prompt for busy session ${currentSession.id} at position ${position}`,
@@ -600,12 +697,17 @@ export async function processUserPrompt(
 
   try {
     const currentAgent = await resolveProjectAgent(getStoredAgent(scopeKey), scopeKey);
-    const storedModel = getStoredModel(scopeKey);
+    const storedModel = await resolveModelForExistingPrompt(
+      currentSession,
+      scopeKey,
+      getStoredModel(scopeKey),
+    );
     if (prepareSessionForPrompt) {
       await prepareSessionForPrompt(currentSession.id);
     }
 
     const request = buildPromptRequest(currentSession, currentAgent, storedModel, text, fileParts);
+    markForwardedPrompt(currentSession.id, text);
     submitPromptRequest(bot, {
       sessionId: currentSession.id,
       chatId: ctx.chat!.id,

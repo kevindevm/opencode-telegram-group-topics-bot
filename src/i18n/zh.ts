@@ -19,8 +19,20 @@ export const zh: I18nDictionary = {
   "cmd.description.opencode_stop": "停止 OpenCode 服务器",
   "cmd.description.recent": "Browse recent sessions across projects",
   "cmd.description.reload": "Reload the OpenCode server configuration (V2 only)",
+  "refresh.last_message": "📋 Last message: {preview}",
+  "refresh.subscribed": "✅ Subscribed to session events",
+  "refresh.no_topic": "⚠️ No topic linked",
+
+  "pcuser.echo": "🧑 {text}",
+
+  "background.session_fallback": "session {id}",
+  "background.assistant_response": "🔔 Assistant replied in background session: {session}",
+  "background.question_asked": "❓ Background session needs an answer: {session}",
+  "background.permission_asked": "🔐 Background session requested permissions: {session}",
+  "background.open_session_button": "Open session",
   "cmd.description.help": "帮助",
   "cmd.description.open": "通过浏览目录添加项目",
+  "cmd.description.refresh": "Refresh session information",
 
   "callback.unknown_command": "未知命令",
   "callback.processing_error": "处理错误",

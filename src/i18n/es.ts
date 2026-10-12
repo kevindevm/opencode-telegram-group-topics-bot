@@ -19,6 +19,7 @@ export const es: I18nDictionary = {
   "cmd.description.opencode_stop": "Detener servidor OpenCode",
   "cmd.description.recent": "Ver sesiones recientes de todos los proyectos",
   "cmd.description.reload": "Recargar la configuración del servidor OpenCode (solo V2)",
+  "cmd.description.refresh": "Actualizar información de la sesión",
   "cmd.description.help": "Ayuda",
   "cmd.description.open": "Añadir proyecto navegando directorios",
 
@@ -101,7 +102,6 @@ export const es: I18nDictionary = {
   "bot.file_download_error": "🔴 No se pudo descargar el archivo",
   "bot.model_no_pdf": "⚠️ El modelo actual no admite entrada PDF. Enviaré solo texto.",
   "bot.text_file_too_large": "⚠️ El archivo de texto es demasiado grande (max {maxSizeKb}KB)",
-
   "status.header_running": "🟢 OpenCode Server está en ejecución",
   "status.health.healthy": "Saludable",
   "status.health.unhealthy": "No saludable",
@@ -311,6 +311,18 @@ export const es: I18nDictionary = {
   "reload.failed": "❌ No se pudo recargar la configuración de OpenCode.",
   "reload.v1_not_supported":
     "⚠️ /reload necesita un servidor OpenCode V2 (ajusta OPENCODE_SERVER_VERSION=v2).",
+
+  "refresh.last_message": "📋 Último mensaje: {preview}",
+  "refresh.subscribed": "✅ Suscripción activa a la sesión",
+  "refresh.no_topic": "⚠️ No hay topic vinculado",
+
+  "pcuser.echo": "🧑 {text}",
+
+  "background.session_fallback": "sesión {id}",
+  "background.assistant_response": "🔔 El asistente respondió en una sesión en segundo plano: {session}",
+  "background.question_asked": "❓ Una sesión en segundo plano necesita una respuesta: {session}",
+  "background.permission_asked": "🔐 Una sesión en segundo plano solicitó permisos: {session}",
+  "background.open_session_button": "Abrir sesión",
 
   "recent.heading": "Sesiones recientes de todos los proyectos:",
   "recent.empty": "📭 No hay sesiones recientes.",

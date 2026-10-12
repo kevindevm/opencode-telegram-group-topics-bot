@@ -44,6 +44,7 @@ import {
   showCurrentQuestion,
   handleQuestionTextAnswer,
 } from "./handlers/question.js";
+import { handleRefreshCommand } from "./commands/refresh.js";
 import { handlePermissionCallback, showPermissionRequest } from "./handlers/permission.js";
 import { handleAgentSelect, showAgentSelectionMenu } from "./handlers/agent.js";
 import { handleModelSelect, showModelSelectionMenu } from "./handlers/model.js";
@@ -62,8 +63,15 @@ import {
   getAssistantParseMode,
 } from "../summary/formatter.js";
 import { renderSubagentCards } from "../summary/subagent-formatter.js";
-import { ingestSessionInfoForCache } from "../session/cache-manager.js";
+import {
+  getCachedSessionProjects,
+  ingestSessionInfoForCache,
+} from "../session/cache-manager.js";
+import { getCurrentSession } from "../settings/manager.js";
 import { logger } from "../utils/logger.js";
+import { BackgroundSessionTracker } from "../app/managers/background-session-manager.js";
+import { createBackgroundNoticeDelivery } from "../bot/events/background-notice-delivery.js";
+import { TelegramEventDelivery } from "../bot/events/telegram-event-delivery.js";
 import { safeBackgroundTask } from "../utils/safe-background-task.js";
 import { pinnedMessageManager } from "../pinned/manager.js";
 import { taskCreationManager } from "../scheduled-task/creation-manager.js";
@@ -114,8 +122,12 @@ import { SessionOutputCoordinator } from "./session-output-coordinator.js";
 import { assistantRunState } from "./assistant-run-state.js";
 import { formatAssistantRunFooter } from "./utils/assistant-run-footer.js";
 import { renderAssistantFinalPartsSafe } from "./utils/assistant-rendering.js";
+import { buildCodeBlockMessage } from "./utils/code-block.js";
+import { registerPcUserMessage, takePcUserText } from "./pc-user-mirror.js";
+import { truncateText } from "../session/history.js";
 
 let botInstance: Bot<Context> | null = null;
+const chatIdInstance: number | null = null;
 const initializedCommandChats = new Set<number>();
 const renamedGeneralTopicChats = new Set<number>();
 const DM_ALLOWED_COMMAND_SET = new Set<string>(DM_ALLOWED_COMMANDS);
@@ -184,6 +196,81 @@ function getTargetBySessionId(
     threadId: target.threadId,
     scopeKey: target.scopeKey,
   };
+}
+
+function asMirrorString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Mirrors user prompts typed on other clients (PC) into the session topic.
+ * The `message.updated` (role user) announcement registers the message and
+ * the following text `message.part.updated` carries the content. Prompts the
+ * bot forwarded itself are already visible and get skipped.
+ */
+function mirrorPcUserMessageEvent(event: OpenCodeEvent): void {
+  if (event.type !== "message.updated" && event.type !== "message.part.updated") {
+    return;
+  }
+
+  const props = event.properties as unknown as {
+    info?: { id?: unknown; sessionID?: unknown; sessionId?: unknown; role?: unknown };
+    part?: {
+      sessionID?: unknown;
+      sessionId?: unknown;
+      messageID?: unknown;
+      messageId?: unknown;
+      type?: unknown;
+      text?: unknown;
+    };
+  };
+
+  if (event.type === "message.updated") {
+    const info = props.info;
+    if (!info || info.role !== "user") {
+      return;
+    }
+
+    const sessionId = asMirrorString(info.sessionID) ?? asMirrorString(info.sessionId);
+    const messageId = asMirrorString(info.id);
+    if (!sessionId || !messageId) {
+      return;
+    }
+
+    registerPcUserMessage(sessionId, messageId);
+    return;
+  }
+
+  const part = props.part;
+  if (!part || part.type !== "text") {
+    return;
+  }
+
+  const sessionId = asMirrorString(part.sessionID) ?? asMirrorString(part.sessionId);
+  const messageId = asMirrorString(part.messageID) ?? asMirrorString(part.messageId);
+  const text = asMirrorString(part.text);
+  if (!sessionId || !messageId || !text || !botInstance) {
+    return;
+  }
+
+  const payload = takePcUserText(sessionId, messageId, text);
+  if (!payload) {
+    return;
+  }
+
+  const activeBot = botInstance;
+  safeBackgroundTask({
+    taskName: "pc_user_mirror.send",
+    task: () =>
+      activeBot.api.sendMessage(
+        payload.target.chatId,
+        t("pcuser.echo", { text: truncateText(payload.text, 3900) }),
+        getThreadSendOptions(payload.target.threadId),
+      ),
+    onError: (error) => {
+      logger.error("[Bot] Failed to mirror PC user message to topic:", error);
+    },
+  });
 }
 
 function extractSessionTitleUpdate(
@@ -375,6 +462,15 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
           const caption = prepareDocumentCaption(
             entry.line || toolMessage || entry.fileData.caption,
           );
+          if (config.bot.codeBlocksInText) {
+            const sentAsCodeBlock = await sendSessionCodeBlockMessage(sessionId, {
+              ...entry.fileData,
+              caption,
+            });
+            if (sentAsCodeBlock) {
+              continue;
+            }
+          }
           await sendSessionDocumentMessage(sessionId, {
             ...entry.fileData,
             caption,
@@ -772,6 +868,66 @@ async function deleteSessionMessage(sessionId: string, messageId: number): Promi
   await activeBot.api.deleteMessage(target.chatId, messageId);
 }
 
+async function sendSessionCodeBlockMessage(
+  sessionId: string,
+  fileData: { filename: string; buffer: Buffer; caption: string },
+): Promise<boolean> {
+  if (!botInstance) {
+    return false;
+  }
+
+  const target = getTargetBySessionId(sessionId);
+  if (!target) {
+    return false;
+  }
+
+  const block = buildCodeBlockMessage(
+    fileData.caption,
+    fileData.filename,
+    fileData.buffer.toString("utf8"),
+  );
+  if (!block) {
+    return false;
+  }
+
+  const activeBot = botInstance;
+  const codeEntity = {
+    type: "pre" as const,
+    offset: block.codeOffset,
+    length: block.codeLength,
+    ...(block.language ? { language: block.language } : {}),
+  };
+
+  while (true) {
+    try {
+      await activeBot.api.sendMessage(target.chatId, block.text, {
+        entities: [codeEntity],
+        disable_notification: true,
+        ...getThreadSendOptions(target.threadId),
+      });
+      logger.debug(
+        `[Bot] Sent code block: ${fileData.filename} (${block.codeLength} chars, session=${sessionId})`,
+      );
+      return true;
+    } catch (error) {
+      const retryAfterMs = getTelegramRetryAfterMs(error);
+      if (!retryAfterMs) {
+        logger.debug(
+          "[Bot] Code block send failed; falling back to document",
+          { sessionId, filename: fileData.filename, error },
+        );
+        return false;
+      }
+
+      logger.info(
+        `[Bot] Telegram rate limit; retrying code block in ${retryAfterMs}ms`,
+        { sessionId, filename: fileData.filename },
+      );
+      await new Promise((resolve) => setTimeout(resolve, retryAfterMs + 100));
+    }
+  }
+}
+
 async function sendSessionDocumentMessage(
   sessionId: string,
   fileData: { filename: string; buffer: Buffer; caption: string },
@@ -911,15 +1067,41 @@ async function ensureCommandsInitialized(ctx: Context, next: NextFunction): Prom
   await next();
 }
 
-async function ensureEventSubscription(directory: string): Promise<void> {
+export async function ensureEventSubscription(directory: string): Promise<void> {
   if (!directory) {
     logger.error("No directory found for event subscription");
     return;
   }
 
+  // Background session tracker: processes SSE events from sessions running in the background
+  // (e.g., started from PC) and delivers notifications to Telegram.
+  // Gated by TRACK_BACKGROUND_SESSIONS; without a single-chat destination the
+  // delivery resolves to null, so the tracker stays inert until topics-aware
+  // routing lands.
+  const backgroundTracker = config.bot.trackBackgroundSessions
+    ? new BackgroundSessionTracker()
+    : null;
+  backgroundTracker?.setDirectory(directory);
+  if (backgroundTracker) {
+    backgroundTracker.setOnNotification(
+      createBackgroundNoticeDelivery(
+        {
+          getDestination: () => {
+            if (!botInstance || !chatIdInstance) {
+              return null;
+            }
+            return { api: botInstance.api, chatId: chatIdInstance };
+          },
+        },
+        new TelegramEventDelivery(),
+      ),
+    );
+  }
+
   summaryAggregator.setOnCleared(() => {
     sessionOutputCoordinator.clearAll();
     void liveStream.clearAll("summary_aggregator_clear");
+    backgroundTracker?.clear();
   });
 
   summaryAggregator.setOnMessageUpdated((sessionId, messageId, messageText) => {
@@ -1162,6 +1344,8 @@ async function ensureEventSubscription(directory: string): Promise<void> {
         }
       }
 
+      mirrorPcUserMessageEvent(event);
+
       const sessionTitleUpdate = extractSessionTitleUpdate(event);
       if (sessionTitleUpdate && botInstance) {
         const activeBot = botInstance;
@@ -1182,6 +1366,13 @@ async function ensureEventSubscription(directory: string): Promise<void> {
         });
       }
 
+      // Process event through background session tracker for PC->Telegram mirroring
+      const currentSessionId = getCurrentSession()?.id ?? null;
+      backgroundTracker?.processEvent(
+        event as unknown as { type: string; properties?: unknown },
+        currentSessionId,
+      );
+
       summaryAggregator.processEvent(event);
     };
 
@@ -1192,6 +1383,47 @@ async function ensureEventSubscription(directory: string): Promise<void> {
   subscribeToEvents(directory, eventCallback).catch((err) => {
     logger.error("Failed to subscribe to events:", err);
   });
+}
+
+export async function subscribeToKnownProjects(): Promise<void> {
+  const bindings = listAllTopicBindings();
+  const directories = new Set<string>();
+
+  for (const binding of bindings) {
+    if (binding.projectWorktree) {
+      directories.add(binding.projectWorktree);
+    }
+
+    // Keep topic-bound sessions tracked across service restarts so their
+    // events reach Telegram without waiting for the next user action.
+    if (binding.sessionId) {
+      summaryAggregator.setSession(binding.sessionId);
+    }
+  }
+
+  try {
+    const cachedProjects = await getCachedSessionProjects();
+    for (const project of cachedProjects) {
+      if (project.worktree) {
+        directories.add(project.worktree);
+      }
+    }
+  } catch (error) {
+    logger.debug(
+      "[Bot] Failed to read cached session projects for event subscription",
+      error,
+    );
+  }
+
+  for (const directory of directories) {
+    ensureEventSubscription(directory).catch((error) => {
+      logger.error(
+        "[Bot] Failed to subscribe to known project events",
+        { directory },
+        error,
+      );
+    });
+  }
 }
 
 async function prepareSessionForPrompt(sessionId: string): Promise<void> {
@@ -1346,6 +1578,7 @@ export function createBot(): Bot<Context> {
   bot.command(BOT_COMMAND.START, startCommand);
   bot.command(BOT_COMMAND.HELP, helpCommand);
   bot.command(BOT_COMMAND.STATUS, statusCommand);
+  bot.command(BOT_COMMAND.REFRESH, handleRefreshCommand);
   bot.command(BOT_COMMAND.LAST, lastCommand);
   bot.command(BOT_COMMAND.TTS, ttsCommand);
   bot.command(BOT_COMMAND.OPENCODE_START, opencodeStartCommand);
@@ -1383,12 +1616,14 @@ export function createBot(): Bot<Context> {
       const handledTaskList = await handleTaskListCallback(ctx);
       const handledQuestion = await handleQuestionCallback(ctx);
       const handledPermission = await handlePermissionCallback(ctx);
+      const handledRefreshCommand = await handleRefreshCommand(ctx);
       const handledAgent = await handleAgentSelect(ctx);
       const handledModel = await handleModelSelect(ctx);
       const handledVariant = await handleVariantSelect(ctx);
       const handledCompactConfirm = await handleCompactConfirm(ctx);
       const handledRenameCancel = await handleRenameCancel(ctx);
       const handledCommands = await handleCommandsCallback(ctx, { ensureEventSubscription });
+      
       const handledSkills = await handleSkillsCallback(ctx, {
         bot,
         ensureEventSubscription,
@@ -1408,12 +1643,14 @@ export function createBot(): Bot<Context> {
         !handledTaskList &&
         !handledQuestion &&
         !handledPermission &&
+
         !handledAgent &&
         !handledModel &&
         !handledVariant &&
         !handledCompactConfirm &&
         !handledRenameCancel &&
         !handledCommands &&
+        !handledRefreshCommand &&
         !handledSkills
       ) {
         logger.debug("Unknown callback query:", ctx.callbackQuery?.data);

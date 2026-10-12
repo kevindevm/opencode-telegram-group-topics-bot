@@ -214,6 +214,10 @@ function parseApplyPatchSections(patchText: string): ApplyPatchSection[] {
   return sections.filter((section) => section.filePath.length > 0 && section.patchText.length > 0);
 }
 
+function asOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function extractEventSessionId(event: Event): string | null {
   const eventWithProperties = event as Event & {
     properties?: {
@@ -238,6 +242,12 @@ function extractEventSessionId(event: Event): string | null {
 
   if (typeof eventWithProperties.properties?.session?.id === "string") {
     return eventWithProperties.properties.session.id;
+  }
+
+  const flatSessionId = (eventWithProperties.properties as { sessionID?: unknown } | undefined)
+    ?.sessionID;
+  if (typeof flatSessionId === "string") {
+    return flatSessionId;
   }
 
   return null;
@@ -278,6 +288,8 @@ class SummaryAggregator {
   private completionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private stepFinishCosts: Map<string, number> = new Map();
   private lastStreamedMessageText: Map<string, string> = new Map();
+  private deltaTextByPart: Map<string, string> = new Map();
+  private deltaCompletedParts: Set<string> = new Set();
   private trackedSessionParents: Map<string, string | null> = new Map();
   private subagentStates: Map<string, SubagentState> = new Map();
   private subagentOrderByParent: Map<string, string[]> = new Map();
@@ -510,6 +522,9 @@ class SummaryAggregator {
         case "message.part.updated":
           this.handleMessagePartUpdated(event);
           break;
+        case "message.part.delta":
+          this.handleMessagePartDelta(event);
+          break;
         case "session.status":
           this.handleSessionStatus(event);
           break;
@@ -578,6 +593,7 @@ class SummaryAggregator {
       this.stepFinishCosts.delete(messageKey);
       this.lastStreamedMessageText.delete(messageKey);
       this.thinkingFiredForMessages.delete(messageKey);
+      this.clearDeltaStateForMessage(messageKey);
       this.clearCompletionTimer(messageKey);
     }
 
@@ -603,6 +619,8 @@ class SummaryAggregator {
     this.partHashes.clear();
     this.stepFinishCosts.clear();
     this.lastStreamedMessageText.clear();
+    this.deltaTextByPart.clear();
+    this.deltaCompletedParts.clear();
     for (const timer of this.completionTimers.values()) {
       clearTimeout(timer);
     }
@@ -1134,6 +1152,13 @@ class SummaryAggregator {
 
       hashes.add(partHash);
 
+      // Deltas already streamed live for this part are an overlay only; the
+      // full snapshot arriving here is authoritative. Drop the overlay so the
+      // suffix is not counted twice, then push the snapshot as usual.
+      const deltaPartKey = `${messageKey}:${part.id}`;
+      this.deltaTextByPart.delete(deltaPartKey);
+      this.deltaCompletedParts.add(deltaPartKey);
+
       if (messageInfo && messageInfo.role === "assistant") {
         if (!this.currentMessageParts.has(messageKey)) {
           this.currentMessageParts.set(messageKey, []);
@@ -1272,6 +1297,122 @@ class SummaryAggregator {
       this.stepFinishCosts.set(messageKey, currentCost + part.cost);
     }
 
+    this.lastUpdated = Date.now();
+  }
+
+  private getDeltaSuffix(messageKey: string): string {
+    const prefix = `${messageKey}:`;
+    let suffix = "";
+
+    for (const [key, text] of this.deltaTextByPart) {
+      if (key.startsWith(prefix)) {
+        suffix += text;
+      }
+    }
+
+    return suffix;
+  }
+
+  private clearDeltaStateForMessage(messageKey: string): void {
+    const prefix = `${messageKey}:`;
+
+    for (const key of Array.from(this.deltaTextByPart.keys())) {
+      if (key.startsWith(prefix)) {
+        this.deltaTextByPart.delete(key);
+      }
+    }
+
+    for (const key of Array.from(this.deltaCompletedParts)) {
+      if (key.startsWith(prefix)) {
+        this.deltaCompletedParts.delete(key);
+      }
+    }
+  }
+
+  private handleMessagePartDelta(
+    event: Event & {
+      type: "message.part.delta";
+    },
+  ): void {
+    const props = event.properties as unknown as {
+      sessionID?: unknown;
+      sessionId?: unknown;
+      messageID?: unknown;
+      messageId?: unknown;
+      partID?: unknown;
+      partId?: unknown;
+      field?: unknown;
+      delta?: unknown;
+      type?: unknown;
+      part?: {
+        sessionID?: unknown;
+        sessionId?: unknown;
+        messageID?: unknown;
+        messageId?: unknown;
+        id?: unknown;
+        type?: unknown;
+      };
+    };
+
+    const part = props.part;
+    const sessionId =
+      asOptionalString(props.sessionID) ??
+      asOptionalString(props.sessionId) ??
+      asOptionalString(part?.sessionID) ??
+      asOptionalString(part?.sessionId);
+    const messageId =
+      asOptionalString(props.messageID) ??
+      asOptionalString(props.messageId) ??
+      asOptionalString(part?.messageID) ??
+      asOptionalString(part?.messageId);
+    const partId =
+      asOptionalString(props.partID) ??
+      asOptionalString(props.partId) ??
+      asOptionalString(part?.id) ??
+      "text";
+    const field = asOptionalString(props.field);
+    const partType =
+      asOptionalString(part?.type) ?? asOptionalString(props.type) ?? undefined;
+    const delta = asOptionalString(props.delta);
+
+    if (!sessionId || !messageId || !delta) {
+      return;
+    }
+
+    // Only live-stream text. Reasoning and tool-input deltas are not rendered
+    // as assistant text in this fork.
+    if (field !== undefined && field !== "text") {
+      return;
+    }
+
+    if (partType !== undefined && partType !== "text") {
+      return;
+    }
+
+    if (!this.isTrackedSession(sessionId) || this.isTrackedChildSession(sessionId)) {
+      return;
+    }
+
+    const messageKey = this.getMessageKey(sessionId, messageId);
+    const partKey = `${messageKey}:${partId}`;
+
+    if (this.deltaCompletedParts.has(partKey)) {
+      return;
+    }
+
+    this.deltaTextByPart.set(partKey, `${this.deltaTextByPart.get(partKey) ?? ""}${delta}`);
+
+    if (!this.messages.has(messageKey)) {
+      this.messages.set(messageKey, { role: "assistant", sessionId });
+    }
+
+    if (!this.currentMessageParts.has(messageKey)) {
+      this.currentMessageParts.set(messageKey, []);
+      this.messageCount++;
+      this.startTypingIndicator(sessionId);
+    }
+
+    this.emitMessageUpdated(messageKey, sessionId);
     this.lastUpdated = Date.now();
   }
 
@@ -1645,7 +1786,7 @@ class SummaryAggregator {
     }
 
     const parts = this.currentMessageParts.get(messageKey) || [];
-    const messageText = parts.join("");
+    const messageText = `${parts.join("")}${this.getDeltaSuffix(messageKey)}`;
     if (!messageText) {
       return;
     }
@@ -1687,7 +1828,7 @@ class SummaryAggregator {
 
   private finalizeMessageCompletion(messageKey: string, sessionId: string): void {
     const parts = this.currentMessageParts.get(messageKey) || [];
-    const messageText = parts.join("");
+    const messageText = `${parts.join("")}${this.getDeltaSuffix(messageKey)}`;
 
     logger.debug(
       `[Aggregator] Message completed: messageKey=${messageKey}, textLength=${messageText.length}, totalParts=${parts.length}, session=${sessionId}`,
@@ -1705,6 +1846,7 @@ class SummaryAggregator {
     this.stepFinishCosts.delete(messageKey);
     this.lastStreamedMessageText.delete(messageKey);
     this.thinkingFiredForMessages.delete(messageKey);
+    this.clearDeltaStateForMessage(messageKey);
 
     logger.debug(
       `[Aggregator] Message completed cleanup: remaining messages=${this.currentMessageParts.size}`,

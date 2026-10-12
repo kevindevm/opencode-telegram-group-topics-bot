@@ -1173,4 +1173,136 @@ describe("summary/aggregator", () => {
     expect(filePayload.files[0]?.fileData?.buffer.toString("utf8")).not.toContain("src/b.ts");
     expect(filePayload.files[1]?.fileData?.buffer.toString("utf8")).not.toContain("src/a.ts");
   });
+
+  it("streams message.part.delta chunks as live assistant updates", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-delta",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "session-1",
+        messageID: "message-delta",
+        partID: "part-delta-1",
+        field: "text",
+        delta: "Hello",
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "session-1",
+        messageID: "message-delta",
+        partID: "part-delta-1",
+        field: "text",
+        delta: " world",
+      },
+    } as unknown as Event);
+
+    expect(onMessageUpdated).toHaveBeenCalledTimes(2);
+    expect(onMessageUpdated.mock.calls[0]).toEqual(["session-1", "message-delta", "Hello"]);
+    expect(onMessageUpdated.mock.calls[1]).toEqual(["session-1", "message-delta", "Hello world"]);
+  });
+
+  it("does not duplicate text when part.updated arrives after deltas", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-dedup",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "session-1",
+        messageID: "message-dedup",
+        partID: "part-dedup-1",
+        field: "text",
+        delta: "Hello",
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-dedup-1",
+          sessionID: "session-1",
+          messageID: "message-dedup",
+          type: "text",
+          text: "Hello",
+          time: { start: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    expect(onMessageUpdated).toHaveBeenCalledTimes(1);
+    expect(onMessageUpdated.mock.calls[0]).toEqual(["session-1", "message-dedup", "Hello"]);
+  });
+
+  it("ignores non-text delta fields and untracked sessions", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-ignore",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "session-1",
+        messageID: "message-ignore",
+        partID: "part-ignore-1",
+        field: "thinking",
+        delta: "should not appear",
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "session-other",
+        messageID: "message-ignore",
+        partID: "part-ignore-2",
+        field: "text",
+        delta: "should not appear",
+      },
+    } as unknown as Event);
+
+    expect(onMessageUpdated).not.toHaveBeenCalled();
+  });
 });

@@ -101,11 +101,35 @@ describe("opencode/v2/events", () => {
       properties: { info: { id: MESSAGE, role: "assistant", agent: "build", providerID: "p" } },
     });
     expect(result[4]).toMatchObject({
-      properties: { messageID: MESSAGE, partID: `${MESSAGE}:text:0`, delta: "DO" },
+      properties: { messageID: MESSAGE, partID: `${MESSAGE}:text:0`, field: "text", delta: "DO" },
     });
     expect(result[5]).toMatchObject({ properties: { part: { type: "text", text: "DONE" } } });
     expect(result[7]).toMatchObject({
       properties: { info: { time: { completed: 1000 }, cost: 0.1, tokens: { input: 5 } } },
+    });
+  });
+
+  it("marks reasoning deltas with their own field so text streaming can skip them", () => {
+    const translate = createV2EventTranslator();
+
+    const result = payloads(translate, [
+      event("session.reasoning.delta", {
+        sessionID: SESSION,
+        assistantMessageID: MESSAGE,
+        ordinal: 0,
+        delta: "hmm",
+      }),
+    ]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      type: "message.part.delta",
+      properties: {
+        messageID: MESSAGE,
+        partID: `${MESSAGE}:reasoning:0`,
+        field: "reasoning",
+        delta: "hmm",
+      },
     });
   });
 

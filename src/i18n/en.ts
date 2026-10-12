@@ -18,6 +18,7 @@ export const en = {
   "cmd.description.opencode_stop": "Stop OpenCode server",
   "cmd.description.recent": "Browse recent sessions across projects",
   "cmd.description.reload": "Reload the OpenCode server configuration (V2 only)",
+  "cmd.description.refresh": "Refresh session information",
   "cmd.description.help": "Help",
   "cmd.description.open": "Add a project by browsing directories",
 
@@ -227,6 +228,11 @@ export const en = {
   "sessions.preview.title": "Recent messages:",
   "sessions.preview.you": "You:",
   "sessions.preview.agent": "Agent:",
+  "background.session_fallback": "session {id}",
+  "background.assistant_response": "🔔 Assistant replied in background session: {session}",
+  "background.question_asked": "❓ Background session needs an answer: {session}",
+  "background.permission_asked": "🔐 Background session requested permissions: {session}",
+  "background.open_session_button": "Open session",
   "sessions.resume.assistant_title": "Last agent message:",
   "sessions.resume.last_turn_title": "Last visible message:",
 
@@ -339,6 +345,12 @@ export const en = {
   "reload.failed": "❌ Failed to reload the OpenCode configuration.",
   "reload.v1_not_supported":
     "⚠️ /reload needs an OpenCode V2 server (set OPENCODE_SERVER_VERSION=v2).",
+
+  "refresh.last_message": "📋 Último mensaje: {preview}",
+  "refresh.subscribed": "✅ Suscripción activa a la sesión",
+  "refresh.no_topic": "⚠️ No hay topic vinculado",
+
+  "pcuser.echo": "🧑 {text}",
 
   "recent.heading": "Recent sessions across projects:",
   "recent.empty": "📭 No recent sessions found.",

@@ -1,7 +1,11 @@
 import fs from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 
-import { cleanupBotRuntime, createBot } from "../bot/index.js";
+import {
+  cleanupBotRuntime,
+  createBot,
+  subscribeToKnownProjects,
+} from "../bot/index.js";
 import { config } from "../config.js";
 import { explainServerVersionMismatch, probeOpencodeServer } from "../opencode/client.js";
 import { reconcileStoredModelSelection } from "../model/manager.js";
@@ -60,6 +64,7 @@ export async function startBotApp(): Promise<void> {
   }
 
   const bot = createBot();
+  await subscribeToKnownProjects();
   const scheduledTaskRuntime = createScheduledTaskRuntime(bot);
   scheduledTaskRuntime.start();
   const healthServer = new HealthServer();

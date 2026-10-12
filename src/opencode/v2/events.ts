@@ -529,7 +529,7 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
               sessionID: data.sessionID,
               messageID: data.assistantMessageID,
               partID: `${data.assistantMessageID}:${kind}:${data.ordinal}`,
-              field: "text",
+              field: kind,
               delta: data.delta,
             },
           },

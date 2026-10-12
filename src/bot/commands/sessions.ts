@@ -7,6 +7,7 @@ import { projectDirectoryExists } from "../../project/directory.js";
 import { formatSessionDisplayTitle } from "../../session/title-format.js";
 import {
   TOPIC_SESSION_STATUS,
+  clearTopicSessionBinding,
   getCurrentProject,
   setCurrentAgent,
   setCurrentModel,
@@ -50,7 +51,7 @@ import {
 import { getTopicBindingBySessionId, registerTopicSessionBinding } from "../../topic/manager.js";
 import { TOPIC_COLORS } from "../../topic/colors.js";
 import { formatTopicTitle } from "../../topic/title-format.js";
-import { buildTopicThreadLink } from "../utils/topic-link.js";
+import { buildTopicMessageLink } from "../utils/topic-link.js";
 import {
   loadLastAssistantMessage,
   loadLastVisibleTurn,
@@ -266,6 +267,34 @@ export async function sessionsCommand(ctx: CommandContext<Context>) {
 export interface SessionTopicTarget {
   id: string;
   title: string;
+  model?: {
+    providerID?: string | null;
+    id?: string | null;
+    modelID?: string | null;
+    variant?: string | null;
+  } | null;
+  agent?: string | null;
+}
+
+function resolveTopicModel(
+  session: SessionTopicTarget,
+  scopeKey: string,
+): { providerID: string; modelID: string; variant: string } {
+  const providerID = session.model?.providerID;
+  const modelID = session.model?.id ?? session.model?.modelID;
+  if (providerID && modelID) {
+    return {
+      providerID,
+      modelID,
+      variant: session.model?.variant ?? "default",
+    };
+  }
+  const stored = getStoredModel(scopeKey);
+  return {
+    providerID: stored.providerID,
+    modelID: stored.modelID,
+    variant: stored.variant ?? "default",
+  };
 }
 
 /**
@@ -289,7 +318,27 @@ export async function openSessionInNewTopic(
   const chat = ctx.chat;
   const existingBinding = getTopicBindingBySessionId(session.id);
   if (existingBinding && existingBinding.chatId === chat.id) {
-    const existingLink = buildTopicThreadLink(chat, existingBinding.threadId);
+    const existingLink = await (async () => {
+      try {
+        const topicMessage = await ctx.api.sendMessage(
+          chat.id,
+          t("sessions.selected", { title: session.title }),
+          getThreadSendOptions(existingBinding.threadId),
+        );
+        logger.info(
+          `[Sessions] Reusing existing topic: threadId=${existingBinding.threadId}, linkedMessageId=${topicMessage.message_id}`,
+        );
+        return buildTopicMessageLink(chat, topicMessage.message_id);
+      } catch (error) {
+        logger.warn(
+          "[Sessions] Bound topic no longer exists, creating a new one",
+          { threadId: existingBinding.threadId, error },
+        );
+        clearTopicSessionBinding(existingBinding.scopeKey);
+        return null;
+      }
+    })();
+
     if (existingLink) {
       clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
       await ctx.answerCallbackQuery();
@@ -356,8 +405,14 @@ export async function openSessionInNewTopic(
 
   setCurrentProject(project, topicScopeKey);
   setCurrentSession(sessionInfo, topicScopeKey);
-  setCurrentAgent(await resolveProjectAgent(getStoredAgent(scopeKey), scopeKey), topicScopeKey);
-  setCurrentModel(getStoredModel(scopeKey), topicScopeKey);
+  // An existing session keeps the model/agent it already runs with; the
+  // scope defaults (e.g. big-pickle) only apply to brand-new sessions.
+  const sessionAgent =
+    session.agent && session.agent.trim().length > 0
+      ? session.agent
+      : await resolveProjectAgent(getStoredAgent(scopeKey), scopeKey);
+  setCurrentAgent(sessionAgent, topicScopeKey);
+  setCurrentModel(resolveTopicModel(session, scopeKey), topicScopeKey);
 
   registerTopicSessionBinding({
     scopeKey: topicScopeKey,
@@ -407,7 +462,7 @@ export async function openSessionInNewTopic(
     variantName,
   );
 
-  await ctx.api.sendMessage(
+  const topicMessage = await ctx.api.sendMessage(
     chat.id,
     t(BOT_I18N_KEY.NEW_TOPIC_CREATED, { title: session.title }),
     {
@@ -416,7 +471,10 @@ export async function openSessionInNewTopic(
     },
   );
 
-  const topicLink = buildTopicThreadLink(chat, topicThreadId);
+  const topicLink = buildTopicMessageLink(chat, topicMessage.message_id);
+  logger.info(
+    `[Sessions] Created topic: threadId=${topicThreadId}, linkedMessageId=${topicMessage.message_id}`,
+  );
   if (!topicLink) {
     throw new Error("Unable to build topic link");
   }

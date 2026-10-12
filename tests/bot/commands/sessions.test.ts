@@ -24,7 +24,9 @@ const mocked = vi.hoisted(() => ({
   agentResolveProjectAgentMock: vi.fn(async (agent: string) => agent),
   agentGetStoredAgentMock: vi.fn(() => "builder"),
   modelGetStoredModelMock: vi.fn(() => ({ providerID: "openai", modelID: "gpt-5" })),
-  modelSetCurrentModelMock: vi.fn(),
+  settingsSetCurrentModelMock: vi.fn(),
+  settingsClearTopicSessionBindingMock: vi.fn(),
+  topicGetBindingBySessionIdMock: vi.fn(() => undefined),
   pinnedIsInitializedMock: vi.fn(() => false),
   pinnedInitializeMock: vi.fn(),
   pinnedOnSessionChangeMock: vi.fn(),
@@ -46,10 +48,18 @@ vi.mock("../../../src/opencode/client.js", () => ({
 }));
 
 vi.mock("../../../src/settings/manager.js", () => ({
+  TOPIC_SESSION_STATUS: {
+    ACTIVE: "active",
+    CLOSED: "closed",
+    STALE: "stale",
+    ABANDONED: "abandoned",
+    ERROR: "error",
+  },
   getCurrentProject: vi.fn(() => mocked.currentProject),
   setCurrentProject: vi.fn(),
   setCurrentAgent: vi.fn(),
-  setCurrentModel: vi.fn(),
+  setCurrentModel: mocked.settingsSetCurrentModelMock,
+  clearTopicSessionBinding: mocked.settingsClearTopicSessionBindingMock,
   getScopedSessions: vi.fn(() => ({})),
 }));
 
@@ -60,7 +70,6 @@ vi.mock("../../../src/agent/manager.js", () => ({
 
 vi.mock("../../../src/model/manager.js", () => ({
   getStoredModel: mocked.modelGetStoredModelMock,
-  setCurrentModel: mocked.modelSetCurrentModelMock,
 }));
 
 vi.mock("../../../src/project/directory.js", () => ({
@@ -72,7 +81,7 @@ vi.mock("../../../src/session/manager.js", () => ({
 }));
 
 vi.mock("../../../src/topic/manager.js", () => ({
-  getTopicBindingBySessionId: vi.fn(() => undefined),
+  getTopicBindingBySessionId: mocked.topicGetBindingBySessionIdMock,
   registerTopicSessionBinding: vi.fn(),
 }));
 
@@ -226,7 +235,10 @@ describe("bot/commands/sessions", () => {
     mocked.agentResolveProjectAgentMock.mockReset();
     mocked.agentGetStoredAgentMock.mockReset();
     mocked.modelGetStoredModelMock.mockReset();
-    mocked.modelSetCurrentModelMock.mockReset();
+    mocked.settingsSetCurrentModelMock.mockReset();
+    mocked.settingsClearTopicSessionBindingMock.mockReset();
+    mocked.topicGetBindingBySessionIdMock.mockReset();
+    mocked.topicGetBindingBySessionIdMock.mockReturnValue(undefined);
     mocked.pinnedIsInitializedMock.mockReset();
     mocked.pinnedIsInitializedMock.mockReturnValue(false);
     mocked.pinnedInitializeMock.mockReset();
@@ -501,5 +513,131 @@ describe("bot/commands/sessions", () => {
     expect(handled).toBe(true);
     expect(ctx.reply).toHaveBeenCalledWith(t("new.topic_create_no_rights"), expect.anything());
     expect(mocked.setCurrentSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the existing session model and agent instead of scope defaults", async () => {
+    mocked.sessionGetMock.mockResolvedValueOnce({
+      data: {
+        id: "session-9",
+        title: "Existing Session",
+        model: { providerID: "anthropic", id: "claude-opus", variant: "fast" },
+        agent: "review",
+      },
+      error: null,
+    });
+
+    interactionManager.start(
+      {
+        kind: "inline",
+        expectedInput: "callback",
+        metadata: {
+          menuKind: "session",
+          messageId: 456,
+        },
+      },
+      "111:1",
+    );
+    const ctx = createCallbackContext("session:session-9", 456);
+    (ctx as { chat?: unknown }).chat = { id: 111, type: "supergroup", is_forum: true };
+    ((ctx.callbackQuery as { message?: unknown }).message as { message_thread_id?: number })
+      .message_thread_id = 1;
+
+    const handled = await handleSessionSelect(ctx);
+
+    expect(handled).toBe(true);
+    expect(mocked.settingsSetCurrentModelMock).toHaveBeenCalledWith(
+      { providerID: "anthropic", modelID: "claude-opus", variant: "fast" },
+      expect.anything(),
+    );
+  });
+
+  it("links to the first bot message inside the created topic", async () => {
+    mocked.sessionGetMock.mockResolvedValueOnce({
+      data: {
+        id: "session-9",
+        title: "Existing Session",
+      },
+      error: null,
+    });
+
+    interactionManager.start(
+      {
+        kind: "inline",
+        expectedInput: "callback",
+        metadata: {
+          menuKind: "session",
+          messageId: 456,
+        },
+      },
+      "-1003752684115:1",
+    );
+    const ctx = createCallbackContext("session:session-9", 456);
+    (ctx as { chat?: unknown }).chat = { id: -1003752684115, type: "supergroup", is_forum: true };
+    ((ctx.callbackQuery as { message?: unknown }).message as { message_thread_id?: number })
+      .message_thread_id = 1;
+    (ctx.api.createForumTopic as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      message_thread_id: 49,
+    });
+    (ctx.api.sendMessage as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ message_id: 888 });
+
+    await handleSessionSelect(ctx);
+
+    const linkReply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([text]) => typeof text === "string" && text.includes("https://t.me/c/3752684115/888"),
+    );
+    expect(linkReply).toBeDefined();
+  });
+
+  it("recreates the topic when the bound topic was deleted manually", async () => {
+    mocked.sessionGetMock.mockResolvedValueOnce({
+      data: {
+        id: "session-9",
+        title: "Existing Session",
+      },
+      error: null,
+    });
+    mocked.topicGetBindingBySessionIdMock.mockReturnValueOnce({
+      scopeKey: "111:49",
+      chatId: 111,
+      threadId: 49,
+      sessionId: "session-9",
+      projectId: "project-1",
+      projectWorktree: "/repo",
+      topicName: "Existing Session",
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    interactionManager.start(
+      {
+        kind: "inline",
+        expectedInput: "callback",
+        metadata: {
+          menuKind: "session",
+          messageId: 456,
+        },
+      },
+      "111:1",
+    );
+    const ctx = createCallbackContext("session:session-9", 456);
+    (ctx as { chat?: unknown }).chat = { id: 111, type: "supergroup", is_forum: true };
+    ((ctx.callbackQuery as { message?: unknown }).message as { message_thread_id?: number })
+      .message_thread_id = 1;
+    (ctx.api.sendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("Bad Request: message thread is not found"),
+    );
+    (ctx.api.createForumTopic as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      message_thread_id: 50,
+    });
+
+    await handleSessionSelect(ctx);
+
+    expect(mocked.settingsClearTopicSessionBindingMock).toHaveBeenCalledWith("111:49");
+    expect(ctx.api.createForumTopic).toHaveBeenCalled();
+    const linkReply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([text]) => typeof text === "string" && text.includes("https://t.me/c/111/888"),
+    );
+    expect(linkReply).toBeDefined();
   });
 });
