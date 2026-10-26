@@ -1,9 +1,9 @@
 # OpenCode Telegram Group Topics Bot
 
-[![CI](https://github.com/shanekunz/opencode-telegram-group-topics-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/shanekunz/opencode-telegram-group-topics-bot/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/shanekunz/opencode-telegram-group-topics-bot)](https://github.com/shanekunz/opencode-telegram-group-topics-bot/releases)
-[![npm version](https://img.shields.io/npm/v/opencode-telegram-group-topics-bot)](https://www.npmjs.com/package/opencode-telegram-group-topics-bot)
-[![npm downloads](https://img.shields.io/npm/dt/opencode-telegram-group-topics-bot)](https://www.npmjs.com/package/opencode-telegram-group-topics-bot)
+[![CI](https://github.com/kevindevm/opencode-telegram-group-topics-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/kevindevm/opencode-telegram-group-topics-bot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/kevindevm/opencode-telegram-group-topics-bot)](https://github.com/kevindevm/opencode-telegram-group-topics-bot/releases)
+[![npm version](https://img.shields.io/npm/v/@kevindevm%2Fopencode-telegram-group-topics-bot)](https://www.npmjs.com/package/@kevindevm/opencode-telegram-group-topics-bot)
+[![npm downloads](https://img.shields.io/npm/dt/@kevindevm%2Fopencode-telegram-group-topics-bot)](https://www.npmjs.com/package/@kevindevm/opencode-telegram-group-topics-bot)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 
@@ -111,13 +111,13 @@ Default API URL: `http://localhost:4096` (V1) or `http://127.0.0.1:49374` (V2, s
 #### Option A: `npx`
 
 ```bash
-npx opencode-telegram-group-topics-bot
+npx @kevindevm/opencode-telegram-group-topics-bot
 ```
 
 #### Option B: Global install
 
 ```bash
-npm install -g opencode-telegram-group-topics-bot
+npm install -g @kevindevm/opencode-telegram-group-topics-bot
 opencode-telegram-group-topics-bot config
 opencode-telegram-group-topics-bot start
 ```
@@ -125,7 +125,7 @@ opencode-telegram-group-topics-bot start
 #### Option C: Run from source
 
 ```bash
-git clone https://github.com/shanekunz/opencode-telegram-group-topics-bot.git
+git clone https://github.com/kevindevm/opencode-telegram-group-topics-bot.git
 cd opencode-telegram-group-topics-bot
 npm install
 npm run build
@@ -138,7 +138,7 @@ npm run dev
 #### Option D: Docker
 
 ```bash
-git clone https://github.com/shanekunz/opencode-telegram-group-topics-bot.git
+git clone https://github.com/kevindevm/opencode-telegram-group-topics-bot.git
 cd opencode-telegram-group-topics-bot
 cp .env.example .env
 # fill in TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID, OPENCODE_MODEL_PROVIDER, OPENCODE_MODEL_ID
@@ -159,7 +159,7 @@ docker compose -f docker-compose.yml -f docker-compose.desktop.yml up -d --build
 
 On Docker Desktop the container cannot see host project paths or spawn `opencode` itself: run `opencode serve` on the host and prefer `/projects` paths that resolve inside the container (mount repos with an extra `volumes` entry if needed). `/opencode_start` and `/opencode_stop` are host-only features.
 
-Stable releases are published to `ghcr.io/shanekunz/opencode-telegram-group-topics-bot:<version>` and `ghcr.io/shanekunz/opencode-telegram-group-topics-bot:latest` for `linux/amd64` and `linux/arm64`. Release candidates receive only their exact version tag.
+Stable releases are published to `ghcr.io/kevindevm/opencode-telegram-group-topics-bot:<version>` and `ghcr.io/kevindevm/opencode-telegram-group-topics-bot:latest` for `linux/amd64` and `linux/arm64`. Release candidates receive only their exact version tag.
 
 #### Option E: Windows Service (NSSM, always-on)
 
@@ -393,7 +393,7 @@ Never commit your `.env` (ignored by default) or `settings.json` (runtime state 
 ### Run from source
 
 ```bash
-git clone https://github.com/shanekunz/opencode-telegram-group-topics-bot.git
+git clone https://github.com/kevindevm/opencode-telegram-group-topics-bot.git
 cd opencode-telegram-group-topics-bot
 npm install
 npm run build
