@@ -18,6 +18,12 @@ export function installProcessErrorHandlers(): void {
     logger.error("[Runtime] Unhandled promise rejection", {
       reason,
     });
+    // Same policy as uncaught exceptions: an unhandled rejection means an
+    // unknown subset of work was silently dropped. Crash so the service
+    // manager (NSSM/systemd/Docker) restarts from clean state instead of
+    // serving with lost messages, queues, or corrupted in-memory state.
+    logger.error("[Runtime] Exiting due to unhandled rejection; awaiting restart");
+    process.exit(1);
   });
 
   process.on(PROCESS_EVENT.UNCAUGHT_EXCEPTION, (error: Error) => {
@@ -26,5 +32,10 @@ export function installProcessErrorHandlers(): void {
       message: error.message,
       stack: error.stack,
     });
+    // An uncaught exception leaves unknown corrupted state behind. Crash so
+    // the service manager (NSSM/systemd/Docker) restarts from clean state
+    // instead of serving with a broken runtime.
+    logger.error("[Runtime] Exiting due to uncaught exception; awaiting restart");
+    process.exit(1);
   });
 }

@@ -35,6 +35,32 @@ function createAbortableStream(signal: AbortSignal): AsyncGenerator<Event, void,
   })();
 }
 
+function createControllableStream() {
+  const queue: Event[] = [];
+  let wake: (() => void) | null = null;
+  return {
+    push(event: Event): void {
+      queue.push(event);
+      wake?.();
+      wake = null;
+    },
+    stream(signal: AbortSignal): AsyncGenerator<Event, void, unknown> {
+      return (async function* () {
+        while (!signal.aborted) {
+          const next = queue.shift();
+          if (next) {
+            yield next;
+            continue;
+          }
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+        }
+      })();
+    },
+  };
+}
+
 describe("opencode/events", () => {
   afterEach(() => {
     stopEventListening();
@@ -83,29 +109,35 @@ describe("opencode/events", () => {
     expect(subscribeMock).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps existing stream when subscribing to another directory", async () => {
-    let signalA: { aborted: boolean } | null = null;
-    let signalB: { aborted: boolean } | null = null;
+  it("shares a single stream across directories and delivers each event once", async () => {
+    const controllable = createControllableStream();
+    subscribeMock.mockImplementation(
+      async (_params: unknown, options: { signal: AbortSignal }) => ({
+        stream: controllable.stream(options.signal),
+      }),
+    );
 
-    subscribeMock
-      .mockImplementationOnce(async (_params, options: { signal: AbortSignal }) => {
-        signalA = options.signal;
-        return { stream: createAbortableStream(options.signal) };
-      })
-      .mockImplementationOnce(async (_params, options: { signal: AbortSignal }) => {
-        signalB = options.signal;
-        return { stream: createAbortableStream(options.signal) };
-      });
+    const callbackA = vi.fn();
+    const callbackB = vi.fn();
 
-    await subscribeToEvents("/repo/a", vi.fn());
-    await subscribeToEvents("/repo/b", vi.fn());
+    await subscribeToEvents("/repo/a", callbackA);
+    await subscribeToEvents("/repo/b", callbackB);
+
+    expect(subscribeMock).toHaveBeenCalledTimes(1);
+
+    const event = {
+      type: "session.idle",
+      properties: { sessionID: "s1" },
+    } as unknown as Event;
+    controllable.push(event);
 
     await vi.waitFor(() => {
-      expect(subscribeMock).toHaveBeenCalledTimes(2);
+      expect(callbackA).toHaveBeenCalledTimes(1);
+      expect(callbackB).toHaveBeenCalledTimes(1);
     });
 
-    expect((signalA as { aborted: boolean } | null)?.aborted ?? null).toBe(false);
-    expect((signalB as { aborted: boolean } | null)?.aborted ?? null).toBe(false);
+    expect(callbackA).toHaveBeenCalledWith(event);
+    expect(callbackB).toHaveBeenCalledWith(event);
   });
 
   it("can unsubscribe a callback without stopping other listeners", async () => {
@@ -123,27 +155,65 @@ describe("opencode/events", () => {
     expect(subscribeMock).toHaveBeenCalledTimes(1);
   });
 
-  it("stops only requested directory listener", async () => {
-    let signalA: { aborted: boolean } | null = null;
-    let signalB: { aborted: boolean } | null = null;
-
+  it("repoints the shared stream to a remaining directory after stop", async () => {
+    const event = {
+      type: "session.idle",
+      properties: { sessionID: "s1" },
+    } as unknown as Event;
+    const controllable = createControllableStream();
     subscribeMock
-      .mockImplementationOnce(async (_params, options: { signal: AbortSignal }) => {
-        signalA = options.signal;
-        return { stream: createAbortableStream(options.signal) };
-      })
-      .mockImplementationOnce(async (_params, options: { signal: AbortSignal }) => {
-        signalB = options.signal;
-        return { stream: createAbortableStream(options.signal) };
-      });
+      .mockImplementationOnce(async (_params: unknown, options: { signal: AbortSignal }) => ({
+        stream: createStream([event]),
+      }))
+      .mockImplementation(async (_params: unknown, options: { signal: AbortSignal }) => ({
+        stream: controllable.stream(options.signal),
+      }));
 
     await subscribeToEvents("/repo/a", vi.fn());
     await subscribeToEvents("/repo/b", vi.fn());
+    stopEventListening("/repo/a");
+
+    await vi.waitFor(
+      () => {
+        expect(subscribeMock).toHaveBeenCalledTimes(2);
+      },
+      { timeout: 5000 },
+    );
+
+    const secondCallParams = subscribeMock.mock.calls[1]?.[0] as
+      | { directory?: string }
+      | undefined;
+    expect(secondCallParams?.directory).toBe("/repo/b");
+  });
+
+  it("stops only the requested directory listener on the shared stream", async () => {    const controllable = createControllableStream();
+    subscribeMock.mockImplementation(
+      async (_params: unknown, options: { signal: AbortSignal }) => ({
+        stream: controllable.stream(options.signal),
+      }),
+    );
+
+    const callbackA = vi.fn();
+    const callbackB = vi.fn();
+
+    await subscribeToEvents("/repo/a", callbackA);
+    await subscribeToEvents("/repo/b", callbackB);
 
     stopEventListening("/repo/a");
 
-    expect((signalA as { aborted: boolean } | null)?.aborted ?? null).toBe(true);
-    expect((signalB as { aborted: boolean } | null)?.aborted ?? null).toBe(false);
+    const event = {
+      type: "session.idle",
+      properties: { sessionID: "s1" },
+    } as unknown as Event;
+    controllable.push(event);
+
+    await vi.waitFor(() => {
+      expect(callbackB).toHaveBeenCalledTimes(1);
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(callbackA).not.toHaveBeenCalled();
+    expect(subscribeMock).toHaveBeenCalledTimes(1);
   });
 
   it("reconnects after stream end", async () => {

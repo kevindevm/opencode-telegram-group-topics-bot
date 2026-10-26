@@ -10,6 +10,7 @@ import { logger } from "../../utils/logger.js";
 import { safeBackgroundTask } from "../../utils/safe-background-task.js";
 import { t } from "../../i18n/index.js";
 import { getScopeKeyFromContext, getThreadIdFromScopeKey, getThreadSendOptions } from "../scope.js";
+import { truncateTelegramText } from "../utils/telegram-text.js";
 
 const MAX_BUTTON_LENGTH = 60;
 const QUESTION_ALLOWED_COMMANDS = [...DEFAULT_ALLOWED_INTERACTION_COMMANDS, "/last"];
@@ -29,6 +30,22 @@ function clearQuestionInteraction(reason: string, scopeKey: string): void {
   if (state?.kind === "question") {
     interactionManager.clear(reason, scopeKey);
   }
+}
+
+/**
+ * Duplicate SSE deliveries of the same question request (one per subscribed
+ * project) must not re-show the poll. Returns true when this requestID is
+ * already the active poll of the scope.
+ */
+export function isDuplicateQuestionDelivery(
+  scopeKey: string,
+  requestId: string | null | undefined,
+): boolean {
+  if (!requestId) {
+    return false;
+  }
+
+  return questionManager.isActive(scopeKey) && questionManager.getRequestID(scopeKey) === requestId;
 }
 
 function syncQuestionInteractionState(
@@ -249,6 +266,48 @@ export async function handleQuestionTextAnswer(
   await showNextQuestion(ctx, scopeKey);
 }
 
+/**
+ * Closes the poll after OpenCode settled it outside Telegram (e.g. answered
+ * on PC): the question keeps its text, loses its buttons and gets an
+ * outcome line, and the scope is released so messages flow again.
+ * Returns true when a matching active poll was closed.
+ */
+export async function closeQuestionSettledOutside(
+  api: Context["api"],
+  chatId: number,
+  scopeKey: string,
+  requestID: string | null,
+  outcome: "answered" | "cancelled",
+): Promise<boolean> {
+  if (!requestID || !questionManager.isActive(scopeKey)) {
+    return false;
+  }
+
+  if (questionManager.getRequestID(scopeKey) !== requestID) {
+    return false;
+  }
+
+  const question = questionManager.getCurrentQuestion(scopeKey);
+  const messageId = questionManager.getActiveMessageId(scopeKey);
+  const closedText =
+    question !== null
+      ? `${formatQuestionText(question, scopeKey)}\n${t(
+          outcome === "answered"
+            ? "question.settled_outside.answered"
+            : "question.settled_outside.cancelled",
+        )}`
+      : null;
+
+  questionManager.clear(scopeKey);
+  clearQuestionInteraction("question_settled_outside", scopeKey);
+
+  if (closedText !== null && messageId !== null) {
+    await api.editMessageText(chatId, messageId, closedText).catch(() => {});
+  }
+
+  return true;
+}
+
 async function showNextQuestion(ctx: Context, scopeKey: string): Promise<void> {
   questionManager.nextQuestion(scopeKey);
   if (!ctx.chat) {
@@ -351,7 +410,7 @@ function formatQuestionText(
   const headerTitle = [progressText, question.header].filter(Boolean).join(" ");
   const header = headerTitle ? `${headerTitle}\n\n` : "";
   const multiple = question.multiple ? t("question.multi_hint") : "";
-  return `${header}${question.question}${multiple}`;
+  return truncateTelegramText(`${header}${question.question}${multiple}`);
 }
 
 function buildQuestionKeyboard(
@@ -402,5 +461,7 @@ function formatAnswersSummary(answers: Array<{ question: string; answer: string 
     summary += t("question.summary.answer", { answer: item.answer });
   });
 
-  return summary;
+  // A long poll (many questions or pasted answers) would otherwise exceed
+  // Telegram's 4096-char message limit and fail the send.
+  return truncateTelegramText(summary);
 }

@@ -17,6 +17,7 @@ class KeyboardManager {
   private chatId: number | null = null;
   private lastUpdateTimeByScope = new Map<string, number>();
   private readonly UPDATE_DEBOUNCE_MS = 2000;
+  private lastSentMarkupByScope = new Map<string, string>();
 
   private getOrCreateState(scopeKey: string): KeyboardState {
     const existing = this.stateByScope.get(scopeKey);
@@ -74,6 +75,14 @@ class KeyboardManager {
     contextStateManager.clear(scopeKey);
   }
 
+  /** Drops all per-scope keyboard state (topic closed or rebound). */
+  public clearScope(scopeKey: string): void {
+    this.stateByScope.delete(scopeKey);
+    this.lastUpdateTimeByScope.delete(scopeKey);
+    this.lastSentMarkupByScope.delete(scopeKey);
+    contextStateManager.clear(scopeKey);
+  }
+
   public getContextInfo(scopeKey: string = "global"): ContextInfo | null {
     return contextStateManager.get(scopeKey);
   }
@@ -122,13 +131,27 @@ class KeyboardManager {
 
     this.lastUpdateTimeByScope.set(scopeKey, now);
 
+    const keyboard = this.buildKeyboard(scopeKey);
+
+    // Don't re-post an identical keyboard: the ticker fires periodically and
+    // most ticks have nothing new to show.
+    const fingerprint = JSON.stringify(keyboard);
+    if (this.lastSentMarkupByScope.get(scopeKey) === fingerprint) {
+      return;
+    }
+
     try {
-      const keyboard = this.buildKeyboard(scopeKey);
       const threadId = getThreadIdFromScopeKey(scopeKey);
-      await this.api.sendMessage(targetChatId, t("keyboard.updated"), {
+      const sent = await this.api.sendMessage(targetChatId, t("keyboard.updated"), {
         reply_markup: keyboard,
+        disable_notification: true,
         ...(typeof threadId === "number" ? { message_thread_id: threadId } : {}),
       });
+      this.lastSentMarkupByScope.set(scopeKey, fingerprint);
+      // Silent refresh: the reply keyboard persists in the chat after its
+      // carrier message is deleted, so remove it right away instead of
+      // leaving a "keyboard updated" notice behind.
+      await this.api.deleteMessage(targetChatId, sent.message_id).catch(() => {});
     } catch (err) {
       logger.error("[KeyboardManager] Failed to send keyboard update:", err);
     }

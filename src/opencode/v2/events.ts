@@ -121,9 +121,10 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
       finish?: string;
       error?: ReturnType<typeof toV1ErrorPayload>;
     } = {},
+    sessionIDFallback?: string,
   ): Event => {
     const state = messages.get(messageID);
-    const sessionID = state?.sessionID ?? "";
+    const sessionID = state?.sessionID ?? sessionIDFallback ?? "";
     const directory = sessions.get(sessionID)?.directory ?? "";
     return {
       id: `${messageID}:updated`,
@@ -460,7 +461,7 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
             tokens: data.tokens,
             cost: data.cost,
             finish: data.finish,
-          }),
+          }, data.sessionID),
         ];
         messages.delete(data.assistantMessageID);
         return translated;
@@ -469,12 +470,16 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
       case "session.step.failed": {
         const data = event.data;
         const translated = [
-          assistantInfo(data.assistantMessageID, {
-            completed: created,
-            error: toV1ErrorPayload(data.error),
-            ...(data.tokens ? { tokens: data.tokens } : {}),
-            ...(data.cost !== undefined ? { cost: data.cost } : {}),
-          }),
+          assistantInfo(
+            data.assistantMessageID,
+            {
+              completed: created,
+              error: toV1ErrorPayload(data.error),
+              ...(data.tokens ? { tokens: data.tokens } : {}),
+              ...(data.cost !== undefined ? { cost: data.cost } : {}),
+            },
+            data.sessionID,
+          ),
         ];
         messages.delete(data.assistantMessageID);
         return translated;
@@ -652,6 +657,21 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
             properties: { sessionID: event.data.sessionID },
           },
         ];
+
+      case "session.usage.updated": {
+        const data = event.data;
+        return [
+          {
+            id: event.id,
+            type: "session.usage.updated",
+            properties: {
+              sessionID: data.sessionID,
+              cost: data.cost,
+              tokens: data.tokens,
+            },
+          } as unknown as Event,
+        ];
+      }
 
       case "permission.asked": {
         const request = toV1Permission(event.data);

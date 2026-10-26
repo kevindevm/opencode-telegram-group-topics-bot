@@ -7,6 +7,7 @@ import {
 } from "@opencode/client";
 import { Service } from "@opencode/client/service";
 import { createV2EventTranslator, type V1GlobalEvent } from "./events.js";
+import { logger } from "../../utils/logger.js";
 import {
   toFormAnswer,
   toV1Agent,
@@ -158,8 +159,24 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
   // A message queued before the event stream reconnected is delivered on the new stream.
   const inboxItems = new Map<string, SessionInboxItem>();
 
+  // Abandoned requests (restart, dropped sessions) never get their cleanup
+  // callback, so cap these registries with FIFO eviction instead of growing
+  // for the lifetime of the process.
+  const PENDING_REGISTRY_LIMIT = 1000;
+
+  function rememberBounded<K, V>(registry: Map<K, V>, key: K, value: V): void {
+    registry.set(key, value);
+    while (registry.size > PENDING_REGISTRY_LIMIT) {
+      const oldest = registry.keys().next();
+      if (oldest.done) {
+        break;
+      }
+      registry.delete(oldest.value);
+    }
+  }
+
   const rememberForm = (form: FormInfo) => {
-    forms.set(form.id, form);
+    rememberBounded(forms, form.id, form);
   };
 
   // The process behind the last stream connection: a different one on the next connection
@@ -237,7 +254,11 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
   async function listMessages(sessionID: string, limit?: number) {
     if (limit !== undefined) {
       // Other entry kinds (idle markers, model switches) share the page, so over-fetch.
-      const page = await client.message.list({ sessionID, limit: limit * 3, order: "desc" });
+      const page = await client.message.list({
+        sessionID,
+        limit: Math.min(limit * 3, MESSAGE_PAGE_SIZE),
+        order: "desc",
+      });
       return [...page.data].reverse();
     }
     const all = [];
@@ -331,6 +352,33 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
     let finished = false;
     let failure: unknown;
     let lastDelivered = Date.now();
+    // The producer runs detached from the consumer: if the consumer stalls
+    // (slow dispatch, blocked session chain), an unbounded queue would grow
+    // into OOM on an event burst. Drop oldest-first past the cap, loudly —
+    // a gap is recoverable, an OOM is not.
+    const MAX_STREAM_QUEUE = 1000;
+
+    function pushEvent(item: V1GlobalEvent): void {
+      queue.push(item);
+      if (queue.length > MAX_STREAM_QUEUE) {
+        queue.splice(0, queue.length - MAX_STREAM_QUEUE);
+        logger.warn("[V2] Event stream queue overflow; dropped oldest events");
+      }
+    }
+    // Set when the consumer side is gone (break/return/throw/abort) so the
+    // detached producer loop below stops pushing into an undrained queue.
+    let closed = false;
+    let aborted = signal?.aborted ?? false;
+    if (signal && !aborted) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          aborted = true;
+          notify();
+        },
+        { once: true },
+      );
+    }
 
     const notify = () => {
       const resolve = wake;
@@ -348,7 +396,7 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
           type: "server.heartbeat",
           properties: {},
         };
-        queue.push({ payload: heartbeat as unknown as Event });
+        pushEvent({ payload: heartbeat as unknown as Event });
         notify();
       }
     };
@@ -359,17 +407,24 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
           ...(signal ? { signal } : {}),
           onActivity,
         })) {
+          if (closed || aborted) {
+            break;
+          }
           // Read before the connect is handed on, so it is known ahead of the events after it.
           const restarted =
             event.type === "server.connected" ? await readServerRestart() : undefined;
+          if (closed || aborted) {
+            break;
+          }
           for (const translated of translate(event, restarted)) {
             if (translated.payload.type === "permission.asked") {
-              permissionSessions.set(
+              rememberBounded(
+                permissionSessions,
                 translated.payload.properties.id,
                 translated.payload.properties.sessionID,
               );
             }
-            queue.push(translated);
+            pushEvent(translated);
           }
           notify();
         }
@@ -382,22 +437,29 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
     })();
 
     return (async function* () {
-      while (true) {
-        const next = queue.shift();
-        if (next) {
-          lastDelivered = Date.now();
-          yield next;
-          continue;
+      try {
+        while (true) {
+          const next = queue.shift();
+          if (next) {
+            lastDelivered = Date.now();
+            yield next;
+            continue;
+          }
+          if (aborted) {
+            return;
+          }
+          if (failure !== undefined) {
+            throw failure;
+          }
+          if (finished) {
+            return;
+          }
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
         }
-        if (failure !== undefined) {
-          throw failure;
-        }
-        if (finished) {
-          return;
-        }
-        await new Promise<void>((resolve) => {
-          wake = resolve;
-        });
+      } finally {
+        closed = true;
       }
     })();
   }
@@ -549,6 +611,11 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
           await client.session.interrupt({ sessionID: params.sessionID });
           return true;
         }),
+      background: (params: { sessionID: string }) =>
+        run(async () => {
+          await client.session.background({ sessionID: params.sessionID });
+          return true;
+        }),
       summarize: (params: { sessionID: string }) =>
         run(async () => {
           await client.session.compact({ sessionID: params.sessionID, delivery: "queue" });
@@ -653,7 +720,7 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
         run(async () => {
           const result = await client.permission.request.list(location(params?.directory));
           return result.data.map((request) => {
-            permissionSessions.set(request.id, request.sessionID);
+            rememberBounded(permissionSessions, request.id, request.sessionID);
             return toV1Permission(request);
           });
         }),

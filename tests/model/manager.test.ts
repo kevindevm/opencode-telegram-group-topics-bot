@@ -38,8 +38,11 @@ vi.mock("../../src/utils/logger.js", () => ({
 
 import {
   __resetModelCatalogCacheForTests,
+  addFavoriteModel,
   getFavoriteModels,
   getModelSelectionLists,
+  removeFavoriteModel,
+  searchModels,
 } from "../../src/model/manager.js";
 
 describe("model/manager", () => {
@@ -310,6 +313,215 @@ describe("model/manager", () => {
       expect(favorites).toContainEqual({ providerID: "opencode", modelID: "big-pickle" });
       // recent models should not be in favorites
       expect(favorites).not.toContainEqual({ providerID: "google", modelID: "gemini-pro" });
+    });
+  });
+
+  describe("searchModels", () => {
+    it("matches case-insensitive substrings sorted alphabetically", async () => {
+      const results = await searchModels("GPT");
+
+      expect(results).toEqual([
+        { providerID: "openai", modelID: "gpt-3.5" },
+        { providerID: "openai", modelID: "gpt-4o" },
+      ]);
+    });
+
+    it("matches provider names", async () => {
+      const results = await searchModels("anthropic");
+
+      expect(results).toEqual([{ providerID: "anthropic", modelID: "claude-sonnet" }]);
+    });
+
+    it("returns an empty array for blank queries", async () => {
+      expect(await searchModels("")).toEqual([]);
+      expect(await searchModels("   ")).toEqual([]);
+      expect(providersMock).not.toHaveBeenCalled();
+    });
+
+    it("returns an empty array when nothing matches", async () => {
+      expect(await searchModels("no-such-model-xyz")).toEqual([]);
+    });
+
+    it("caps results at ten matches", async () => {
+      providersMock.mockResolvedValueOnce({
+        data: {
+          providers: [
+            {
+              id: "zoo",
+              models: Object.fromEntries(
+                Array.from({ length: 12 }, (_, index) => [`model-${index}`, {}]),
+              ),
+            },
+          ],
+        },
+        error: null,
+      });
+
+      const results = await searchModels("zoo");
+
+      expect(results).toHaveLength(10);
+    });
+
+    it("returns an empty array when the catalog is unavailable", async () => {
+      providersMock.mockResolvedValueOnce({ data: undefined, error: new Error("down") });
+
+      expect(await searchModels("gpt")).toEqual([]);
+    });
+
+    it("does not cache an empty catalog as valid", async () => {
+      providersMock.mockResolvedValueOnce({ data: { providers: [] }, error: null });
+      expect(await searchModels("gpt")).toEqual([]);
+
+      // A fresh fetch right after must work instead of serving poisoned emptiness.
+      const results = await searchModels("gpt");
+
+      expect(results).toContainEqual({ providerID: "openai", modelID: "gpt-4o" });
+    });
+
+    it("keeps the stale catalog when a refresh comes back empty", async () => {
+      vi.useFakeTimers();
+      try {
+        expect(await searchModels("gpt")).not.toEqual([]);
+
+        vi.advanceTimersByTime(11 * 60 * 1000);
+        providersMock.mockResolvedValueOnce({ data: { providers: [] }, error: null });
+
+        const results = await searchModels("gpt");
+
+        expect(results).toContainEqual({ providerID: "openai", modelID: "gpt-4o" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("falls back to in-order matches for transposed queries like gml", async () => {
+      providersMock.mockResolvedValueOnce({
+        data: {
+          providers: [
+            { id: "zai-org", models: { "GLM-4.6V-Flash": {}, "GLM-4.7": {} } },
+            { id: "openai", models: { "gpt-4o": {} } },
+          ],
+        },
+        error: null,
+      });
+
+      const results = await searchModels("gml");
+
+      // "glm-4.6v-flash" contains g...m...l in order; "glm-4.7" has no l after m.
+      expect(results).toContainEqual({ providerID: "zai-org", modelID: "GLM-4.6V-Flash" });
+      expect(results).not.toContainEqual({ providerID: "zai-org", modelID: "GLM-4.7" });
+      expect(results).not.toContainEqual({ providerID: "openai", modelID: "gpt-4o" });
+    });
+
+    it("prefers substring matches before fuzzy ones", async () => {
+      providersMock.mockResolvedValueOnce({
+        data: {
+          providers: [
+            { id: "openai", models: { "gpt-4o": {} } },
+            { id: "zoo", models: { "xylophone-gpt": {} } },
+          ],
+        },
+        error: null,
+      });
+
+      const results = await searchModels("gpt");
+
+      expect(results[0]).toEqual({ providerID: "openai", modelID: "gpt-4o" });
+    });
+
+    it("ranks model-id prefix matches first", async () => {
+      providersMock.mockResolvedValueOnce({
+        data: {
+          providers: [
+            { id: "zoo", models: { "auto-glm-phone": {} } },
+            { id: "opencode", models: { "glm-5.3-flash-free": {} } },
+          ],
+        },
+        error: null,
+      });
+
+      const results = await searchModels("glm");
+
+      expect(results[0]).toEqual({ providerID: "opencode", modelID: "glm-5.3-flash-free" });
+    });
+
+    it("boosts free-tier variants above paid ones", async () => {
+      providersMock.mockResolvedValueOnce({
+        data: {
+          providers: [
+            {
+              id: "mix",
+              models: { "zzz-flash": {}, "aaa-flash-free": {}, "mmm-flash": {} },
+            },
+          ],
+        },
+        error: null,
+      });
+
+      const results = await searchModels("flash");
+
+      expect(results[0]).toEqual({ providerID: "mix", modelID: "aaa-flash-free" });
+    });
+  });
+
+  describe("favorites persistence", () => {
+    it("adds a favorite and reads it back", async () => {
+      await setupMockModelFile({ favorite: [], recent: [] });
+
+      expect(await addFavoriteModel({ providerID: "openai", modelID: "gpt-4o" })).toBe(true);
+
+      const favorites = await getFavoriteModels();
+      expect(favorites).toContainEqual({ providerID: "openai", modelID: "gpt-4o" });
+    });
+
+    it("does not duplicate an existing favorite", async () => {
+      await setupMockModelFile({ favorite: [{ providerID: "openai", modelID: "gpt-4o" }] });
+
+      expect(await addFavoriteModel({ providerID: "openai", modelID: "gpt-4o" })).toBe(false);
+
+      const favorites = await getFavoriteModels();
+      expect(favorites.filter((m) => m.modelID === "gpt-4o")).toHaveLength(1);
+    });
+
+    it("removes a favorite", async () => {
+      await setupMockModelFile({
+        favorite: [
+          { providerID: "openai", modelID: "gpt-4o" },
+          { providerID: "anthropic", modelID: "claude-sonnet" },
+        ],
+      });
+
+      expect(await removeFavoriteModel("openai", "gpt-4o")).toBe(true);
+
+      const favorites = await getFavoriteModels();
+      expect(favorites).toContainEqual({
+        providerID: "anthropic",
+        modelID: "claude-sonnet",
+      });
+      expect(favorites).not.toContainEqual({ providerID: "openai", modelID: "gpt-4o" });
+    });
+
+    it("returns false when removing a missing favorite", async () => {
+      await setupMockModelFile({ favorite: [] });
+
+      expect(await removeFavoriteModel("openai", "gpt-9")).toBe(false);
+    });
+
+    it("creates the state file when none exists", async () => {
+      tempDir = await mkdtemp(path.join(os.tmpdir(), "opencode-model-test-"));
+      process.env.XDG_STATE_HOME = tempDir;
+
+      expect(await addFavoriteModel({ providerID: "openai", modelID: "gpt-4o" })).toBe(true);
+
+      const favorites = await getFavoriteModels();
+      expect(favorites).toContainEqual({ providerID: "openai", modelID: "gpt-4o" });
+    });
+
+    it("rejects invalid models", async () => {
+      await setupMockModelFile({ favorite: [] });
+
+      expect(await addFavoriteModel({ providerID: "", modelID: "x" })).toBe(false);
+      expect(await addFavoriteModel({ providerID: "p", modelID: "" })).toBe(false);
     });
   });
 });

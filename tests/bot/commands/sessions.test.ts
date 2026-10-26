@@ -261,7 +261,7 @@ describe("bot/commands/sessions", () => {
     const ctx = createCommandContext();
     await sessionsCommand(ctx as never);
 
-    expect(ctx.reply).toHaveBeenCalledWith(t("projects.worktree_missing"));
+    expect(ctx.reply).toHaveBeenCalledWith(t("projects.worktree_missing"), {});
     expect(mocked.sessionListMock).not.toHaveBeenCalled();
   });
 
@@ -569,10 +569,10 @@ describe("bot/commands/sessions", () => {
           messageId: 456,
         },
       },
-      "-1003752684115:1",
+      "-1001234567890:1",
     );
     const ctx = createCallbackContext("session:session-9", 456);
-    (ctx as { chat?: unknown }).chat = { id: -1003752684115, type: "supergroup", is_forum: true };
+    (ctx as { chat?: unknown }).chat = { id: -1001234567890, type: "supergroup", is_forum: true };
     ((ctx.callbackQuery as { message?: unknown }).message as { message_thread_id?: number })
       .message_thread_id = 1;
     (ctx.api.createForumTopic as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -583,7 +583,7 @@ describe("bot/commands/sessions", () => {
     await handleSessionSelect(ctx);
 
     const linkReply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls.find(
-      ([text]) => typeof text === "string" && text.includes("https://t.me/c/3752684115/888"),
+      ([text]) => typeof text === "string" && text.includes("https://t.me/c/1234567890/888"),
     );
     expect(linkReply).toBeDefined();
   });

@@ -108,7 +108,7 @@ function getServiceEntryScriptPath(): string {
 
 async function stopWindowsProcess(pid: number, timeoutMs: number): Promise<void> {
   try {
-    await execAsync(`taskkill /PID ${pid} /T`);
+    await execAsync(`taskkill /PID ${pid} /T`, { timeout: 10_000 });
   } catch {
     // Continue with forced stop if needed.
   }
@@ -117,7 +117,7 @@ async function stopWindowsProcess(pid: number, timeoutMs: number): Promise<void>
     return;
   }
 
-  await execAsync(`taskkill /F /PID ${pid} /T`);
+  await execAsync(`taskkill /F /PID ${pid} /T`, { timeout: 10_000 });
   await waitForProcessExit(pid, timeoutMs);
 }
 

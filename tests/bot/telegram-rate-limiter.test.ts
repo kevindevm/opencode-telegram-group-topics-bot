@@ -297,4 +297,85 @@ describe("bot/telegram-rate-limiter", () => {
 
     vi.useRealTimers();
   });
+
+  it("gives up after repeated rate limits so the queue keeps draining", async () => {
+    vi.useFakeTimers();
+
+    const limiter = new TelegramRateLimiter();
+    let attempts = 0;
+
+    const stuckJob = limiter.enqueue(
+      "sendMessage",
+      { chat_id: -1001, message_thread_id: 77 },
+      async (): Promise<string> => {
+        attempts += 1;
+        throw createRetryAfterError(1);
+      },
+    );
+    const stuckPromise = expect(stuckJob).rejects.toThrow(/rate limit/i);
+
+    const queuedOrder: string[] = [];
+    const nextJob = limiter.enqueue(
+      "sendMessage",
+      { chat_id: -1001, message_thread_id: 78 },
+      async () => {
+        queuedOrder.push("next");
+        return "next-ok";
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    await stuckPromise;
+    // 1 initial attempt + capped retries (not unbounded).
+    expect(attempts).toBeLessThanOrEqual(11);
+    await expect(nextJob).resolves.toBe("next-ok");
+    expect(queuedOrder).toEqual(["next"]);
+
+    vi.useRealTimers();
+  });
+});
+
+describe("runWithRateLimitRetries", () => {
+  it("passes through the first success", async () => {
+    const { runWithRateLimitRetries } = await import(
+      "../../src/bot/telegram-rate-limiter.js"
+    );
+    await expect(runWithRateLimitRetries("probe", async () => 42)).resolves.toBe(42);
+  });
+
+  it("rethrows non-rate-limit errors immediately", async () => {
+    const { runWithRateLimitRetries } = await import(
+      "../../src/bot/telegram-rate-limiter.js"
+    );
+    const boom = new Error("Bad Request: message to edit not found");
+    await expect(
+      runWithRateLimitRetries("probe", async () => {
+        throw boom;
+      }),
+    ).rejects.toBe(boom);
+  });
+
+  it("gives up with RateLimitExceededError after the budget", async () => {
+    vi.useFakeTimers();
+    try {
+      const { RateLimitExceededError, runWithRateLimitRetries } = await import(
+        "../../src/bot/telegram-rate-limiter.js"
+      );
+      let attempts = 0;
+      const pending = runWithRateLimitRetries(
+        "probe",
+        async (): Promise<string> => {
+          attempts += 1;
+          throw { parameters: { retry_after: 1 } };
+        },
+        3,
+      );
+      const assertion = expect(pending).rejects.toBeInstanceOf(RateLimitExceededError);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await assertion;
+      expect(attempts).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

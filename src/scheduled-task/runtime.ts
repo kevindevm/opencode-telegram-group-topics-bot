@@ -349,6 +349,7 @@ async function finalizeTaskRun(bot: Bot<Context>, task: ScheduledTask): Promise<
       runCount: existingTask.runCount + 1,
       lastStatus: execution.status,
       lastError: execution.errorMessage,
+      lastResult: execution.resultText ? execution.resultText.slice(0, 2000) : null,
     }));
 
     if (!updatedTask) {
@@ -445,7 +446,12 @@ export function createScheduledTaskRuntime(bot: Bot<Context>): ScheduledTaskRunt
     const executions: Promise<void>[] = [];
 
     for (const task of tasks) {
-      if (!task.nextRunAt || task.lastStatus === "running" || runningTaskIds.has(task.id)) {
+      if (
+        !task.nextRunAt ||
+        task.paused ||
+        task.lastStatus === "running" ||
+        runningTaskIds.has(task.id)
+      ) {
         continue;
       }
 

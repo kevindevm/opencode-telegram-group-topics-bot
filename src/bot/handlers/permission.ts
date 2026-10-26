@@ -1,5 +1,6 @@
 import { Context, InlineKeyboard } from "grammy";
 import { permissionManager } from "../../permission/manager.js";
+import { getTrustLevel, isAutoAllowed } from "../../permission/trust.js";
 import { opencodeClient } from "../../opencode/client.js";
 import { getCurrentProject } from "../../settings/manager.js";
 import { getCurrentSession, getSessionById } from "../../session/manager.js";
@@ -10,7 +11,7 @@ import { logger } from "../../utils/logger.js";
 import { PermissionRequest, PermissionReply } from "../../permission/types.js";
 import type { I18nKey } from "../../i18n/en.js";
 import { t } from "../../i18n/index.js";
-import { sendBotText } from "../utils/telegram-text.js";
+import { sendBotText, truncateTelegramText } from "../utils/telegram-text.js";
 import { getScopeFromContext, getScopeKeyFromContext, getThreadSendOptions } from "../scope.js";
 
 const PERMISSION_CALLBACK = {
@@ -21,6 +22,126 @@ const PERMISSION_CALLBACK = {
 } as const;
 
 const TELEGRAM_PERMISSION_SEND_RETRY_LIMIT = 3;
+
+/**
+ * Grace period before a permission poll is shown. Requests resolved quickly
+ * (e.g. auto-accepted on PC) never pop a poll, so spammy agents don't block
+ * the topic and the interaction only starts for genuinely pending requests.
+ */
+const PERMISSION_SHOW_GRACE_MS = 2500;
+
+const pendingShowTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; scopeKey: string }>();
+
+/**
+ * Schedules the poll for a permission request after the grace period.
+ * Duplicate deliveries of the same request share a single timer.
+ */
+export function schedulePermissionPoll(
+  bot: Context["api"],
+  chatId: number,
+  request: PermissionRequest,
+  scopeKey: string,
+  threadId: number | null,
+): void {
+  if (permissionManager.wasSettledRecently(request.id)) {
+    logger.debug(
+      `[PermissionHandler] Skipping schedule for already-settled request: requestID=${request.id}`,
+    );
+    return;
+  }
+
+  if (pendingShowTimers.has(request.id)) {
+    return;
+  }
+
+  const trustLevel = getTrustLevel(request.sessionID);
+  if (isAutoAllowed(trustLevel, request.permission)) {
+    logger.info(
+      `[PermissionHandler] Auto-approving permission by trust level ${trustLevel}: type=${request.permission}, requestID=${request.id}`,
+    );
+    void autoApprovePermissionRequest(request, scopeKey);
+    return;
+  }
+
+  logger.debug(
+    `[PermissionHandler] Scheduling permission poll in ${PERMISSION_SHOW_GRACE_MS}ms: requestID=${request.id}`,
+  );
+  const timer = setTimeout(() => {
+    pendingShowTimers.delete(request.id);
+    void showPermissionRequest(bot, chatId, request, scopeKey, threadId).catch((error) => {
+      logger.error("[PermissionHandler] Failed to show scheduled permission poll:", error);
+    });
+  }, PERMISSION_SHOW_GRACE_MS);
+  pendingShowTimers.set(request.id, { timer, scopeKey });
+}
+
+export function cancelScheduledPermissionPoll(requestID: string): void {
+  const pending = pendingShowTimers.get(requestID);
+  if (!pending) {
+    return;
+  }
+
+  clearTimeout(pending.timer);
+  pendingShowTimers.delete(requestID);
+}
+
+export function cancelAllScheduledPermissionPolls(scopeKey?: string): void {
+  for (const [requestID, pending] of pendingShowTimers) {
+    if (scopeKey !== undefined && pending.scopeKey !== scopeKey) {
+      continue;
+    }
+
+    clearTimeout(pending.timer);
+    pendingShowTimers.delete(requestID);
+  }
+}
+
+export function __resetScheduledPermissionPollsForTests(): void {
+  for (const pending of pendingShowTimers.values()) {
+    clearTimeout(pending.timer);
+  }
+
+  pendingShowTimers.clear();
+}
+
+/**
+ * Replies "once" to a permission request covered by the session trust level,
+ * without showing a poll. Silent by design: trust mode exists to remove taps.
+ */
+async function autoApprovePermissionRequest(
+  request: PermissionRequest,
+  scopeKey: string,
+): Promise<void> {
+  const currentProject = getCurrentProject(scopeKey);
+  const currentSession = getCurrentSession(scopeKey);
+  const cachedSession = getSessionById(request.sessionID);
+  const directory =
+    (currentSession?.id === request.sessionID ? currentSession.directory : null) ??
+    cachedSession?.directory ??
+    currentProject?.worktree;
+
+  if (!directory) {
+    logger.warn(
+      `[PermissionHandler] Cannot auto-approve permission, no directory: requestID=${request.id}`,
+    );
+    return;
+  }
+
+  const { error } = await opencodeClient.permission.reply({
+    requestID: request.id,
+    directory,
+    reply: "once",
+  });
+
+  if (error) {
+    logger.warn("[PermissionHandler] Trust auto-approve failed, poll will show instead:", error);
+    return;
+  }
+
+  logger.info(`[PermissionHandler] Trust auto-approved permission: requestID=${request.id}`);
+  permissionManager.markSettled(request.id);
+  cancelScheduledPermissionPoll(request.id);
+}
 
 type PermissionCallbackAction = PermissionReply;
 
@@ -72,6 +193,24 @@ const PERMISSION_NAME_KEYS: Record<string, I18nKey> = {
   external_directory: "permission.name.external_directory",
 };
 
+// Permission reply outcome lines shown once a prompt settles
+const PERMISSION_OUTCOME_KEYS: Record<PermissionReply, I18nKey> = {
+  once: "permission.outcome.once",
+  always: "permission.outcome.always",
+  reject: "permission.outcome.reject",
+};
+
+export function buildPermissionOutcomeText(
+  request: PermissionRequest,
+  outcome: PermissionReply | "settled_outside",
+): string {
+  const outcomeLine =
+    outcome === "settled_outside"
+      ? t("permission.outcome.settled_outside")
+      : t(PERMISSION_OUTCOME_KEYS[outcome]);
+  return `${formatPermissionText(request).trimEnd()}\n${outcomeLine}`;
+}
+
 // Permission type emojis
 const PERMISSION_EMOJIS: Record<string, string> = {
   bash: "⚡",
@@ -105,7 +244,7 @@ function clearPermissionInteraction(reason: string, scopeKey: string): void {
   }
 }
 
-function syncPermissionInteractionState(
+export function syncPermissionInteractionState(
   scopeKey: string,
   metadata: Record<string, unknown> = {},
 ): void {
@@ -145,6 +284,33 @@ function syncPermissionInteractionState(
 
 function isPermissionReply(value: string): value is PermissionReply {
   return value === "once" || value === "always" || value === "reject";
+}
+
+function isPermissionRequestNotFound(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as {
+    _tag?: unknown;
+    name?: unknown;
+    message?: unknown;
+    data?: { message?: unknown };
+  };
+
+  if (candidate._tag === "PermissionNotFoundError") {
+    return true;
+  }
+
+  if (candidate.name === "NotFoundError") {
+    return true;
+  }
+
+  return [candidate.message, candidate.data?.message].some(
+    (message) =>
+      typeof message === "string" &&
+      message.toLowerCase().includes("permission request not found"),
+  );
 }
 
 function parsePermissionCallback(data: string): ParsedPermissionCallback | null {
@@ -297,6 +463,22 @@ async function handlePermissionReply(
 
   if (error) {
     logger.error("[PermissionHandler] Failed to send permission reply:", error);
+
+    if (isPermissionRequestNotFound(error)) {
+      logger.info(
+        `[PermissionHandler] Permission already resolved server-side, dropping poll: requestID=${requestID}`,
+      );
+      permissionManager.markSettled(requestID);
+      cancelScheduledPermissionPoll(requestID);
+      await ctx
+        .editMessageText(buildPermissionOutcomeText(request, "settled_outside"))
+        .catch(() => {});
+      permissionManager.removeByMessageId(callbackMessageId, scopeKey);
+      syncPermissionInteractionState(scopeKey, {});
+      await ctx.answerCallbackQuery().catch(() => {});
+      return;
+    }
+
     if (ctx.api) {
       await ctx.api
         .sendMessage(chatId, t("permission.send_reply_error"), getThreadSendOptions(threadId))
@@ -307,8 +489,9 @@ async function handlePermissionReply(
 
   logger.info("[PermissionHandler] Permission reply sent successfully");
 
-  // Delete the permission message only after successful reply
-  await ctx.deleteMessage().catch(() => {});
+  permissionManager.markSettled(requestID);
+  cancelScheduledPermissionPoll(requestID);
+  await ctx.editMessageText(buildPermissionOutcomeText(request, reply)).catch(() => {});
 
   permissionManager.removeByMessageId(callbackMessageId, scopeKey);
 
@@ -333,6 +516,13 @@ export async function showPermissionRequest(
   threadId: number | null,
 ): Promise<void> {
   logger.debug(`[PermissionHandler] Showing permission request: ${request.permission}`);
+
+  if (permissionManager.consumeSettled(request.id)) {
+    logger.info(
+      `[PermissionHandler] Skipping poll for already-settled request: requestID=${request.id}, scope=${scopeKey}`,
+    );
+    return;
+  }
 
   if (permissionManager.hasRequestID(request.id, scopeKey)) {
     logger.info(
@@ -427,7 +617,7 @@ function formatPermissionText(request: PermissionRequest): string {
     });
   }
 
-  return text;
+  return truncateTelegramText(text);
 }
 
 /**

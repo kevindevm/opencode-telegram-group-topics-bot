@@ -85,7 +85,7 @@ describe("bot/handlers/voice", () => {
 
     await handleVoiceMessage(ctx, deps);
 
-    expect(replyMock).toHaveBeenCalledWith(t("stt.recognizing"));
+    expect(replyMock).toHaveBeenCalledWith(t("stt.recognizing"), {});
     expect(processPromptMock).toHaveBeenCalledWith(ctx, "run tests", deps);
   });
 
@@ -98,7 +98,7 @@ describe("bot/handlers/voice", () => {
 
     await handleVoiceMessage(ctx, deps);
 
-    expect(replyMock).toHaveBeenCalledWith(t("stt.not_configured"));
+    expect(replyMock).toHaveBeenCalledWith(t("stt.not_configured"), {});
     expect(downloadMock).not.toHaveBeenCalled();
     expect(processPromptMock).not.toHaveBeenCalled();
   });

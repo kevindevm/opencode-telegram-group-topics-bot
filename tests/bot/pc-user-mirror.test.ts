@@ -83,4 +83,31 @@ describe("bot/pc-user-mirror", () => {
 
     expect(takePcUserText("ses-1", "msg-5", "   ")).toBeNull();
   });
+
+  it("mirrors into abandoned bindings whose topic still exists", () => {
+    mocked.getTopicBindingBySessionIdMock.mockReturnValue({
+      ...ACTIVE_BINDING,
+      status: "abandoned",
+    });
+    registerPcUserMessage("ses-1", "msg-6");
+
+    const payload = takePcUserText("ses-1", "msg-6", "hola de nuevo");
+
+    expect(payload).toEqual({
+      sessionId: "ses-1",
+      messageId: "msg-6",
+      text: "hola de nuevo",
+      target: { chatId: -100, threadId: 178 },
+    });
+  });
+
+  it("still skips stale bindings pointing at deleted topics", () => {
+    mocked.getTopicBindingBySessionIdMock.mockReturnValue({
+      ...ACTIVE_BINDING,
+      status: "stale",
+    });
+    registerPcUserMessage("ses-1", "msg-7");
+
+    expect(takePcUserText("ses-1", "msg-7", "hola")).toBeNull();
+  });
 });

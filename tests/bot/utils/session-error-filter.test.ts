@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isOperationAbortedSessionError,
+  isInvalidRequestSessionError,
   SessionErrorThrottle,
 } from "../../../src/bot/utils/session-error-filter.js";
 
@@ -9,6 +10,17 @@ describe("bot/utils/session-error-filter", () => {
     expect(isOperationAbortedSessionError("The operation was aborted.")).toBe(true);
     expect(isOperationAbortedSessionError("AbortError: stream closed")).toBe(true);
     expect(isOperationAbortedSessionError("Network timeout")).toBe(false);
+  });
+
+  it("detects invalid request messages", () => {
+    expect(
+      isInvalidRequestSessionError(
+        "The request contains invalid parameters. Check the request body.",
+      ),
+    ).toBe(true);
+    expect(isInvalidRequestSessionError("AI.Error.InvalidRequest: nope")).toBe(true);
+    expect(isInvalidRequestSessionError("Rate limit exceeded")).toBe(false);
+    expect(isInvalidRequestSessionError("")).toBe(false);
   });
 
   it("suppresses repeated identical errors within window", () => {

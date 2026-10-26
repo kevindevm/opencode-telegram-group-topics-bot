@@ -323,6 +323,18 @@ describe("opencode/v2/client", () => {
     ]);
   });
 
+  it("caps the over-fetched history page at the page size", async () => {
+    fake.client.message.list.mockResolvedValue({ data: [], cursor: {} });
+
+    await createClient().session.messages({ sessionID: "ses-1", limit: 100 });
+
+    expect(fake.client.message.list).toHaveBeenCalledWith({
+      sessionID: "ses-1",
+      limit: 200,
+      order: "desc",
+    });
+  });
+
   it("runs a skill through a prompt and other commands through the command endpoint", async () => {
     fake.client.skill.list.mockResolvedValue({ data: [{ id: "review", name: "Review" }] });
     const client = createClient();

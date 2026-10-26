@@ -23,7 +23,7 @@ interface HealthPayload {
   };
 }
 
-async function checkOpencodeWithTimeout(): Promise<OpencodeCheck> {
+async function checkOpencodeOnce(): Promise<OpencodeCheck> {
   const startedAt = Date.now();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -51,6 +51,20 @@ async function checkOpencodeWithTimeout(): Promise<OpencodeCheck> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// The underlying request cannot be aborted (undici timeouts are off for SSE),
+// so concurrent /ready hits share a single in-flight check instead of piling
+// up floating sockets when OpenCode is down.
+let inflightCheck: Promise<OpencodeCheck> | null = null;
+
+async function checkOpencodeWithTimeout(): Promise<OpencodeCheck> {
+  if (!inflightCheck) {
+    inflightCheck = checkOpencodeOnce().finally(() => {
+      inflightCheck = null;
+    });
+  }
+  return inflightCheck;
 }
 
 function sendJson(res: http.ServerResponse, statusCode: number, data: unknown): void {

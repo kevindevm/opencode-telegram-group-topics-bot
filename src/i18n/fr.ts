@@ -26,6 +26,11 @@ export const fr: I18nDictionary = {
 
   "pcuser.echo": "🧑 {text}",
 
+  "permission.outcome.once": "✅ Autorisé une fois",
+  "permission.outcome.always": "🔓 Toujours autorisé",
+  "permission.outcome.reject": "❌ Refusé",
+  "permission.outcome.settled_outside": "☑️ Répondu hors Telegram",
+
   "background.session_fallback": "session {id}",
   "background.assistant_response": "🔔 Assistant replied in background session: {session}",
   "background.question_asked": "❓ Background session needs an answer: {session}",
@@ -117,4 +122,21 @@ export const fr: I18nDictionary = {
   "skills.button.next_page": "Next ➡️",
   "skills.page_empty_callback": "No skills on this page",
   "skills.page_load_error_callback": "Cannot load this page. Please try again.",
+
+  "model.search.button": "🔍 Rechercher",
+  "model.search.prompt": "🔍 Entrez le nom du modèle à rechercher :",
+  "model.search.results_title": "Résultats pour « {query} » :",
+  "model.search.no_results": "Aucun modèle pour « {query} »",
+  "model.search.search_again": "↩ Rechercher à nouveau",
+  "model.search.error": "La recherche a échoué",
+  "model.search.cancelled": "Recherche annulée.",
+  "model.search.cancel": "Annuler",
+  "model.search.added_favorite": "⭐ Ajouté aux favoris",
+  "model.search.removed_favorite": "Retiré des favoris",
+
+  "question.settled_outside.answered": "☑️ Répondu hors Telegram",
+  "question.settled_outside.cancelled": "❌ Annulé hors Telegram",
+
+  "bot.session_error_invalid_request":
+    "🔴 Le modèle a rejeté la demande : {message}\n\nLe contexte de la session est probablement trop volumineux ou corrompu, réessayer ne servira à rien. Compactez-la depuis 🎛️ Session Control, ou repartez avec /new.",
 };

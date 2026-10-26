@@ -13,12 +13,23 @@ export const BOT_COMMAND = {
   OPEN: "open",
   TASK: "task",
   TASKLIST: "tasklist",
+  QUEUE: "queue",
+  TRUST: "trust",
+  RETRY: "retry",
+  DIFF: "diff",
+  COMMIT: "commit",
+  COST: "cost",
+  CLOSE: "close",
+  FORK: "fork",
+  SHARE: "share",
+  SAVED: "saved",
   RENAME: "rename",
   COMMANDS: "commands",
   SKILLS: "skills",
   OPENCODE_START: "opencode_start",
   OPENCODE_STOP: "opencode_stop",
   RELOAD: "reload",
+  DISPLAY: "display",
 } as const;
 
 export type BotCommandName = (typeof BOT_COMMAND)[keyof typeof BOT_COMMAND];

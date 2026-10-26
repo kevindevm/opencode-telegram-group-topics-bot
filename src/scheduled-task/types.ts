@@ -43,6 +43,10 @@ export interface ScheduledTaskBase {
   runCount: number;
   lastStatus: ScheduledTaskStatus;
   lastError: string | null;
+  /** Paused tasks are skipped by the runtime poll. */
+  paused?: boolean;
+  /** Trimmed result text of the last run, for the log view. */
+  lastResult?: string | null;
 }
 
 export interface ScheduledCronTask extends ScheduledTaskBase {

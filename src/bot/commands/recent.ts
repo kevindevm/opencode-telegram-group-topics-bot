@@ -111,9 +111,13 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
     const entry = entries.find((candidate) => candidate.id === sessionId);
 
     if (!entry) {
-      await ctx.answerCallbackQuery({ text: t("callback.processing_error") });
+      await ctx.answerCallbackQuery({ text: t("callback.processing_error") }).catch(() => {});
       return true;
     }
+
+    // Acknowledge the tap before any slow I/O so re-taps don't pile up;
+    // failures below are reported as messages since the toast is spent.
+    await ctx.answerCallbackQuery().catch(() => {});
 
     const { data: session, error } = await opencodeClient.session.get({
       sessionID: entry.id,
@@ -138,7 +142,6 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
         clearAllInteractionState(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
       }
 
-      await ctx.answerCallbackQuery();
       await ctx.reply(
         t("recent.selected", {
           title: session.title,
@@ -171,7 +174,6 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
     );
     summaryAggregator.setSession(session.id);
 
-    await ctx.answerCallbackQuery();
     await ctx.reply(
       t("recent.selected", {
         title: session.title,
@@ -182,7 +184,9 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
     return true;
   } catch (selectError) {
     logger.error("[Recent] Error selecting recent session:", selectError);
-    await ctx.answerCallbackQuery({ text: t("callback.processing_error") });
+    await ctx
+      .answerCallbackQuery({ text: t("callback.processing_error") })
+      .catch(() => {});
     return true;
   }
 }

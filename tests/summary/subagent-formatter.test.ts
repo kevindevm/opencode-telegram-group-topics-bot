@@ -27,4 +27,29 @@ describe("summary/subagent-formatter", () => {
     expect(rendered).toContain("Model: openai/gpt-5");
     expect(rendered).toContain("read src/summary/aggregator.ts");
   });
+
+  it("strips model markdown so plain-text cards show no markers", () => {
+    const rendered = renderSubagentCards([
+      {
+        cardId: "card-1",
+        sessionId: "child-1",
+        parentSessionId: "root-1",
+        agent: "explore",
+        description: "**Descubierto** y *verificado*",
+        prompt: "**Descubierto** y *verificado*",
+        status: "running",
+        providerID: "opencode",
+        modelID: "big-pickle",
+        currentTool: "read",
+        currentToolInput: { filePath: "**src/index.ts**" },
+        currentToolTitle: undefined,
+        terminalMessage: undefined,
+        updatedAt: Date.now(),
+      },
+    ]);
+
+    expect(rendered).not.toContain("**");
+    expect(rendered).toContain("Descubierto y verificado");
+    expect(rendered).toContain("src/index.ts");
+  });
 });

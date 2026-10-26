@@ -600,4 +600,47 @@ describe("opencode/v2/events", () => {
       });
     });
   });
+
+  it("keeps the session on step completion when a reconnect wiped the step state", () => {
+    // A reconnect creates a fresh translator that never saw step.started for
+    // the in-flight step. The completion must still name its session or the
+    // aggregator drops it and the turn never finalizes.
+    const translate = createV2EventTranslator();
+
+    const result = payloads(translate, [
+      event("session.step.ended", {
+        sessionID: SESSION,
+        assistantMessageID: MESSAGE,
+        finish: "stop",
+        cost: 0.1,
+        tokens: { input: 5, output: 1, reasoning: 0, cache: { read: 2, write: 0 } },
+      }),
+    ]);
+
+    const completion = result.find((item) => item.type === "message.updated");
+    expect(completion).toMatchObject({
+      properties: { sessionID: SESSION, info: { id: MESSAGE, sessionID: SESSION } },
+    });
+  });
+
+  it("keeps the session on step failure when a reconnect wiped the step state", () => {
+    const translate = createV2EventTranslator();
+
+    const result = payloads(translate, [
+      event(
+        "session.step.failed",
+        {
+          sessionID: SESSION,
+          assistantMessageID: MESSAGE,
+          error: { type: "unknown", message: "boom" },
+        },
+        false,
+      ),
+    ]);
+
+    const completion = result.find((item) => item.type === "message.updated");
+    expect(completion).toMatchObject({
+      properties: { sessionID: SESSION, info: { id: MESSAGE, sessionID: SESSION } },
+    });
+  });
 });

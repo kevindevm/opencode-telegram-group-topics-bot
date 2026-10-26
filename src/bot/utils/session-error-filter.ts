@@ -13,6 +13,22 @@ export function isOperationAbortedSessionError(message: string): boolean {
   return OPERATION_ABORTED_MARKERS.some((marker) => normalized.includes(marker));
 }
 
+const INVALID_REQUEST_MARKERS = [
+  "invalid request",
+  "invalidrequest",
+  "invalid parameters",
+  "invalid parameter",
+];
+
+export function isInvalidRequestSessionError(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return INVALID_REQUEST_MARKERS.some((marker) => normalized.includes(marker));
+}
+
 export class SessionErrorThrottle {
   private readonly lastBySession = new Map<string, { message: string; timestamp: number }>();
 

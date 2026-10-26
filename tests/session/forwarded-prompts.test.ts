@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetForwardedPromptsForTests,
+  claimPcTextMirror,
   consumeForwardedPrompt,
+  isForwardedPrompt,
   markForwardedPrompt,
 } from "../../src/session/forwarded-prompts.js";
 
@@ -55,5 +57,39 @@ describe("session/forwarded-prompts", () => {
     markForwardedPrompt("ses-1", "  hola  ");
 
     expect(consumeForwardedPrompt("ses-1", "hola")).toBe(true);
+  });
+
+  it("peeks forwarded marks without consuming them", () => {
+    markForwardedPrompt("ses-1", "hola");
+
+    expect(isForwardedPrompt("ses-1", "hola")).toBe(true);
+    expect(isForwardedPrompt("ses-1", "hola")).toBe(true);
+    expect(consumeForwardedPrompt("ses-1", "hola")).toBe(true);
+    expect(isForwardedPrompt("ses-2", "hola")).toBe(false);
+    expect(isForwardedPrompt("ses-1", "chau")).toBe(false);
+  });
+
+  it("claims a pc mirror once per text", () => {
+    expect(claimPcTextMirror("ses-1", "hola")).toBe(true);
+    expect(claimPcTextMirror("ses-1", "hola")).toBe(false);
+    expect(claimPcTextMirror("ses-1", "chau")).toBe(true);
+    expect(claimPcTextMirror("ses-2", "hola")).toBe(true);
+  });
+
+  it("rejects empty claims", () => {
+    expect(claimPcTextMirror("", "hola")).toBe(false);
+    expect(claimPcTextMirror("ses-1", "   ")).toBe(false);
+  });
+
+  it("expires mirror claims after the TTL", () => {
+    vi.useFakeTimers();
+    try {
+      expect(claimPcTextMirror("ses-1", "hola")).toBe(true);
+      vi.advanceTimersByTime(95 * 1000);
+
+      expect(claimPcTextMirror("ses-1", "hola")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

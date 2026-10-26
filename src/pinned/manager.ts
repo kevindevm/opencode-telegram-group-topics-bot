@@ -13,8 +13,9 @@ import { getStoredModel } from "../model/manager.js";
 import type { FileChange, PinnedMessageState, TokensInfo } from "./types.js";
 import { t } from "../i18n/index.js";
 import { getThreadIdFromScopeKey, getThreadSendOptions } from "../bot/scope.js";
+import { getScopeFromKey, SCOPE_CONTEXT } from "../bot/scope.js";
+import { runWithRateLimitRetries } from "../bot/telegram-rate-limiter.js";
 import { contextStateManager } from "../context/manager.js";
-import { getTelegramRetryAfterMs } from "../bot/utils/send-with-markdown-fallback.js";
 
 interface ScopeContext {
   api: Api | null;
@@ -22,10 +23,23 @@ interface ScopeContext {
   state: PinnedMessageState;
   contextLimit: number | null;
   debounceTimer: ReturnType<typeof setTimeout> | null;
+  lastRenderedText: string | null;
+  lastEditAt: number;
+}
+
+/**
+ * General control topic ("Session Control") is a command lane: no dashboard pin.
+ */
+function isControlScope(scopeKey: string): boolean {
+  return getScopeFromKey(scopeKey)?.context === SCOPE_CONTEXT.GROUP_GENERAL;
 }
 
 class PinnedMessageManager {
   private contexts = new Map<string, ScopeContext>();
+  /** In-flight dashboard creations per scope (dedupes concurrent recreations). */
+  private createInFlight = new Map<string, Promise<void>>();
+  /** Bumped on clear()/session rotation so stale creates delete their orphan. */
+  private generations = new Map<string, number>();
   private createDefaultState(scopeKey: string): PinnedMessageState {
     return {
       scopeKey,
@@ -45,19 +59,9 @@ class PinnedMessageManager {
   }
 
   private async retryTelegramCall<T>(label: string, run: () => Promise<T>): Promise<T> {
-    while (true) {
-      try {
-        return await run();
-      } catch (error) {
-        const retryAfterMs = getTelegramRetryAfterMs(error);
-        if (!retryAfterMs) {
-          throw error;
-        }
-
-        logger.info(`[PinnedManager] Telegram rate limit; retrying ${label} in ${retryAfterMs}ms`);
-        await new Promise((resolve) => setTimeout(resolve, retryAfterMs + 100));
-      }
-    }
+    // Same give-up budget as the queued paths: a persistent 429 storm must
+    // fail the dashboard update, not wedge the caller forever.
+    return runWithRateLimitRetries(`pinned:${label}`, run);
   }
 
   private getContext(scopeKey: string): ScopeContext {
@@ -76,6 +80,8 @@ class PinnedMessageManager {
       },
       contextLimit: null,
       debounceTimer: null,
+      lastRenderedText: null,
+      lastEditAt: 0,
     };
     this.contexts.set(scopeKey, context);
     return context;
@@ -94,6 +100,11 @@ class PinnedMessageManager {
     context.chatId = chatId;
     context.state.chatId = chatId;
     context.state.threadId = resolvedThreadId;
+
+    // The General control topic never gets a dashboard pin.
+    if (isControlScope(scopeKey)) {
+      void this.retireControlDashboard(chatId, scopeKey);
+    }
   }
 
   private persistPinnedId(scopeKey: string, messageId: number): void {
@@ -102,6 +113,27 @@ class PinnedMessageManager {
 
   private clearPersistedPinnedId(scopeKey: string): void {
     clearScopedPinnedMessageId(scopeKey);
+  }
+
+  /**
+   * Deletes a legacy dashboard left in General before the no-pin rule.
+   * Only deletes the tracked message (which also removes its pin).
+   */
+  private async retireControlDashboard(chatId: number, scopeKey: string): Promise<void> {
+    const context = this.getContext(scopeKey);
+    const messageId = context.state.messageId ?? getScopedPinnedMessageId(scopeKey) ?? null;
+    context.state.messageId = null;
+    context.state.sessionId = null;
+    this.clearPersistedPinnedId(scopeKey);
+    if (!messageId || !context.api) {
+      return;
+    }
+    try {
+      await context.api.deleteMessage(chatId, messageId).catch(() => {});
+      logger.info("[PinnedManager] Retired legacy General dashboard pin", { scopeKey });
+    } catch (error) {
+      logger.warn("[PinnedManager] Failed to retire legacy General dashboard:", error);
+    }
   }
 
   async onSessionChange(
@@ -116,15 +148,24 @@ class PinnedMessageManager {
     state.sessionId = sessionId;
     state.sessionTitle = sessionTitle || t("pinned.default_session_title");
 
+    // Invalidate any dashboard creation racing with this rotation.
+    this.bumpGeneration(scopeKey);
+
     const project = getCurrentProject(scopeKey);
     await this.refreshProjectMetadata(scopeKey);
 
     await this.fetchContextLimit(scopeKey);
     this.syncSharedContext(scopeKey);
 
+    // No dashboard pin in the General control topic. Shared context
+    // above still feeds the reply keyboard.
+    if (isControlScope(scopeKey)) {
+      return;
+    }
+
     state.changedFiles = [];
     await this.unpinOldMessage(scopeKey);
-    await this.createPinnedMessage(scopeKey);
+    await this.createPinnedMessageOnce(scopeKey);
     if (project?.worktree) {
       await this.loadContextFromHistory(sessionId, project.worktree, scopeKey);
     }
@@ -136,6 +177,44 @@ class PinnedMessageManager {
     if (state.sessionTitle !== newTitle && newTitle) {
       state.sessionTitle = newTitle;
       await this.updatePinnedMessage(scopeKey);
+    }
+  }
+
+  /**
+   * Attaches a live session to the scope without user interaction (bot
+   * restart, PC-only activity, background resume). Restores cost/context from
+   * history and ensures the dashboard exists, so the pin never goes stale.
+   * No-op when the scope already tracks this session.
+   */
+  async attachSession(sessionId: string, scopeKey: string = "global"): Promise<void> {
+    const context = this.getContext(scopeKey);
+    if (context.state.sessionId === sessionId) {
+      return;
+    }
+
+    this.bumpGeneration(scopeKey);
+    context.state.sessionId = sessionId;
+    context.state.tokensUsed = 0;
+    context.state.assistantCost = 0;
+    context.state.changedFiles = [];
+
+    try {
+      await this.refreshProjectMetadata(scopeKey);
+      await this.fetchContextLimit(scopeKey);
+      this.syncSharedContext(scopeKey);
+      if (isControlScope(scopeKey)) {
+        return;
+      }
+      await this.refreshSessionTitle(scopeKey);
+
+      const project = getCurrentProject(scopeKey);
+      if (project?.worktree) {
+        await this.loadContextFromHistory(sessionId, project.worktree, scopeKey);
+      }
+      await this.loadDiffsFromApi(sessionId, scopeKey);
+      await this.updatePinnedMessage(scopeKey);
+    } catch (err) {
+      logger.error("[PinnedManager] Error attaching live session:", err);
     }
   }
 
@@ -210,6 +289,9 @@ class PinnedMessageManager {
     context.state.assistantCost += tokens.cost;
     await this.refreshSessionTitle(scopeKey);
     this.syncSharedContext(scopeKey);
+    // Keep the dashboard price/context live during long runs; the exact
+    // repaint still happens on flush at turn end.
+    this.scheduleThrottledUpdate(scopeKey);
   }
 
   getContextInfo(scopeKey: string = "global"): { tokensUsed: number; tokensLimit: number } | null {
@@ -240,6 +322,7 @@ class PinnedMessageManager {
     }
 
     context.state.changedFiles = diffs;
+    this.scheduleThrottledUpdate(scopeKey);
   }
 
   addFileChange(change: FileChange, scopeKey: string = "global"): void {
@@ -251,11 +334,18 @@ class PinnedMessageManager {
     } else {
       context.state.changedFiles.push(change);
     }
+
+    this.scheduleThrottledUpdate(scopeKey);
   }
 
   async flush(scopeKey: string = "global"): Promise<void> {
-    await this.refreshProjectMetadata(scopeKey);
-    await this.updatePinnedMessage(scopeKey);
+    // Pin failures must never break message delivery.
+    try {
+      await this.refreshProjectMetadata(scopeKey);
+      await this.updatePinnedMessage(scopeKey);
+    } catch (err) {
+      logger.error("[PinnedManager] Error flushing pinned message:", err);
+    }
   }
 
   private syncSharedContext(scopeKey: string): void {
@@ -268,16 +358,25 @@ class PinnedMessageManager {
     contextStateManager.update(contextInfo.tokensUsed, contextInfo.tokensLimit, scopeKey);
   }
 
-  private scheduleDebouncedUpdate(scopeKey: string, delayMs: number = 1500): void {
+  private scheduleThrottledUpdate(scopeKey: string, delayMs: number = 1500): void {
     const context = this.getContext(scopeKey);
     if (context.debounceTimer) {
       clearTimeout(context.debounceTimer);
+      context.debounceTimer = null;
     }
+
+    // Flood control: at most one edit per interval; bursts collapse into a
+    // single trailing edit with the latest state.
+    const waitMs = Math.max(
+      0,
+      PinnedMessageManager.PIN_EDIT_MIN_INTERVAL_MS - (Date.now() - context.lastEditAt),
+    );
+    const effectiveDelayMs = Math.max(delayMs, waitMs);
 
     context.debounceTimer = setTimeout(() => {
       context.debounceTimer = null;
       void this.updatePinnedMessage(scopeKey);
-    }, delayMs);
+    }, effectiveDelayMs);
   }
 
   private async loadDiffsFromApi(sessionId: string, scopeKey: string): Promise<void> {
@@ -501,15 +600,14 @@ class PinnedMessageManager {
       : state.projectName;
 
     const lines = [
-      `${state.sessionTitle}`,
-      t("pinned.line.project", { project: projectDisplayName }),
-      t("pinned.line.model", { model: modelName }),
       t("pinned.line.context", {
         used: this.formatTokenCount(state.tokensUsed),
         limit: this.formatTokenCount(state.tokensLimit),
         percent: percentage,
       }),
       t("pinned.line.cost", { cost: this.formatCost(state.assistantCost) }),
+      t("pinned.line.model", { model: modelName }),
+      t("pinned.line.project", { project: projectDisplayName }),
     ];
 
     if (state.changedFiles.length > 0) {
@@ -531,9 +629,20 @@ class PinnedMessageManager {
       if (state.changedFiles.length > maxFiles) {
         lines.push(t("pinned.files.more", { count: state.changedFiles.length - maxFiles }));
       }
+
+      lines.push("");
     }
 
+    lines.push(`${state.sessionTitle}`);
+
     return lines.join("\n");
+  }
+
+  /** Minimum gap between two Telegram edits of the same dashboard (flood control). */
+  private static readonly PIN_EDIT_MIN_INTERVAL_MS = 15_000;
+
+  private bumpGeneration(scopeKey: string): void {
+    this.generations.set(scopeKey, (this.generations.get(scopeKey) ?? 0) + 1);
   }
 
   private async createPinnedMessage(scopeKey: string): Promise<void> {
@@ -542,32 +651,103 @@ class PinnedMessageManager {
       return;
     }
 
+    const generation = this.generations.get(scopeKey) ?? 0;
     const threadId = context.state.threadId ?? getThreadIdFromScopeKey(scopeKey);
 
-    const sent = await this.retryTelegramCall(
-      "pinned message send",
-      async () =>
-        await context.api!.sendMessage(context.chatId!, this.formatMessage(scopeKey), {
-          ...getThreadSendOptions(threadId),
-        }),
-    );
+    let sent: Awaited<ReturnType<NonNullable<ScopeContext["api"]>["sendMessage"]>>;
+    try {
+      sent = await this.retryTelegramCall(
+        "pinned message send",
+        async () =>
+          await context.api!.sendMessage(context.chatId!, this.formatMessage(scopeKey), {
+            ...getThreadSendOptions(threadId),
+          }),
+      );
+    } catch (err) {
+      logger.error("[PinnedManager] Error creating pinned message:", err);
+      throw err;
+    }
+
+    if ((this.generations.get(scopeKey) ?? 0) !== generation) {
+      // The scope rotated (clear/session change) mid-create: remove the orphan
+      // instead of tracking a message that no longer belongs to this scope.
+      await context
+        .api!.deleteMessage(context.chatId!, sent.message_id)
+        .catch(() => {});
+      return;
+    }
 
     context.state.messageId = sent.message_id;
     context.state.lastUpdated = Date.now();
+    context.lastRenderedText = this.formatMessage(scopeKey);
+    context.lastEditAt = Date.now();
     this.persistPinnedId(scopeKey, sent.message_id);
 
-    await this.retryTelegramCall(
-      "pin chat message",
-      async () =>
-        await context.api!.pinChatMessage(context.chatId!, sent.message_id, {
-          disable_notification: true,
-        }),
-    );
+    try {
+      await this.retryTelegramCall(
+        "pin chat message",
+        async () =>
+          await context.api!.pinChatMessage(context.chatId!, sent.message_id, {
+            disable_notification: true,
+          }),
+      );
+    } catch (err) {
+      // The dashboard message exists and stays tracked for edits; only the
+      // pin itself failed.
+      logger.error("[PinnedManager] Error pinning dashboard message:", err);
+    }
+  }
+
+  /**
+   * Creates the dashboard message, joining an in-flight creation instead of
+   * sending a duplicate. Guarantees a single tracked message per scope.
+   */
+  private async createPinnedMessageOnce(scopeKey: string): Promise<void> {
+    // The General control topic never gets a dashboard pin.
+    if (isControlScope(scopeKey)) {
+      return;
+    }
+
+    const pending = this.createInFlight.get(scopeKey);
+    if (pending) {
+      await pending;
+      return;
+    }
+
+    const run = this.createPinnedMessage(scopeKey).finally(() => {
+      if (this.createInFlight.get(scopeKey) === run) {
+        this.createInFlight.delete(scopeKey);
+      }
+    });
+    this.createInFlight.set(scopeKey, run);
+    await run;
   }
 
   private async updatePinnedMessage(scopeKey: string): Promise<void> {
+    // The General control topic never gets a dashboard pin.
+    if (isControlScope(scopeKey)) {
+      return;
+    }
+
     const context = this.getContext(scopeKey);
-    if (!context.api || !context.chatId || !context.state.messageId) {
+    if (!context.api || !context.chatId) {
+      return;
+    }
+
+    if (!context.state.messageId) {
+      // Never skip an update: recreate the dashboard so the topic always has
+      // a live one. Scopes without a session (e.g. after /close) stay quiet.
+      if (!context.state.sessionId) {
+        return;
+      }
+
+      await this.createPinnedMessageOnce(scopeKey);
+      return;
+    }
+
+    const text = this.formatMessage(scopeKey);
+    if (text === context.lastRenderedText) {
+      context.state.lastUpdated = Date.now();
       return;
     }
 
@@ -578,19 +758,31 @@ class PinnedMessageManager {
           await context.api!.editMessageText(
             context.chatId!,
             context.state.messageId!,
-            this.formatMessage(scopeKey),
+            text,
           ),
       );
       context.state.lastUpdated = Date.now();
+      context.lastRenderedText = text;
+      context.lastEditAt = Date.now();
     } catch (err) {
       if (err instanceof Error && err.message.includes("message is not modified")) {
+        context.lastRenderedText = text;
         return;
       }
 
       if (err instanceof Error && err.message.includes("message to edit not found")) {
         context.state.messageId = null;
         this.clearPersistedPinnedId(scopeKey);
-        await this.createPinnedMessage(scopeKey);
+        await this.createPinnedMessageOnce(scopeKey);
+        return;
+      }
+
+      if (err instanceof Error && err.message.includes("message can't be edited")) {
+        // Editing is no longer possible (e.g. Telegram's 48h edit window
+        // expired): post a fresh dashboard instead of freezing on the dead id.
+        context.state.messageId = null;
+        this.clearPersistedPinnedId(scopeKey);
+        await this.createPinnedMessageOnce(scopeKey);
         return;
       }
 
@@ -645,7 +837,10 @@ class PinnedMessageManager {
       context.debounceTimer = null;
     }
 
+    this.bumpGeneration(scopeKey);
     context.state = this.createDefaultState(scopeKey);
+    context.lastRenderedText = null;
+    context.lastEditAt = 0;
     this.clearPersistedPinnedId(scopeKey);
   }
 }

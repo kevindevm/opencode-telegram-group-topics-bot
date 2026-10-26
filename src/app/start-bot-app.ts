@@ -6,11 +6,16 @@ import {
   createBot,
   subscribeToKnownProjects,
 } from "../bot/index.js";
+import {
+  dispatchRestoredQueues,
+  restoreQueuedPromptsFromSettings,
+} from "../bot/handlers/prompt.js";
 import { config } from "../config.js";
 import { explainServerVersionMismatch, probeOpencodeServer } from "../opencode/client.js";
 import { reconcileStoredModelSelection } from "../model/manager.js";
-import { loadSettings } from "../settings/manager.js";
+import { flushSettingsWrites, loadSettings } from "../settings/manager.js";
 import { processManager } from "../process/manager.js";
+import { ensureOpencodeServerRunning } from "../process/auto-start.js";
 import { warmupSessionDirectoryCache } from "../session/cache-manager.js";
 import { createScheduledTaskRuntime } from "../scheduled-task/runtime.js";
 import { HealthServer } from "./services/health-server-service.js";
@@ -47,6 +52,7 @@ export async function startBotApp(): Promise<void> {
 
   await loadSettings();
   await processManager.initialize();
+  await ensureOpencodeServerRunning();
   await reconcileStoredModelSelection();
   await warmupSessionDirectoryCache();
 
@@ -65,6 +71,8 @@ export async function startBotApp(): Promise<void> {
 
   const bot = createBot();
   await subscribeToKnownProjects();
+  await restoreQueuedPromptsFromSettings();
+  await dispatchRestoredQueues();
   const scheduledTaskRuntime = createScheduledTaskRuntime(bot);
   scheduledTaskRuntime.start();
   const healthServer = new HealthServer();
@@ -108,7 +116,6 @@ export async function startBotApp(): Promise<void> {
     logger.info(`[App] Received ${signal}, shutting down...`);
     cleanupBotRuntime(`app_shutdown_${signal.toLowerCase()}`);
     scheduledTaskRuntime.stop();
-    void healthServer.stop();
 
     shutdownTimeout = setTimeout(() => {
       logger.warn(`[App] Shutdown did not finish in ${SHUTDOWN_TIMEOUT_MS}ms, forcing exit.`);
@@ -121,6 +128,22 @@ export async function startBotApp(): Promise<void> {
     } catch (error) {
       logger.warn("[App] Failed to stop Telegram bot cleanly", error);
     }
+
+    // Drain async state before the process (or the force-exit timer above)
+    // goes away: stop the health server, then flush every queued
+    // settings.json write so prompt queues, bindings, and costs survive.
+    // Bounded by the shutdown timer so a hung write cannot block exit.
+    void (async () => {
+      await healthServer.stop();
+      await Promise.race([
+        flushSettingsWrites(),
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, Math.max(0, SHUTDOWN_TIMEOUT_MS - 1500)).unref?.();
+        }),
+      ]);
+    })().catch((error) => {
+      logger.warn("[App] Shutdown drain failed", error);
+    });
 
     void clearManagedServiceState().catch((error) => {
       logger.warn("[App] Failed to clear managed service state", error);
@@ -145,6 +168,16 @@ export async function startBotApp(): Promise<void> {
         logger.info(`Bot @${botInfo.username} started!`);
       },
     });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes("409") || error.message.toLowerCase().includes("conflict"))
+    ) {
+      logger.error(
+        "[Bot] Telegram rejected polling with 409 Conflict: another instance is already running with this bot token (e.g. a stray `tsx src/index.ts` dev process). Stop the duplicate and restart.",
+      );
+    }
+    throw error;
   } finally {
     process.off("SIGINT", handleSigint);
     process.off("SIGTERM", handleSigterm);

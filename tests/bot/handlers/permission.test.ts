@@ -4,6 +4,10 @@ import type { PermissionRequest } from "../../../src/permission/types.js";
 import { permissionManager } from "../../../src/permission/manager.js";
 import { interactionManager } from "../../../src/interaction/manager.js";
 import {
+  buildPermissionOutcomeText,
+  cancelScheduledPermissionPoll,
+  __resetScheduledPermissionPollsForTests,
+  schedulePermissionPoll,
   showPermissionRequest,
   handlePermissionCallback,
 } from "../../../src/bot/handlers/permission.js";
@@ -92,6 +96,7 @@ function createPermissionCallbackContext(data: string, messageId: number): Conte
     } as Context["callbackQuery"],
     answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
     deleteMessage: vi.fn().mockResolvedValue(undefined),
+    editMessageText: vi.fn().mockResolvedValue(undefined),
     reply: vi.fn().mockResolvedValue(undefined),
     api: {
       sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -107,6 +112,7 @@ function createPermissionCallbackWithoutMessage(data: string): Context {
     } as Context["callbackQuery"],
     answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
     deleteMessage: vi.fn().mockResolvedValue(undefined),
+    editMessageText: vi.fn().mockResolvedValue(undefined),
     reply: vi.fn().mockResolvedValue(undefined),
     api: {
       sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -132,6 +138,7 @@ describe("bot/handlers/permission", () => {
   beforeEach(() => {
     vi.useRealTimers();
     permissionManager.clear();
+    __resetScheduledPermissionPollsForTests();
     interactionManager.clear("test_setup");
 
     mocked.permissionReplyMock.mockReset();
@@ -291,7 +298,10 @@ describe("bot/handlers/permission", () => {
 
     expect(handled).toBe(true);
     expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: t("permission.reply.always") });
-    expect(ctx.deleteMessage).toHaveBeenCalledTimes(1);
+    expect(ctx.editMessageText).toHaveBeenCalledWith(
+      expect.stringContaining(t("permission.outcome.always")),
+    );
+    expect(ctx.deleteMessage).not.toHaveBeenCalled();
 
     await flushMicrotasks();
 
@@ -475,5 +485,171 @@ describe("bot/handlers/permission", () => {
     expect(text).toContain("• D:/data/my_project");
     expect(options).not.toHaveProperty("parse_mode");
     expect(permissionManager.getRequestID(800)).toBe("perm-external");
+  });
+
+  it("drops the poll when the server already resolved the request", async () => {
+    const botApi = createBotApi(810);
+    await showPermissionRequest(
+      botApi,
+      777,
+      createPermissionRequest("perm-gone"),
+      "global",
+      null,
+    );
+
+    mocked.permissionReplyMock.mockResolvedValueOnce({
+      error: {
+        name: "NotFoundError",
+        data: { message: "Permission request not found: perm-gone" },
+      },
+    });
+
+    const ctx = createPermissionCallbackContext("permission:once:perm-gone", 810);
+    const handled = await handlePermissionCallback(ctx);
+
+    expect(handled).toBe(true);
+    expect(ctx.editMessageText).toHaveBeenCalledWith(
+      expect.stringContaining(t("permission.outcome.settled_outside")),
+    );
+    expect(ctx.deleteMessage).not.toHaveBeenCalled();
+    expect(permissionManager.isActive()).toBe(false);
+    expect(interactionManager.getSnapshot()).toBeNull();
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledTimes(2);
+    expect(ctx.answerCallbackQuery).toHaveBeenLastCalledWith();
+
+    const apiSendMessage = (ctx.api.sendMessage as unknown as ReturnType<typeof vi.fn>);
+    expect(apiSendMessage).not.toHaveBeenCalled();
+  });
+
+  it("treats PermissionNotFoundError tag as a settled request", async () => {
+    const botApi = createBotApi(811);
+    await showPermissionRequest(
+      botApi,
+      777,
+      createPermissionRequest("perm-gone-tag"),
+      "global",
+      null,
+    );
+
+    mocked.permissionReplyMock.mockResolvedValueOnce({
+      error: { _tag: "PermissionNotFoundError" },
+    });
+
+    const ctx = createPermissionCallbackContext("permission:reject:perm-gone-tag", 811);
+    const handled = await handlePermissionCallback(ctx);
+
+    expect(handled).toBe(true);
+    expect(ctx.editMessageText).toHaveBeenCalledWith(
+      expect.stringContaining(t("permission.outcome.settled_outside")),
+    );
+    expect(ctx.deleteMessage).not.toHaveBeenCalled();
+    expect(permissionManager.isActive()).toBe(false);
+    expect(interactionManager.getSnapshot()).toBeNull();
+  });
+
+  it("skips polls for requests settled outside Telegram", async () => {
+    permissionManager.markSettled("perm-settled-outside");
+    const botApi = createBotApi(812);
+
+    await showPermissionRequest(
+      botApi,
+      777,
+      createPermissionRequest("perm-settled-outside"),
+      "global",
+      null,
+    );
+
+    const sendMessageMock = botApi.sendMessage as unknown as ReturnType<typeof vi.fn>;
+    expect(sendMessageMock).not.toHaveBeenCalled();
+    expect(permissionManager.isActive()).toBe(false);
+    expect(interactionManager.getSnapshot()).toBeNull();
+  });
+
+  it("renders one outcome line per reply kind", () => {
+    const request = createPermissionRequest("perm-outcome");
+
+    expect(buildPermissionOutcomeText(request, "once")).toContain(
+      t("permission.outcome.once"),
+    );
+    expect(buildPermissionOutcomeText(request, "always")).toContain(
+      t("permission.outcome.always"),
+    );
+    expect(buildPermissionOutcomeText(request, "reject")).toContain(
+      t("permission.outcome.reject"),
+    );
+    expect(buildPermissionOutcomeText(request, "settled_outside")).toContain(
+      t("permission.outcome.settled_outside"),
+    );
+    expect(buildPermissionOutcomeText(request, "once")).toContain("npm test");
+  });
+
+  it("shows the poll after the grace period", async () => {
+    vi.useFakeTimers();
+    try {
+      const botApi = createBotApi(900);
+      schedulePermissionPoll(botApi, 777, createPermissionRequest("perm-grace"), "global", null);
+
+      const sendMessageMock = botApi.sendMessage as unknown as ReturnType<typeof vi.fn>;
+      expect(sendMessageMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2500);
+
+      expect(sendMessageMock).toHaveBeenCalledTimes(1);
+      expect(permissionManager.getRequestID(900)).toBe("perm-grace");
+      expect(permissionManager.isActive()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips the poll when settled during the grace period", async () => {
+    vi.useFakeTimers();
+    try {
+      const botApi = createBotApi(901);
+      schedulePermissionPoll(botApi, 777, createPermissionRequest("perm-race"), "global", null);
+      permissionManager.markSettled("perm-race");
+
+      await vi.advanceTimersByTimeAsync(2500);
+
+      const sendMessageMock = botApi.sendMessage as unknown as ReturnType<typeof vi.fn>;
+      expect(sendMessageMock).not.toHaveBeenCalled();
+      expect(permissionManager.isActive()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dedupes duplicate schedules of the same request", async () => {
+    vi.useFakeTimers();
+    try {
+      const botApi = createBotApi(902);
+      const request = createPermissionRequest("perm-dup-schedule");
+      schedulePermissionPoll(botApi, 777, request, "global", null);
+      schedulePermissionPoll(botApi, 777, request, "global", null);
+
+      await vi.advanceTimersByTimeAsync(2500);
+
+      const sendMessageMock = botApi.sendMessage as unknown as ReturnType<typeof vi.fn>;
+      expect(sendMessageMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels scheduled polls on demand", async () => {
+    vi.useFakeTimers();
+    try {
+      const botApi = createBotApi(903);
+      schedulePermissionPoll(botApi, 777, createPermissionRequest("perm-cancel"), "global", null);
+      cancelScheduledPermissionPoll("perm-cancel");
+
+      await vi.advanceTimersByTimeAsync(2500);
+
+      const sendMessageMock = botApi.sendMessage as unknown as ReturnType<typeof vi.fn>;
+      expect(sendMessageMock).not.toHaveBeenCalled();
+      expect(permissionManager.isActive()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

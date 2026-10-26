@@ -111,7 +111,10 @@ describe("bot/commands/tasklist", () => {
     const [text, options] = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(text).toContain("weekdays 09:00");
     expect(text).not.toContain("Other chat");
-    expect(options.reply_markup.inline_keyboard[0][0].callback_data).toBe("tasklist:delete:task-a");
+    const callbacks = options.reply_markup.inline_keyboard
+      .flat()
+      .map((button: { callback_data: string }) => button.callback_data);
+    expect(callbacks).toContain("tasklist:delete:task-a");
   });
 
   it("truncates long prompts so the task list stays within Telegram limits", async () => {

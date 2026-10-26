@@ -723,6 +723,11 @@ export function formatToolInfo(toolInfo: ToolInfo, projectWorktree?: string): st
     details = truncateWithEllipsis(input.command, config.bot.bashToolDisplayMaxLength);
   }
 
+  // Code Mode code is cut like a bash command
+  if (tool === "execute" && input && typeof input.code === "string") {
+    details = truncateWithEllipsis(input.code, config.bot.bashToolDisplayMaxLength);
+  }
+
   if (tool === "apply_patch") {
     details = getFirstPatchFile(toolInfo, projectWorktree);
   }
@@ -859,7 +864,10 @@ export function prepareCodeFile(
 
   const buffer = Buffer.from(fullContent, "utf8");
   const basename = path.basename(filePath);
-  const filename = `${operation}_${basename}.txt`;
+  // Edits carry unified-diff content: use a .diff filename so the code block
+  // is sent with language "diff" and Telegram paints -/+ red/green.
+  const filename =
+    operation === "edit" ? `edit_${basename}.diff` : `${operation}_${basename}.txt`;
 
   return { buffer, filename, caption: "" };
 }

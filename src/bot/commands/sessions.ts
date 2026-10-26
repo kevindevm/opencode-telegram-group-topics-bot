@@ -212,8 +212,9 @@ function buildSessionsKeyboard(pageData: SessionPage, pageSize: number): InlineK
 }
 
 export async function sessionsCommand(ctx: CommandContext<Context>) {
+  const scope = getScopeFromContext(ctx);
+  const threadOptions = getThreadSendOptions(scope?.threadId ?? null);
   try {
-    const scope = getScopeFromContext(ctx);
     const scopeKey = scope?.key ?? GLOBAL_SCOPE_KEY;
 
     if (isTopicScope(scope)) {
@@ -228,12 +229,12 @@ export async function sessionsCommand(ctx: CommandContext<Context>) {
     const currentProject = getCurrentProject(scopeKey);
 
     if (!currentProject) {
-      await ctx.reply(t("sessions.project_not_selected"));
+      await ctx.reply(t("sessions.project_not_selected"), threadOptions);
       return;
     }
 
     if (!(await projectDirectoryExists(currentProject.worktree))) {
-      await ctx.reply(t("projects.worktree_missing"));
+      await ctx.reply(t("projects.worktree_missing"), threadOptions);
       return;
     }
 
@@ -247,7 +248,7 @@ export async function sessionsCommand(ctx: CommandContext<Context>) {
     });
 
     if (firstPage.sessions.length === 0) {
-      await ctx.reply(t("sessions.empty"));
+      await ctx.reply(t("sessions.empty"), threadOptions);
       return;
     }
 
@@ -260,7 +261,7 @@ export async function sessionsCommand(ctx: CommandContext<Context>) {
     });
   } catch (error) {
     logger.error("[Sessions] Error fetching sessions:", error);
-    await ctx.reply(t("sessions.fetch_error"));
+    await ctx.reply(t("sessions.fetch_error"), threadOptions);
   }
 }
 

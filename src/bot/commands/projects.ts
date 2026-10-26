@@ -28,6 +28,44 @@ import { BOT_I18N_KEY } from "../constants.js";
 const MAX_INLINE_BUTTON_LABEL_LENGTH = 64;
 const PROJECT_PAGE_CALLBACK_PREFIX = "projects:page:";
 const PROJECT_SELECT_CALLBACK_PREFIX = "project:";
+const MAX_PROJECT_CALLBACK_BYTES = 64;
+const MAX_PROJECT_INDEX_ENTRIES = 1000;
+
+/**
+ * Long project ids (deep paths, sandbox prefixes) would exceed Telegram's
+ * 64-byte callback_data limit and kill the whole menu. Short ids travel
+ * inline; long ones go through a small lookup table like open.ts does.
+ */
+const projectIdByIndexKey = new Map<string, string>();
+let projectIndexCounter = 0;
+
+function encodeProjectIdForCallback(projectId: string): string {
+  const naive = `${PROJECT_SELECT_CALLBACK_PREFIX}${projectId}`;
+  if (Buffer.byteLength(naive, "utf-8") <= MAX_PROJECT_CALLBACK_BYTES) {
+    return naive;
+  }
+  while (projectIdByIndexKey.size >= MAX_PROJECT_INDEX_ENTRIES) {
+    const oldest = projectIdByIndexKey.keys().next();
+    if (oldest.done) {
+      break;
+    }
+    projectIdByIndexKey.delete(oldest.value);
+  }
+  const key = `#${projectIndexCounter++}`;
+  projectIdByIndexKey.set(key, projectId);
+  return `${PROJECT_SELECT_CALLBACK_PREFIX}${key}`;
+}
+
+function decodeProjectIdFromCallback(data: string): string | null {
+  if (!data.startsWith(PROJECT_SELECT_CALLBACK_PREFIX)) {
+    return null;
+  }
+  const raw = data.slice(PROJECT_SELECT_CALLBACK_PREFIX.length);
+  if (raw.startsWith("#")) {
+    return projectIdByIndexKey.get(raw) ?? null;
+  }
+  return raw;
+}
 
 interface ProjectsPaginationRange {
   page: number;
@@ -178,7 +216,7 @@ function buildProjectsKeyboard(
       (project.id === currentProject.id || project.worktree === currentProject.worktree);
     const label = buildProjectButtonLabel(startIndex + index, project.worktree);
     const labelWithCheck = formatProjectButtonLabel(label, Boolean(isActive));
-    keyboard.text(labelWithCheck, `project:${project.id}`).row();
+    keyboard.text(labelWithCheck, encodeProjectIdForCallback(project.id)).row();
   });
 
   if (totalPages > 1) {
@@ -246,6 +284,8 @@ export function getProjectLockState(ctx: Context, _scopeKey: string): ProjectLoc
 }
 
 export async function projectsCommand(ctx: CommandContext<Context>) {
+  const scope = getScopeFromContext(ctx);
+  const threadOptions = getThreadSendOptions(scope?.threadId ?? null);
   try {
     const scopeKey = getScopeKeyFromContext(ctx);
     const lockState = getProjectLockState(ctx, scopeKey);
@@ -256,7 +296,7 @@ export async function projectsCommand(ctx: CommandContext<Context>) {
               project: lockState.projectName ?? t("pinned.unknown"),
             })
           : t(BOT_I18N_KEY.PROJECTS_LOCKED_TOPIC_SCOPE);
-      await ctx.reply(message, getThreadSendOptions(getScopeFromContext(ctx)?.threadId ?? null));
+      await ctx.reply(message, threadOptions);
       return;
     }
 
@@ -264,7 +304,7 @@ export async function projectsCommand(ctx: CommandContext<Context>) {
     const projects = await filterProjectsWithExistingDirectories(await getProjects());
 
     if (projects.length === 0) {
-      await ctx.reply(t("projects.empty"));
+      await ctx.reply(t("projects.empty"), threadOptions);
       return;
     }
 
@@ -278,7 +318,7 @@ export async function projectsCommand(ctx: CommandContext<Context>) {
     });
   } catch (error) {
     logger.error("[Bot] Error fetching projects:", error);
-    await ctx.reply(t("projects.fetch_error"));
+    await ctx.reply(t("projects.fetch_error"), threadOptions);
   }
 }
 
@@ -344,7 +384,11 @@ export async function handleProjectSelect(ctx: Context): Promise<boolean> {
     return true;
   }
 
-  const projectId = callbackQuery.data.replace(PROJECT_SELECT_CALLBACK_PREFIX, "");
+  const projectId = decodeProjectIdFromCallback(callbackQuery.data);
+  if (projectId === null) {
+    await ctx.answerCallbackQuery({ text: t("projects.select_error") });
+    return true;
+  }
 
   const isActiveMenu = await ensureActiveInlineMenu(ctx, "project");
   if (!isActiveMenu) {

@@ -55,6 +55,16 @@ function getOptionalLocaleEnvVar(key: string, defaultValue: Locale): Locale {
   return normalizeLocale(value, defaultValue);
 }
 
+function getRequiredIntEnvVar(key: string): number {
+  const parsedValue = Number.parseInt(getEnvVar(key), 10);
+  if (Number.isNaN(parsedValue)) {
+    throw new Error(
+      `Invalid environment variable: ${key} must be an integer (got ${JSON.stringify(process.env[key])})`,
+    );
+  }
+  return parsedValue;
+}
+
 export type MessageFormatMode = "raw" | "markdown";
 
 export type OpencodeServerVersion = "v1" | "v2";
@@ -118,7 +128,7 @@ function getOptionalMessageFormatModeEnvVar(
 export const config = {
   telegram: {
     token: getEnvVar("TELEGRAM_BOT_TOKEN"),
-    allowedUserId: parseInt(getEnvVar("TELEGRAM_ALLOWED_USER_ID"), 10),
+    allowedUserId: getRequiredIntEnvVar("TELEGRAM_ALLOWED_USER_ID"),
     proxyUrl: getEnvVar("TELEGRAM_PROXY_URL", false),
   },
   opencode: {
@@ -130,6 +140,7 @@ export const config = {
       ],
     username: getEnvVar("OPENCODE_SERVER_USERNAME", false) || "opencode",
     password: getEnvVar("OPENCODE_SERVER_PASSWORD", false),
+    autoStart: getOptionalBooleanEnvVar("OPENCODE_AUTO_START", true),
     model: {
       provider: getEnvVar("OPENCODE_MODEL_PROVIDER", true), // Required
       modelId: getEnvVar("OPENCODE_MODEL_ID", true), // Required
@@ -163,11 +174,18 @@ export const config = {
     hideToolCallMessages: getOptionalBooleanEnvVar("HIDE_TOOL_CALL_MESSAGES", false),
     hideToolFileMessages: getOptionalBooleanEnvVar("HIDE_TOOL_FILE_MESSAGES", false),
     codeBlocksInText: getOptionalBooleanEnvVar("CODE_BLOCKS_IN_TEXT", true),
+    showBackgroundNotifications: getOptionalBooleanEnvVar(
+      "SHOW_BACKGROUND_NOTIFICATIONS",
+      true,
+    ),
+    showPcUserMirror: getOptionalBooleanEnvVar("SHOW_PC_USER_MIRROR", true),
+    showLinkPreviews: getOptionalBooleanEnvVar("SHOW_LINK_PREVIEWS", true),
     messageFormatMode: getOptionalMessageFormatModeEnvVar("MESSAGE_FORMAT_MODE", "markdown"),
     trackBackgroundSessions: getOptionalBooleanEnvVar("TRACK_BACKGROUND_SESSIONS", true),
+    backgroundOfferAfterSec: getOptionalPositiveIntEnvVar("BACKGROUND_OFFER_AFTER_SEC", 30),
   },
   files: {
-    maxFileSizeKb: parseInt(getEnvVar("CODE_FILE_MAX_SIZE_KB", false) || "100", 10),
+    maxFileSizeKb: getOptionalNonNegativeIntEnvVarFromKeys(["CODE_FILE_MAX_SIZE_KB"], 100),
   },
   stt: {
     apiUrl: getEnvVar("STT_API_URL", false),
@@ -181,5 +199,8 @@ export const config = {
     apiKey: getEnvVar("TTS_API_KEY", false),
     model: getEnvVar("TTS_MODEL", false) || "gpt-4o-mini-tts",
     voice: getEnvVar("TTS_VOICE", false) || "alloy",
+  },
+  cost: {
+    budgetAlertUsd: Number.parseFloat(getEnvVar("BUDGET_ALERT_USD", false) || "0") || 0,
   },
 };

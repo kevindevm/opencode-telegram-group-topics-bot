@@ -79,7 +79,15 @@ export function takePcUserText(
   }
 
   const binding = getTopicBindingBySessionId(sessionId);
-  if (!binding || binding.status !== TOPIC_SESSION_STATUS.ACTIVE) {
+  // Abandoned means a past /abort stopped streaming, not that the topic is
+  // gone: fresh PC activity still mirrors there. Closed/stale bindings point
+  // at deleted topics, so those stay silent (matching the router, which also
+  // resolves them and lets the send fail loudly instead).
+  if (
+    !binding ||
+    (binding.status !== TOPIC_SESSION_STATUS.ACTIVE &&
+      binding.status !== TOPIC_SESSION_STATUS.ABANDONED)
+  ) {
     return null;
   }
 

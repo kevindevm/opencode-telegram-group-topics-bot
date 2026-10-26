@@ -1,8 +1,12 @@
 import { PermissionRequest, PermissionState } from "./types.js";
 import { logger } from "../utils/logger.js";
 
+const MAX_SETTLED_REQUEST_IDS = 200;
+const SETTLED_TTL_MS = 5 * 60 * 1000;
+
 class PermissionManager {
   private stateByScope: Map<string, PermissionState> = new Map();
+  private settledRequestIds: Map<string, number> = new Map();
 
   private isEquivalentRequest(left: PermissionRequest, right: PermissionRequest): boolean {
     if (!left.tool || !right.tool) {
@@ -162,6 +166,71 @@ class PermissionManager {
     return this.getState(scopeKey).requestsByMessageId.size;
   }
 
+  getActiveScopeKeys(): string[] {
+    const scopeKeys: string[] = [];
+    for (const [scopeKey, state] of this.stateByScope.entries()) {
+      if (state.requestsByMessageId.size > 0) {
+        scopeKeys.push(scopeKey);
+      }
+    }
+    return scopeKeys;
+  }
+
+  /**
+   * Remembers a request the server already settled (e.g. auto-accepted on
+   * PC) so late polls are never shown for it. Sticky with a TTL: the SSE
+   * fan-out delivers every event several times, so one-shot consumption
+   * would lose to the second duplicate.
+   */
+  markSettled(requestID: string): void {
+    if (!requestID) {
+      return;
+    }
+
+    this.settledRequestIds.set(requestID, Date.now());
+    this.pruneSettled();
+  }
+
+  wasSettledRecently(requestID: string, ttlMs: number = SETTLED_TTL_MS): boolean {
+    if (!requestID) {
+      return false;
+    }
+
+    const settledAt = this.settledRequestIds.get(requestID);
+    if (settledAt === undefined) {
+      return false;
+    }
+
+    if (Date.now() - settledAt >= ttlMs) {
+      this.settledRequestIds.delete(requestID);
+      return false;
+    }
+
+    return true;
+  }
+
+  consumeSettled(requestID: string): boolean {
+    return this.wasSettledRecently(requestID);
+  }
+
+  private pruneSettled(): void {
+    const now = Date.now();
+    for (const [requestID, settledAt] of this.settledRequestIds) {
+      if (now - settledAt >= SETTLED_TTL_MS) {
+        this.settledRequestIds.delete(requestID);
+      }
+    }
+
+    while (this.settledRequestIds.size > MAX_SETTLED_REQUEST_IDS) {
+      const oldest = this.settledRequestIds.keys().next();
+      if (oldest.done) {
+        return;
+      }
+
+      this.settledRequestIds.delete(oldest.value);
+    }
+  }
+
   isActive(scopeKey: string = "global"): boolean {
     return this.getState(scopeKey).requestsByMessageId.size > 0;
   }
@@ -176,6 +245,11 @@ class PermissionManager {
     this.stateByScope.set(scopeKey, {
       requestsByMessageId: new Map(),
     });
+  }
+
+  __resetForTests(): void {
+    this.stateByScope.clear();
+    this.settledRequestIds.clear();
   }
 }
 

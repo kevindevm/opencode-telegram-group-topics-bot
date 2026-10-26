@@ -63,6 +63,12 @@ export interface TopicSessionBinding {
   createdAt: number;
   updatedAt: number;
   closedAt?: number;
+  /**
+   * Marks transcript-only topics owned by a subagent run. Ephemeral bindings
+   * are excluded from session re-tracking, user session lists and auto
+   * pin/keyboard setup; they only route the child session's output.
+   */
+  ephemeral?: boolean;
 }
 
 export interface ScopeState {
@@ -72,6 +78,8 @@ export interface ScopeState {
   model?: ModelInfo;
   pinnedMessageId?: number;
   ttsEnabled?: boolean;
+  /** Per-scope display overrides (visible semantics per flag). Wins over global. */
+  display?: Record<string, boolean>;
 }
 
 export interface TopicScopeState extends ScopeState {
@@ -92,6 +100,48 @@ export interface Settings {
   scheduledTaskTopics?: ScheduledTaskTopicBinding[];
   serverProcess?: ServerProcessInfo;
   sessionDirectoryCache?: SessionDirectoryCacheInfo;
+  /** Runtime display overrides set from /display (visible semantics per flag). */
+  display?: Record<string, boolean>;
+  /** User-saved prompt shortcuts (name -> text). */
+  savedPrompts?: Array<{ name: string; text: string }>;
+  /** Persisted daily OpenCode spend in USD, keyed by local YYYY-MM-DD. */
+  costDaily?: Record<string, number>;
+  /** Bot-side queued prompts, keyed by sessionId. Survives bot restarts. */
+  queuedPrompts?: Record<string, PersistedQueuedPrompt[]>;
+}
+
+export interface PersistedQueuedPromptPart {
+  type: string;
+  text?: string;
+  mime?: string;
+  filename?: string;
+  url?: string;
+}
+
+export interface PersistedQueuedPrompt {
+  queueId: string;
+  sessionId: string;
+  chatId: number;
+  threadId: number | null;
+  responseMode: string;
+  promptOptions: {
+    sessionID: string;
+    directory: string;
+    parts: PersistedQueuedPromptPart[];
+    model?: { providerID: string; modelID: string };
+    agent?: string;
+    variant?: string;
+  };
+  promptErrorLogContext: {
+    sessionId: string;
+    directory: string;
+    agent: string;
+    modelProvider: string;
+    modelId: string;
+    variant: string;
+    promptLength: number;
+    fileCount: number;
+  };
 }
 
 interface LegacySettings {
@@ -652,6 +702,7 @@ function sanitizeTopicSessionBinding(
     createdAt,
     updatedAt,
     closedAt: typeof value.closedAt === "number" ? value.closedAt : undefined,
+    ephemeral: value.ephemeral === true ? true : undefined,
   };
 }
 
@@ -688,6 +739,7 @@ function sanitizeScopeState(value: unknown): ScopeState | undefined {
   const pinnedMessageId =
     typeof value.pinnedMessageId === "number" ? value.pinnedMessageId : undefined;
   const ttsEnabled = typeof value.ttsEnabled === "boolean" ? value.ttsEnabled : undefined;
+  const display = sanitizeDisplayOverrides(value.display);
 
   if (
     !project &&
@@ -695,7 +747,8 @@ function sanitizeScopeState(value: unknown): ScopeState | undefined {
     !agent &&
     !model &&
     pinnedMessageId === undefined &&
-    ttsEnabled === undefined
+    ttsEnabled === undefined &&
+    display === undefined
   ) {
     return undefined;
   }
@@ -707,7 +760,57 @@ function sanitizeScopeState(value: unknown): ScopeState | undefined {
     model,
     pinnedMessageId,
     ttsEnabled,
+    display,
   };
+}
+
+function sanitizeDisplayOverrides(value: unknown): Record<string, boolean> | undefined {
+  if (!isObject(value)) {
+    return undefined;
+  }
+
+  const next: Record<string, boolean> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof key === "string" && key.length > 0 && typeof entry === "boolean") {
+      next[key] = entry;
+    }
+  }
+
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function sanitizeCostDaily(value: unknown): Record<string, number> | undefined {
+  if (!isObject(value)) {
+    return undefined;
+  }
+
+  const next: Record<string, number> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(key) && typeof entry === "number" && entry >= 0) {
+      next[key] = entry;
+    }
+  }
+
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function sanitizeSavedPrompts(value: unknown): Array<{ name: string; text: string }> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const next = value
+    .filter(
+      (entry): entry is { name: string; text: string } =>
+        isObject(entry) &&
+        typeof entry.name === "string" &&
+        entry.name.trim().length > 0 &&
+        typeof entry.text === "string" &&
+        entry.text.length > 0,
+    )
+    .map((entry) => ({ name: entry.name.trim(), text: entry.text }));
+
+  return next.length > 0 ? next : undefined;
 }
 
 function sanitizeTopicScopeState(
@@ -811,6 +914,10 @@ function sanitizeSettingsV2(value: unknown): Settings {
     scheduledTaskTopics: sanitizeScheduledTaskTopics(value.scheduledTaskTopics),
     serverProcess: sanitizeServerProcessInfo(value.serverProcess),
     sessionDirectoryCache: sanitizeSessionDirectoryCacheInfo(value.sessionDirectoryCache),
+    display: sanitizeDisplayOverrides(value.display),
+    costDaily: sanitizeCostDaily(value.costDaily),
+    savedPrompts: sanitizeSavedPrompts(value.savedPrompts),
+    queuedPrompts: sanitizeQueuedPrompts(value.queuedPrompts),
   };
 }
 
@@ -865,6 +972,7 @@ function isEmptyScopeState(state: ScopeState | TopicScopeState | undefined): boo
     state.model === undefined &&
     state.pinnedMessageId === undefined &&
     state.ttsEnabled === undefined &&
+    state.display === undefined &&
     (!("binding" in state) || state.binding === undefined)
   );
 }
@@ -1132,25 +1240,58 @@ async function readSettingsFile(): Promise<unknown> {
 
 let settingsWriteQueue: Promise<void> = Promise.resolve();
 let settingsWriteBlockedReason: string | null = null;
+let consecutiveWriteFailures = 0;
+const MAX_LOGGED_WRITE_FAILURES_BEFORE_ERROR = 3;
+// Depth gauge for the fire-and-forget write chain: bursts (many topics
+// settling at once) are fine, but a monotonically growing depth means
+// writes never catch up and memory diverges from disk.
+let pendingSettingsWrites = 0;
+const SETTINGS_WRITE_DEPTH_WARN_AT = 50;
 
 function writeSettingsFile(settings: Settings): Promise<void> {
+  pendingSettingsWrites += 1;
+  if (pendingSettingsWrites === SETTINGS_WRITE_DEPTH_WARN_AT + 1) {
+    logger.warn(
+      `[SettingsManager] Settings write queue backing up (depth=${pendingSettingsWrites}); writers are outpacing disk`,
+    );
+  }
   settingsWriteQueue = settingsWriteQueue
     .catch(() => {
       // Keep write queue alive after failed writes.
     })
     .then(async () => {
-      if (settingsWriteBlockedReason) {
-        logger.warn(`[SettingsManager] Skipping settings write: ${settingsWriteBlockedReason}`);
-        return;
-      }
-
       try {
-        const fs = await import("fs/promises");
-        const settingsFilePath = getSettingsFilePath();
-        await fs.mkdir(path.dirname(settingsFilePath), { recursive: true });
-        await fs.writeFile(settingsFilePath, JSON.stringify(settings, null, 2));
-      } catch (err) {
-        logger.error("[SettingsManager] Error writing settings file:", err);
+        if (settingsWriteBlockedReason) {
+          logger.warn(`[SettingsManager] Skipping settings write: ${settingsWriteBlockedReason}`);
+          return;
+        }
+
+        try {
+          const fs = await import("fs/promises");
+          const settingsFilePath = getSettingsFilePath();
+          await fs.mkdir(path.dirname(settingsFilePath), { recursive: true });
+          // Atomic write: a crash mid-write must never leave a truncated
+          // settings.json behind (the next read would reset to empty state).
+          const tmpPath = `${settingsFilePath}.${process.pid}.tmp`;
+          await fs.writeFile(tmpPath, JSON.stringify(settings, null, 2));
+          await fs.rename(tmpPath, settingsFilePath);
+          if (consecutiveWriteFailures > 0) {
+            logger.info("[SettingsManager] Settings writes recovered after failures");
+            consecutiveWriteFailures = 0;
+          }
+        } catch (err) {
+          consecutiveWriteFailures += 1;
+          if (consecutiveWriteFailures >= MAX_LOGGED_WRITE_FAILURES_BEFORE_ERROR) {
+            logger.error(
+              `[SettingsManager] Settings writes failing repeatedly (${consecutiveWriteFailures}x in a row); in-memory state is diverging from disk. Check disk space and permissions for ${getSettingsFilePath()}:`,
+              err,
+            );
+          } else {
+            logger.error("[SettingsManager] Error writing settings file:", err);
+          }
+        }
+      } finally {
+        pendingSettingsWrites = Math.max(0, pendingSettingsWrites - 1);
       }
     });
 
@@ -1412,6 +1553,238 @@ export function getServerProcess(): ServerProcessInfo | undefined {
   return currentSettings.serverProcess ? { ...currentSettings.serverProcess } : undefined;
 }
 
+export function getDisplayOverrides(): Record<string, boolean> {
+  return { ...(currentSettings.display ?? {}) };
+}
+
+export function setDisplayOverride(flag: string, visible: boolean | undefined): void {
+  if (!guardWritableSettings(`display override for ${flag}`)) {
+    return;
+  }
+
+  const next = { ...(currentSettings.display ?? {}) };
+  if (visible === undefined) {
+    delete next[flag];
+  } else {
+    next[flag] = visible;
+  }
+
+  if (Object.keys(next).length === 0) {
+    delete currentSettings.display;
+  } else {
+    currentSettings.display = next;
+  }
+
+  void writeSettingsFile(currentSettings);
+}
+
+/** Scope-level display override (per topic). Falls back to global when unset. */
+export function getScopeDisplayOverride(scopeKey: string, flag: string): boolean | undefined {
+  const normalized = normalizeScopeKey(scopeKey);
+  const scopeState = getOrCreateScopeState(currentSettings, normalized);
+  return scopeState?.display?.[flag];
+}
+
+export function setScopeDisplayOverride(
+  scopeKey: string,
+  flag: string,
+  visible: boolean | undefined,
+): void {
+  if (!guardWritableSettings(`scope display override for ${flag}`)) {
+    return;
+  }
+
+  const normalizedScopeKey = normalizeScopeKey(scopeKey);
+  const scopeState = getOrCreateScopeState(currentSettings, normalizedScopeKey);
+  if (!scopeState) {
+    return;
+  }
+
+  const next = { ...(scopeState.display ?? {}) };
+  if (visible === undefined) {
+    delete next[flag];
+  } else {
+    next[flag] = visible;
+  }
+
+  updateScopeState(
+    normalizedScopeKey,
+    "display",
+    Object.keys(next).length > 0 ? next : undefined,
+  );
+}
+
+export function getDailyCost(day: string): number {
+  return currentSettings.costDaily?.[day] ?? 0;
+}
+
+/** Adds spend to a day bucket. Returns the new day total. */
+export function addDailyCost(day: string, cost: number): number {
+  if (!guardWritableSettings(`daily cost update for ${day}`)) {
+    return getDailyCost(day);
+  }
+
+  const next = { ...(currentSettings.costDaily ?? {}) };
+  next[day] = (next[day] ?? 0) + cost;
+  currentSettings.costDaily = next;
+  void writeSettingsFile(currentSettings);
+  return next[day] ?? 0;
+}
+
+export function listSavedPrompts(): Array<{ name: string; text: string }> {
+  return (currentSettings.savedPrompts ?? []).map((entry) => ({ ...entry }));
+}
+
+export function savePromptShortcut(name: string, text: string): void {
+  if (!guardWritableSettings("saved prompt update")) {
+    return;
+  }
+
+  const key = name.trim().toLowerCase();
+  const next = (currentSettings.savedPrompts ?? []).filter(
+    (entry) => entry.name.toLowerCase() !== key,
+  );
+  next.push({ name: name.trim(), text });
+  currentSettings.savedPrompts = next;
+  void writeSettingsFile(currentSettings);
+}
+
+export function deleteSavedPrompt(name: string): boolean {
+  if (!guardWritableSettings("saved prompt delete")) {
+    return false;
+  }
+
+  const key = name.trim().toLowerCase();
+  const next = (currentSettings.savedPrompts ?? []).filter(
+    (entry) => entry.name.toLowerCase() !== key,
+  );
+  if (next.length === (currentSettings.savedPrompts ?? []).length) {
+    return false;
+  }
+
+  currentSettings.savedPrompts = next.length > 0 ? next : undefined;
+  void writeSettingsFile(currentSettings);
+  return true;
+}
+
+export function getPersistedQueuedPrompts(): Record<string, PersistedQueuedPrompt[]> {
+  const record = currentSettings.queuedPrompts ?? {};
+  const next: Record<string, PersistedQueuedPrompt[]> = {};
+  for (const [sessionId, entries] of Object.entries(record)) {
+    if (typeof sessionId !== "string" || sessionId.length === 0 || !Array.isArray(entries)) {
+      continue;
+    }
+    const valid = entries.filter(isPersistedQueuedPrompt);
+    if (valid.length > 0) {
+      next[sessionId] = valid.map((entry) => ({ ...entry }));
+    }
+  }
+  return next;
+}
+
+export function setPersistedQueuedPrompts(record: Record<string, PersistedQueuedPrompt[]>): void {
+  if (!guardWritableSettings("queued prompts update")) {
+    return;
+  }
+
+  const keys = Object.keys(record);
+  currentSettings.queuedPrompts = keys.length > 0 ? record : undefined;
+  void writeSettingsFile(currentSettings);
+}
+
+function isPersistedQueuedPromptPart(value: unknown): value is PersistedQueuedPromptPart {
+  if (!isObject(value) || typeof value.type !== "string") {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  for (const key of ["text", "mime", "filename", "url"] as const) {
+    if (record[key] !== undefined && typeof record[key] !== "string") {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isPersistedQueuedPrompt(value: unknown): value is PersistedQueuedPrompt {
+  if (!isObject(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.queueId !== "string" ||
+    record.queueId.length === 0 ||
+    typeof record.sessionId !== "string" ||
+    record.sessionId.length === 0 ||
+    typeof record.chatId !== "number" ||
+    (record.threadId !== null && typeof record.threadId !== "number") ||
+    typeof record.responseMode !== "string"
+  ) {
+    return false;
+  }
+
+  const options = record.promptOptions;
+  if (
+    !isObject(options) ||
+    typeof options.sessionID !== "string" ||
+    typeof options.directory !== "string" ||
+    !Array.isArray(options.parts) ||
+    !options.parts.every(isPersistedQueuedPromptPart)
+  ) {
+    return false;
+  }
+
+  if (
+    options.model !== undefined &&
+    (!isObject(options.model) ||
+      typeof (options.model as Record<string, unknown>).providerID !== "string" ||
+      typeof (options.model as Record<string, unknown>).modelID !== "string")
+  ) {
+    return false;
+  }
+
+  if (
+    (options.agent !== undefined && typeof options.agent !== "string") ||
+    (options.variant !== undefined && typeof options.variant !== "string")
+  ) {
+    return false;
+  }
+
+  const logContext = record.promptErrorLogContext;
+  if (
+    !isObject(logContext) ||
+    typeof logContext.sessionId !== "string" ||
+    typeof logContext.directory !== "string" ||
+    typeof logContext.agent !== "string"
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function sanitizeQueuedPrompts(value: unknown): Record<string, PersistedQueuedPrompt[]> | undefined {
+  if (!isObject(value)) {
+    return undefined;
+  }
+
+  const next: Record<string, PersistedQueuedPrompt[]> = {};
+  for (const [sessionId, entries] of Object.entries(value)) {
+    if (typeof sessionId !== "string" || sessionId.length === 0 || !Array.isArray(entries)) {
+      continue;
+    }
+
+    const valid = entries.filter(isPersistedQueuedPrompt);
+    if (valid.length > 0) {
+      next[sessionId] = valid;
+    }
+  }
+
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
 export function getScheduledTasks(): ScheduledTask[] {
   return (currentSettings.scheduledTasks ?? []).map((task) => cloneScheduledTask(task));
 }
@@ -1504,6 +1877,15 @@ export function __resetSettingsForTests(): void {
 }
 
 export function __waitForSettingsWritesForTests(): Promise<void> {
+  return settingsWriteQueue;
+}
+
+/**
+ * Resolves once every settings write queued so far has been attempted.
+ * Await this during shutdown so a fast exit cannot lose queued prompts,
+ * bindings, costs, or display overrides sitting in the write queue.
+ */
+export function flushSettingsWrites(): Promise<void> {
   return settingsWriteQueue;
 }
 

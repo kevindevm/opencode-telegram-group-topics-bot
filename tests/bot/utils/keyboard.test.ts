@@ -3,7 +3,6 @@ import {
   createAgentKeyboard,
   createDmKeyboard,
   createMainKeyboard,
-  removeKeyboard,
 } from "../../../src/bot/utils/keyboard.js";
 
 function getButtonText(button: string | { text: string }): string {
@@ -44,15 +43,13 @@ describe("bot/utils/keyboard", () => {
     expect(getButtonText(keyboard.keyboard[1][1])).toBe("⚡ Fast");
   });
 
-  it("creates custom agent keyboard and remove payload", () => {
+  it("creates custom agent keyboard", () => {
     const keyboard = createAgentKeyboard("custom");
     const nonEmptyRows = keyboard.keyboard.filter((row) => row.length > 0);
 
     expect(nonEmptyRows).toEqual([[{ text: "🤖 Custom Agent" }]]);
     expect(keyboard.resize_keyboard).toBe(true);
     expect(keyboard.is_persistent).toBe(true);
-
-    expect(removeKeyboard()).toEqual({ remove_keyboard: true });
   });
 
   it("creates DM keyboard with utility commands", () => {

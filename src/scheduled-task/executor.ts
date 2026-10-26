@@ -222,14 +222,19 @@ async function waitForScheduledTaskResult(sessionId: string, directory: string):
 
 function toErrorDetails(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
+    let cause: unknown = error.cause;
+    if (cause && typeof cause === "object") {
+      try {
+        cause = JSON.parse(JSON.stringify(cause));
+      } catch {
+        cause = String(cause);
+      }
+    }
     return {
       name: error.name,
       message: error.message,
       stack: error.stack,
-      cause:
-        error.cause && typeof error.cause === "object"
-          ? JSON.parse(JSON.stringify(error.cause))
-          : error.cause,
+      cause,
     };
   }
 

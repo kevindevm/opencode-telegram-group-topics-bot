@@ -9,8 +9,18 @@ import {
 
 const PROBE_TIMEOUT_MS = 5000;
 
+/**
+ * Default timeout for unary SDK requests (health, session, prompt, ...).
+ * The shared SSE stream always passes its own AbortSignal, so it is never
+ * affected; everything without an explicit signal gets bounded instead of
+ * floating forever when OpenCode hangs.
+ */
+const UNARY_REQUEST_TIMEOUT_MS = 30_000;
+
 const opencodeDispatcher = new Agent({
-  headersTimeout: 0,
+  // Bound waiting for response headers (hung server), but never the body:
+  // the SSE stream holds one response open for the life of the process.
+  headersTimeout: 15_000,
   bodyTimeout: 0,
 });
 
@@ -42,11 +52,18 @@ function createClient() {
   return createOpencodeClient({
     baseUrl: config.opencode.apiUrl,
     headers: config.opencode.password ? { Authorization: getAuth() } : undefined,
-    fetch: (input, init) =>
-      fetch(input, {
-        ...init,
+    fetch: (input, init) => {
+      // AbortSignal.timeout only when the caller passed no signal: the SSE
+      // subscription always carries its own, so the stream is untouched.
+      const initWithTimeout =
+        init?.signal === undefined || init.signal === null
+          ? { ...init, signal: AbortSignal.timeout(UNARY_REQUEST_TIMEOUT_MS) }
+          : init;
+      return fetch(input, {
+        ...initWithTimeout,
         dispatcher: opencodeDispatcher as never,
-      } as RequestInit),
+      } as RequestInit);
+    },
   });
 }
 

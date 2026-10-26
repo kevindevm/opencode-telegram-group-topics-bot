@@ -7,7 +7,7 @@ import { logger } from "../../utils/logger.js";
 import { t } from "../../i18n/index.js";
 import { config } from "../../config.js";
 import { processUserPrompt, type ProcessPromptDeps } from "../handlers/prompt.js";
-import { getScopeKeyFromContext } from "../scope.js";
+import { getScopeKeyFromContext, getThreadSendOptions } from "../scope.js";
 
 const SKILLS_CALLBACK_PREFIX = "skills:";
 const SKILLS_CALLBACK_SELECT_PREFIX = `${SKILLS_CALLBACK_PREFIX}select:`;
@@ -503,7 +503,10 @@ export async function handleSkillTextArguments(
 
   const argumentsText = text.trim();
   if (!argumentsText) {
-    await ctx.reply(t("skills.arguments_empty"));
+    await ctx.reply(
+      t("skills.arguments_empty"),
+      getThreadSendOptions(ctx.message?.message_thread_id ?? null),
+    );
     return true;
   }
 

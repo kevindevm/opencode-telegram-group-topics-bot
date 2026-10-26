@@ -6,6 +6,7 @@ import {
   formatToolInfo,
   prepareCodeFile,
 } from "../../src/summary/formatter.js";
+import { languageFromFilename } from "../../src/bot/utils/code-block.js";
 
 const mocked = vi.hoisted(() => ({
   getCurrentProjectMock: vi.fn(),
@@ -199,6 +200,24 @@ describe("summary/formatter", () => {
     expect(text!.length).toBeLessThan(longCommand.length + 16);
   });
 
+  it("truncates long execute code in tool summaries like bash", () => {
+    const longCode = `const x = 1; ${"// padding ".repeat(30).trim()}`;
+
+    const text = formatToolInfo({
+      sessionId: "s1",
+      messageId: "m4",
+      callId: "c4",
+      tool: "execute",
+      state: { status: "completed" } as never,
+      input: {
+        code: longCode,
+      },
+    });
+
+    expect(text).toContain("...");
+    expect(text!.length).toBeLessThan(longCode.length + 16);
+  });
+
   it("formats apply_patch tool details without dumping full patch", () => {
     const text = formatToolInfo({
       sessionId: "s1",
@@ -300,7 +319,9 @@ describe("summary/formatter", () => {
     const editBody = editFile?.buffer.toString("utf8") ?? "";
 
     expect(editFile).not.toBeNull();
-    expect(editFile?.filename).toBe("edit_app.ts.txt");
+    expect(editFile?.filename).toBe("edit_app.ts.diff");
+    // The .diff filename drives the Telegram pre language for red/green paint.
+    expect(languageFromFilename(editFile?.filename ?? "")).toBe("diff");
     expect(editBody).not.toContain("@@");
     expect(editBody).not.toContain("--- a/src/app.ts");
     expect(editBody).toContain(" line1");

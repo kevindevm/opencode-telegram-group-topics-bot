@@ -362,7 +362,7 @@ describe("bot/commands/new", () => {
 
     await command(ctx as never);
 
-    expect(ctx.reply).toHaveBeenCalledWith("new.create_error");
+    expect(ctx.reply).toHaveBeenCalledWith("new.create_error", { message_thread_id: 1 });
     expect(ctx.api.createForumTopic).not.toHaveBeenCalled();
   });
 
@@ -375,7 +375,7 @@ describe("bot/commands/new", () => {
 
     await command(ctx as never);
 
-    expect(ctx.reply).toHaveBeenCalledWith("projects.worktree_missing");
+    expect(ctx.reply).toHaveBeenCalledWith("projects.worktree_missing", { message_thread_id: 1 });
     expect(mocked.sessionCreateMock).not.toHaveBeenCalled();
     expect(ctx.api.createForumTopic).not.toHaveBeenCalled();
   });

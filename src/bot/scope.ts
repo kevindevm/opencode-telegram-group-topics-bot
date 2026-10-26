@@ -297,11 +297,9 @@ export function getThreadSendOptions(threadId: number | null): { message_thread_
 export function getChatActionThreadOptions(threadId: number | null): {
   message_thread_id?: number;
 } {
-  if (threadId === null) {
-    return {};
-  }
-
-  return { message_thread_id: threadId };
+  // Like getThreadSendOptions: thread 1 is the General pseudo-topic and must
+  // not be sent (Telegram rejects or misroutes chat actions there).
+  return getThreadSendOptions(threadId);
 }
 
 export function isGeneralScope(scope: ConversationScope | null): boolean {

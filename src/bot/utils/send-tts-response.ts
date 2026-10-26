@@ -1,6 +1,6 @@
 import { InputFile } from "grammy";
 import { getThreadSendOptions } from "../scope.js";
-import { consumePromptResponseMode } from "../handlers/prompt.js";
+import { getPromptResponseMode } from "../handlers/prompt.js";
 import { isTtsConfigured, synthesizeSpeech, type TtsResult } from "../../tts/client.js";
 import { t } from "../../i18n/index.js";
 import { logger } from "../../utils/logger.js";
@@ -34,7 +34,7 @@ export async function sendTtsResponseForSession({
   chatId,
   threadId,
   text,
-  consumeResponseMode: consumeResponseModeImpl = consumePromptResponseMode,
+  consumeResponseMode: consumeResponseModeImpl = getPromptResponseMode,
   isTtsConfigured: isTtsConfiguredImpl = isTtsConfigured,
   synthesizeSpeech: synthesizeSpeechImpl = synthesizeSpeech,
 }: SendTtsResponseParams): Promise<boolean> {

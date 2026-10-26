@@ -142,8 +142,7 @@ describe("summary/aggregator", () => {
     ]);
   });
 
-  it("emits tool updates for running and error states once each", () => {
-    const onTool = vi.fn();
+  it("emits tool updates for running and error states once each", () => {    const onTool = vi.fn();
     summaryAggregator.setOnTool(onTool);
     summaryAggregator.setSession("session-1");
 
@@ -310,6 +309,206 @@ describe("summary/aggregator", () => {
         terminalMessage: "subagent crashed",
       }),
     ]);
+  });
+
+  it("streams child assistant text under the child session id", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("root-session");
+
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: {
+        info: { id: "child-session", parentID: "root-session", title: "Explore (@explore subagent)" },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "child-message-1",
+          sessionID: "child-session",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "child-text-1",
+          sessionID: "child-session",
+          messageID: "child-message-1",
+          type: "text",
+          text: "hello from child",
+          time: { start: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    const lastCall = onMessageUpdated.mock.calls[onMessageUpdated.mock.calls.length - 1];
+    expect(lastCall).toEqual(["child-session", "child-message-1", "hello from child"]);
+  });
+
+  it("dispatches child tool updates for transcript topics", () => {
+    const onTool = vi.fn();
+    summaryAggregator.setOnTool(onTool);
+    summaryAggregator.setSession("root-session");
+
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: {
+        info: { id: "child-session", parentID: "root-session", title: "Explore (@explore subagent)" },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "child-tool-1",
+          sessionID: "child-session",
+          messageID: "child-message-1",
+          type: "tool",
+          callID: "child-call-1",
+          tool: "read",
+          state: {
+            status: "running",
+            input: { filePath: "src/index.ts" },
+            metadata: {},
+          },
+        },
+      },
+    } as unknown as Event);
+
+    expect(onTool).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "child-session", tool: "read" }),
+    );
+  });
+
+  it("routes child questions and permissions to their own topic flow", () => {
+    const onQuestion = vi.fn();
+    const onPermission = vi.fn();
+    summaryAggregator.setOnQuestion(onQuestion);
+    summaryAggregator.setOnPermission(onPermission);
+    summaryAggregator.setSession("root-session");
+
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: {
+        info: { id: "child-session", parentID: "root-session", title: "Ask (@ask subagent)" },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "question.asked",
+      properties: {
+        id: "q-child-1",
+        sessionID: "child-session",
+        questions: [{ question: "Proceed?", header: "Confirm", options: [] }],
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "permission.asked",
+      properties: {
+        id: "p-child-1",
+        sessionID: "child-session",
+        permission: "read",
+        patterns: ["src/**"],
+      },
+    } as unknown as Event);
+
+    expect(onQuestion).toHaveBeenCalledWith(
+      "child-session",
+      expect.anything(),
+      "q-child-1",
+    );
+    expect(onPermission).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionID: "child-session" }),
+    );
+  });
+
+  it("replays child text that arrived before session.created", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("root-session");
+
+    // Text delta wins the race against session.created.
+    summaryAggregator.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "child-session",
+        messageID: "child-message-race",
+        partID: "child-text-race",
+        field: "text",
+        delta: "early hello",
+      },
+    } as unknown as Event);
+
+    expect(onMessageUpdated).not.toHaveBeenCalled();
+
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: {
+        info: { id: "child-session", parentID: "root-session", title: "Race (@explore subagent)" },
+      },
+    } as unknown as Event);
+
+    const lastCall = onMessageUpdated.mock.calls[onMessageUpdated.mock.calls.length - 1];
+    expect(lastCall).toEqual(["child-session", "child-message-race", "early hello"]);
+  });
+
+  it("tracks grandchild sessions under their child parent", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("root-session");
+
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: {
+        info: { id: "child-session", parentID: "root-session", title: "Mid (@explore subagent)" },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: {
+        info: { id: "grandchild-session", parentID: "child-session", title: "Leaf (@plan subagent)" },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "grandchild-message-1",
+          sessionID: "grandchild-session",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "grandchild-text-1",
+          sessionID: "grandchild-session",
+          messageID: "grandchild-message-1",
+          type: "text",
+          text: "deep hello",
+          time: { start: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    const lastCall = onMessageUpdated.mock.calls[onMessageUpdated.mock.calls.length - 1];
+    expect(lastCall).toEqual(["grandchild-session", "grandchild-message-1", "deep hello"]);
   });
 
   it("does not guess unknown child-session ownership when multiple pending subagents exist", () => {
@@ -961,7 +1160,7 @@ describe("summary/aggregator", () => {
     expect(filePayload.tool).toBe("apply_patch");
     expect(filePayload.hasFileAttachment).toBe(true);
     expect(filePayload.files).toHaveLength(1);
-    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_one.ts.txt");
+    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_one.ts.diff");
     expect(filePayload.files[0]?.fileData?.buffer.toString("utf8")).toContain(
       "Edit File/Path: src/one.ts",
     );
@@ -1026,7 +1225,7 @@ describe("summary/aggregator", () => {
 
     expect(filePayload.hasFileAttachment).toBe(true);
     expect(filePayload.files).toHaveLength(1);
-    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_README.md.txt");
+    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_README.md.diff");
     expect(filePayload.files[0]?.fileData?.buffer.toString("utf8")).toContain(
       "Edit File/Path: README.md",
     );
@@ -1101,7 +1300,7 @@ describe("summary/aggregator", () => {
 
     const content = filePayload.files[0]?.fileData?.buffer.toString("utf8") ?? "";
     expect(filePayload.files).toHaveLength(1);
-    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_README.md.txt");
+    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_README.md.diff");
     expect(content).toContain("Edit File/Path: README.md");
     expect(content).toContain("new readme");
     expect(content).not.toContain("src/one.ts");
@@ -1168,8 +1367,8 @@ describe("summary/aggregator", () => {
     expect(filePayload.files).toHaveLength(2);
     expect(filePayload.files[0]?.line).toBe("🩹 apply_patch src/a.ts (+1)");
     expect(filePayload.files[1]?.line).toBe("🩹 apply_patch src/b.ts (+1)");
-    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_a.ts.txt");
-    expect(filePayload.files[1]?.fileData?.filename).toBe("edit_b.ts.txt");
+    expect(filePayload.files[0]?.fileData?.filename).toBe("edit_a.ts.diff");
+    expect(filePayload.files[1]?.fileData?.filename).toBe("edit_b.ts.diff");
     expect(filePayload.files[0]?.fileData?.buffer.toString("utf8")).not.toContain("src/b.ts");
     expect(filePayload.files[1]?.fileData?.buffer.toString("utf8")).not.toContain("src/a.ts");
   });
@@ -1264,6 +1463,133 @@ describe("summary/aggregator", () => {
     expect(onMessageUpdated.mock.calls[0]).toEqual(["session-1", "message-dedup", "Hello"]);
   });
 
+  it("treats cumulative delta resends as replacement instead of appending", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-cumulative",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "session-1",
+        messageID: "message-cumulative",
+        partID: "part-cumulative-1",
+        field: "text",
+        delta: "Descubierto",
+      },
+    } as unknown as Event);
+
+    // Server re-emits the cumulative part text instead of an incremental chunk.
+    summaryAggregator.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "session-1",
+        messageID: "message-cumulative",
+        partID: "part-cumulative-1",
+        field: "text",
+        delta: "Descubierto (verificado",
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "session-1",
+        messageID: "message-cumulative",
+        partID: "part-cumulative-1",
+        field: "text",
+        delta: "Descubierto (verificado con evidencia propia)",
+      },
+    } as unknown as Event);
+
+    expect(onMessageUpdated).toHaveBeenCalledTimes(3);
+    expect(onMessageUpdated.mock.calls[2]).toEqual([
+      "session-1",
+      "message-cumulative",
+      "Descubierto (verificado con evidencia propia)",
+    ]);
+  });
+
+  it("replaces a repeated part snapshot instead of duplicating it", async () => {
+    vi.useFakeTimers();
+    const onComplete = vi.fn();
+    summaryAggregator.setOnMessageUpdated(() => undefined);
+    summaryAggregator.setOnComplete(onComplete);
+    summaryAggregator.setSession("session-1");
+
+    const messageId = "message-resnapshot";
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: messageId,
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    const partEvent = (text: string) =>
+      ({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: `${messageId}:text:0`,
+            sessionID: "session-1",
+            messageID: messageId,
+            type: "text",
+            text,
+            time: { start: Date.now() },
+          },
+        },
+      }) as unknown as Event;
+
+    summaryAggregator.processEvent(partEvent("Descubierto"));
+    // Replay/regeneration of the same part must not append a second copy.
+    summaryAggregator.processEvent(partEvent("Descubierto (verificado con evidencia propia)"));
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: messageId,
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now(), completed: Date.now() },
+          cost: 0,
+          tokens: {
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+        },
+      },
+    } as unknown as Event);
+
+    expect(onComplete).toHaveBeenCalledTimes(0);
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete.mock.calls[0][2]).toBe("Descubierto (verificado con evidencia propia)");
+
+    vi.useRealTimers();
+  });
+
   it("ignores non-text delta fields and untracked sessions", () => {
     const onMessageUpdated = vi.fn();
     summaryAggregator.setOnMessageUpdated(onMessageUpdated);
@@ -1304,5 +1630,556 @@ describe("summary/aggregator", () => {
     } as unknown as Event);
 
     expect(onMessageUpdated).not.toHaveBeenCalled();
+  });
+
+  it("reports externally settled permissions with session and request ids", () => {
+    const onPermissionReplied = vi.fn();
+    summaryAggregator.setOnPermissionReplied(onPermissionReplied);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "permission.replied",
+      properties: {
+        sessionID: "session-1",
+        requestID: "per-1",
+        reply: "once",
+      },
+    } as unknown as Event);
+
+    expect(onPermissionReplied).toHaveBeenCalledTimes(1);
+    expect(onPermissionReplied).toHaveBeenCalledWith("session-1", "per-1");
+  });
+
+  it("ignores permission replied events without identifiers", () => {
+    const onPermissionReplied = vi.fn();
+    summaryAggregator.setOnPermissionReplied(onPermissionReplied);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "permission.replied",
+      properties: {},
+    } as unknown as Event);
+
+    expect(onPermissionReplied).not.toHaveBeenCalled();
+  });
+
+  it("reports externally answered questions", () => {
+    const onQuestionSettled = vi.fn();
+    summaryAggregator.setOnQuestionSettled(onQuestionSettled);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "question.replied",
+      properties: {
+        sessionID: "session-1",
+        requestID: "frm-1",
+        answers: [],
+      },
+    } as unknown as Event);
+
+    expect(onQuestionSettled).toHaveBeenCalledTimes(1);
+    expect(onQuestionSettled).toHaveBeenCalledWith("session-1", "frm-1", "answered");
+  });
+
+  it("reports externally cancelled questions", () => {
+    const onQuestionSettled = vi.fn();
+    summaryAggregator.setOnQuestionSettled(onQuestionSettled);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "question.rejected",
+      properties: {
+        sessionID: "session-1",
+        requestID: "frm-2",
+      },
+    } as unknown as Event);
+
+    expect(onQuestionSettled).toHaveBeenCalledTimes(1);
+    expect(onQuestionSettled).toHaveBeenCalledWith("session-1", "frm-2", "cancelled");
+  });
+
+  it("ignores settled question events without identifiers", () => {
+    const onQuestionSettled = vi.fn();
+    summaryAggregator.setOnQuestionSettled(onQuestionSettled);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "question.replied",
+      properties: {},
+    } as unknown as Event);
+
+    expect(onQuestionSettled).not.toHaveBeenCalled();
+  });
+
+  it("ignores session.usage.updated without a step baseline", () => {
+    const onTokens = vi.fn();
+    summaryAggregator.setOnTokens(onTokens);
+    summaryAggregator.setSession("session-1");
+
+    // Cumulative server totals must never reach the context display directly.
+    summaryAggregator.processEvent({
+      type: "session.usage.updated",
+      properties: {
+        sessionID: "session-1",
+        cost: 0.5,
+        tokens: { input: 1000, output: 50, reasoning: 10, cache: { read: 200, write: 5 } },
+      },
+    } as unknown as Event);
+
+    expect(onTokens).not.toHaveBeenCalled();
+  });
+
+  it("reports live usage growth over the last completed step", () => {
+    const onTokens = vi.fn();
+    summaryAggregator.setOnTokens(onTokens);
+    summaryAggregator.setSession("session-1");
+
+    const stepStart = (id: string) =>
+      ({
+        type: "message.updated",
+        properties: {
+          info: { id, sessionID: "session-1", role: "assistant", time: { created: Date.now() } },
+        },
+      }) as unknown as Event;
+
+    // Step 1 starts before any cumulative totals are known.
+    summaryAggregator.processEvent(stepStart("message-live-1"));
+    summaryAggregator.processEvent({
+      type: "session.usage.updated",
+      properties: {
+        sessionID: "session-1",
+        tokens: { input: 5000, output: 100, reasoning: 0, cache: { read: 1000, write: 0 } },
+      },
+    } as unknown as Event);
+    expect(onTokens).not.toHaveBeenCalled();
+
+    // Step 1 completes with exact per-step tokens.
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-live-1",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now(), completed: Date.now() },
+          tokens: { input: 100, output: 20, reasoning: 0, cache: { read: 20, write: 0 } },
+          cost: 0.01,
+        },
+      },
+    } as unknown as Event);
+    expect(onTokens).toHaveBeenLastCalledWith(
+      "session-1",
+      expect.objectContaining({ input: 100, cacheRead: 20 }),
+    );
+
+    // Step 2 starts: live growth is measured from here.
+    summaryAggregator.processEvent(stepStart("message-live-2"));
+    summaryAggregator.processEvent({
+      type: "session.usage.updated",
+      properties: {
+        sessionID: "session-1",
+        tokens: { input: 5300, output: 150, reasoning: 0, cache: { read: 1100, write: 0 } },
+      },
+    } as unknown as Event);
+    expect(onTokens).toHaveBeenLastCalledWith(
+      "session-1",
+      expect.objectContaining({ input: 400, cacheRead: 120, cost: 0 }),
+    );
+
+    // Server counters reset: re-anchor instead of reporting negative growth.
+    summaryAggregator.processEvent({
+      type: "session.usage.updated",
+      properties: {
+        sessionID: "session-1",
+        tokens: { input: 100, output: 5, reasoning: 0, cache: { read: 10, write: 0 } },
+      },
+    } as unknown as Event);
+    expect(onTokens).toHaveBeenLastCalledWith(
+      "session-1",
+      expect.objectContaining({ input: 100, cacheRead: 20, cost: 0 }),
+    );
+  });
+
+  it("ignores empty session.usage.updated totals", () => {
+    const onTokens = vi.fn();
+    summaryAggregator.setOnTokens(onTokens);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "session.usage.updated",
+      properties: {
+        sessionID: "session-1",
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+    } as unknown as Event);
+
+    expect(onTokens).not.toHaveBeenCalled();
+  });
+
+  it("merges overlapping delta suffixes instead of duplicating them", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-overlap",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    const deltaEvent = (delta: string) =>
+      ({
+        type: "message.part.delta",
+        properties: {
+          sessionID: "session-1",
+          messageID: "message-overlap",
+          partID: "part-overlap-1",
+          field: "text",
+          delta,
+        },
+      }) as unknown as Event;
+
+    summaryAggregator.processEvent(deltaEvent("Result **"));
+    // The server restates the buffered tail: merging must not append it again.
+    summaryAggregator.processEvent(deltaEvent("**"));
+    summaryAggregator.processEvent(deltaEvent("**"));
+
+    expect(onMessageUpdated).toHaveBeenCalledTimes(1);
+    expect(onMessageUpdated.mock.calls[0]).toEqual(["session-1", "message-overlap", "Result **"]);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-overlap-1",
+          sessionID: "session-1",
+          messageID: "message-overlap",
+          type: "text",
+          text: "Result **done**",
+          time: { start: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    expect(onMessageUpdated).toHaveBeenCalledTimes(2);
+    expect(onMessageUpdated.mock.calls[1]).toEqual([
+      "session-1",
+      "message-overlap",
+      "Result **done**",
+    ]);
+  });
+
+  it("keeps identical texts from different text ordinals", async () => {
+    vi.useFakeTimers();
+    const onComplete = vi.fn();
+    summaryAggregator.setOnMessageUpdated(() => undefined);
+    summaryAggregator.setOnComplete(onComplete);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-same",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    for (const ordinal of [0, 1]) {
+      summaryAggregator.processEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: `message-same:text:${ordinal}`,
+            sessionID: "session-1",
+            messageID: "message-same",
+            type: "text",
+            text: "Same",
+            time: { start: Date.now() },
+          },
+        },
+      } as unknown as Event);
+    }
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-same",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now(), completed: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(onComplete).toHaveBeenCalledWith("session-1", "message-same", "SameSame");
+
+    vi.useRealTimers();
+  });
+
+  it("orders out-of-order text ordinals by their suffix", async () => {
+    vi.useFakeTimers();
+    const onComplete = vi.fn();
+    summaryAggregator.setOnMessageUpdated(() => undefined);
+    summaryAggregator.setOnComplete(onComplete);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-order",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    for (const [ordinal, text] of [
+      [1, "second"],
+      [0, "first"],
+    ] as const) {
+      summaryAggregator.processEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: `message-order:text:${ordinal}`,
+            sessionID: "session-1",
+            messageID: "message-order",
+            type: "text",
+            text,
+            time: { start: Date.now() },
+          },
+        },
+      } as unknown as Event);
+    }
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-order",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now(), completed: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(onComplete).toHaveBeenCalledWith("session-1", "message-order", "firstsecond");
+
+    vi.useRealTimers();
+  });
+
+  it("replaces the exact part snapshot when other parts share its text", async () => {
+    vi.useFakeTimers();
+    const onComplete = vi.fn();
+    summaryAggregator.setOnMessageUpdated(() => undefined);
+    summaryAggregator.setOnComplete(onComplete);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-duptext",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    const snapshot = (id: string, text: string) =>
+      ({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id,
+            sessionID: "session-1",
+            messageID: "message-duptext",
+            type: "text",
+            text,
+            time: { start: Date.now() },
+          },
+        },
+      }) as unknown as Event;
+
+    summaryAggregator.processEvent(snapshot("part-a", "dup"));
+    summaryAggregator.processEvent(snapshot("part-b", "dup"));
+    summaryAggregator.processEvent(snapshot("part-a", "dup extended"));
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-duptext",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now(), completed: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(onComplete).toHaveBeenCalledWith("session-1", "message-duptext", "dup extendeddup");
+
+    vi.useRealTimers();
+  });
+
+  it("dedups identical pending snapshots arriving before the message announcement", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("session-1");
+
+    const snapshot = (text: string) =>
+      ({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-pending-1",
+            sessionID: "session-1",
+            messageID: "message-pending",
+            type: "text",
+            text,
+            time: { start: Date.now() },
+          },
+        },
+      }) as unknown as Event;
+
+    summaryAggregator.processEvent(snapshot("Hello"));
+    summaryAggregator.processEvent(snapshot("Hello"));
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-pending",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    expect(onMessageUpdated).toHaveBeenCalledTimes(1);
+    expect(onMessageUpdated.mock.calls[0]).toEqual(["session-1", "message-pending", "Hello"]);
+  });
+
+  it("orders delta overlays from multiple ordinals by their suffix", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-multi-delta",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    for (const [ordinal, delta] of [
+      [1, "B"],
+      [0, "A"],
+    ] as const) {
+      summaryAggregator.processEvent({
+        type: "message.part.delta",
+        properties: {
+          sessionID: "session-1",
+          messageID: "message-multi-delta",
+          partID: `message-multi-delta:text:${ordinal}`,
+          field: "text",
+          delta,
+        },
+      } as unknown as Event);
+    }
+
+    expect(onMessageUpdated.mock.calls.at(-1)).toEqual([
+      "session-1",
+      "message-multi-delta",
+      "AB",
+    ]);
+  });
+
+  it("re-emits a tool update after clearSession purges dedup state", () => {
+    const onTool = vi.fn();
+    summaryAggregator.setOnTool(onTool);
+    summaryAggregator.setSession("session-1");
+
+    const runningEvent = {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-tool-rerun",
+          sessionID: "session-1",
+          messageID: "message-tool-rerun",
+          type: "tool",
+          callID: "call-tool-rerun",
+          tool: "bash",
+          state: {
+            status: "running",
+            input: { command: "npm test" },
+            metadata: {},
+          },
+        },
+      },
+    } as unknown as Event;
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-tool-rerun",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent(runningEvent);
+    expect(onTool).toHaveBeenCalledTimes(1);
+
+    // Duplicate while tracked is suppressed...
+    summaryAggregator.processEvent(runningEvent);
+    expect(onTool).toHaveBeenCalledTimes(1);
+
+    // ...but after the session is cleared the same event flows again.
+    summaryAggregator.clearSession("session-1");
+    summaryAggregator.setSession("session-1");
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-tool-rerun",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+    summaryAggregator.processEvent(runningEvent);
+    expect(onTool).toHaveBeenCalledTimes(2);
   });
 });

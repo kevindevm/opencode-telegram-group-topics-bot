@@ -5,6 +5,8 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const TEMP_DIR = path.join(__dirname, "..", "..", ".tmp");
+const TELEGRAM_MAX_FILE_BYTES = 50 * 1024 * 1024;
+const TELEGRAM_CAPTION_LIMIT = 1024;
 
 type TelegramApi = Bot<Context>["api"];
 type SendMessageOptions = Parameters<TelegramApi["sendMessage"]>[2];
@@ -42,9 +44,13 @@ export class TelegramEventDelivery {
     try {
       await destination.api.editMessageText(destination.chatId, messageId, text);
     } catch (error) {
-      // Tolerate "message is not modified" errors
+      // Tolerate no-op edits and edits of already-deleted messages.
       const errorMessage = error instanceof Error ? error.message.toLowerCase() : "";
-      if (errorMessage.includes("message is not modified")) {
+      if (
+        errorMessage.includes("message is not modified") ||
+        errorMessage.includes("message to edit not found") ||
+        errorMessage.includes("message identifier is not specified")
+      ) {
         return;
       }
       throw error;
@@ -72,16 +78,36 @@ export class TelegramEventDelivery {
     fileData: { filename: string; buffer: Buffer; caption?: string },
     options?: SendDocumentOptions,
   ): Promise<void> {
-    const tempFilePath = path.join(TEMP_DIR, fileData.filename);
+    // Never trust tool output for a filesystem path: strip directories and
+    // make the temp name unique so concurrent sends cannot overwrite or
+    // read each other's files.
+    const safeBasename =
+      path.basename(fileData.filename).replace(/[^\w.\-]+/g, "_") || "file.bin";
+    const uniqueName = `${Date.now()}-${Math.floor(Math.random() * 1e9)}-${safeBasename}`;
+    const tempFilePath = path.join(TEMP_DIR, uniqueName);
+    const caption =
+      fileData.caption && fileData.caption.length > TELEGRAM_CAPTION_LIMIT
+        ? `${fileData.caption.slice(0, TELEGRAM_CAPTION_LIMIT - 1)}…`
+        : fileData.caption;
+
+    if (fileData.buffer.length > TELEGRAM_MAX_FILE_BYTES) {
+      throw new Error(
+        `Refusing to send ${(fileData.buffer.length / 1024 / 1024).toFixed(1)}MB document to Telegram (bot limit is 50MB)`,
+      );
+    }
 
     try {
       await fs.mkdir(TEMP_DIR, { recursive: true });
       await fs.writeFile(tempFilePath, fileData.buffer);
 
-      await destination.api.sendDocument(destination.chatId, new InputFile(tempFilePath), {
-        caption: fileData.caption,
-        ...options,
-      });
+      await destination.api.sendDocument(
+        destination.chatId,
+        new InputFile(tempFilePath, safeBasename),
+        {
+          caption,
+          ...options,
+        },
+      );
     } finally {
       await fs.unlink(tempFilePath).catch(() => {});
     }

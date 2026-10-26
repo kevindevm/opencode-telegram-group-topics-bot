@@ -11,6 +11,7 @@ import type { PermissionRequest } from "../permission/types.js";
 import type { FileChange } from "../pinned/types.js";
 import { logger } from "../utils/logger.js";
 import { getSessionById } from "../session/manager.js";
+import { isRecord } from "../utils/type-guards.js";
 
 export interface SummaryInfo {
   sessionId: string;
@@ -105,6 +106,16 @@ export interface SubagentInfo {
 type SubagentCallback = (sessionId: string, subagents: SubagentInfo[]) => void;
 
 type PermissionCallback = (request: PermissionRequest) => void;
+
+type PermissionRepliedCallback = (sessionId: string | null, requestID: string | null) => void;
+
+export type QuestionSettledOutcome = "answered" | "cancelled";
+
+type QuestionSettledCallback = (
+  sessionId: string | null,
+  requestID: string | null,
+  outcome: QuestionSettledOutcome,
+) => void;
 
 type SessionDiffCallback = (sessionId: string, diffs: FileChange[]) => void;
 
@@ -218,6 +229,70 @@ function asOptionalString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+/**
+ * Merge a streamed text delta into the buffered part text.
+ * Deltas are normally incremental chunks, but some servers re-emit the
+ * cumulative part text on every event; appending those would repeat the
+ * same words over and over in the live message. When the incoming chunk
+ * already contains what we buffered, treat it as a cumulative resend and
+ * keep the longest version instead of concatenating. Overlapping resends
+ * (the delta restates the buffered tail, e.g. a repeated `**` suffix) are
+ * merged at the overlap so the tail is not duplicated.
+ */
+function nextDeltaText(buffered: string, delta: string): string {
+  if (!buffered) {
+    return delta;
+  }
+
+  if (!delta) {
+    return buffered;
+  }
+
+  if (delta.startsWith(buffered)) {
+    return delta;
+  }
+
+  if (buffered.startsWith(delta)) {
+    return buffered;
+  }
+
+  if (delta.includes(buffered)) {
+    return delta;
+  }
+
+  if (buffered.includes(delta)) {
+    return buffered;
+  }
+
+  const maxOverlap = Math.min(buffered.length, delta.length, 2000);
+  let overlap = 0;
+  for (let length = maxOverlap; length > 0; length--) {
+    if (buffered.endsWith(delta.slice(0, length))) {
+      overlap = length;
+      break;
+    }
+  }
+
+  return `${buffered}${delta.slice(overlap)}`;
+}
+
+/** Ordinal of a translator text-part key (`...:text:<ordinal>`), if parseable. */
+function parseTextOrdinalFromPartKey(partKey: string): number | null {
+  const match = partKey.match(/:text:(\d+)$/);
+  if (!match) {
+    return null;
+  }
+
+  const ordinal = Number(match[1]);
+  return Number.isSafeInteger(ordinal) ? ordinal : null;
+}
+
+/** One assistant text chunk; `key` identifies its part for replay-safe upserts. */
+interface MessagePartEntry {
+  key: string | null;
+  text: string;
+}
+
 function extractEventSessionId(event: Event): string | null {
   const eventWithProperties = event as Event & {
     properties?: {
@@ -257,8 +332,8 @@ class SummaryAggregator {
   private static readonly COMPLETION_DEBOUNCE_MS = 100;
 
   private trackedSessionIds: Set<string> = new Set();
-  private currentMessageParts: Map<string, string[]> = new Map();
-  private pendingParts: Map<string, string[]> = new Map();
+  private currentMessageParts: Map<string, MessagePartEntry[]> = new Map();
+  private pendingParts: Map<string, MessagePartEntry[]> = new Map();
   private messages: Map<string, { role: string; sessionId: string }> = new Map();
   private messageCount = 0;
   private lastUpdated = 0;
@@ -267,6 +342,7 @@ class SummaryAggregator {
   private onToolCallback: ToolCallback | null = null;
   private onToolFileCallback: ToolFileCallback | null = null;
   private onQuestionCallback: QuestionCallback | null = null;
+  private onQuestionSettledCallback: QuestionSettledCallback | null = null;
   private onQuestionErrorCallback: QuestionErrorCallback | null = null;
   private onThinkingCallback: ThinkingCallback | null = null;
   private onTypingIndicatorCallback: TypingIndicatorCallback | null = null;
@@ -277,19 +353,69 @@ class SummaryAggregator {
   private onSessionRetryCallback: SessionRetryCallback | null = null;
   private onSubagentCallback: SubagentCallback | null = null;
   private onPermissionCallback: PermissionCallback | null = null;
+  private onPermissionRepliedCallback: PermissionRepliedCallback | null = null;
   private onSessionDiffCallback: SessionDiffCallback | null = null;
   private onFileChangeCallback: FileChangeCallback | null = null;
   private onClearedCallback: ClearedCallback | null = null;
-  private processedToolStates: Set<string> = new Set();
+  private processedToolStates = new Map<string, string>();
+  private static readonly PROCESSED_TOOL_STATES_LIMIT = 10_000;
+
+  /**
+   * Records a processed tool state, returning false when it was already seen.
+   * Entries are tagged with the session so clearSession() can purge them;
+   * the map is also hard-capped with FIFO eviction so a 24/7 process cannot
+   * grow it without bound.
+   */
+  private markProcessedToolState(key: string, sessionId: string): boolean {
+    if (this.processedToolStates.has(key)) {
+      return false;
+    }
+    while (this.processedToolStates.size >= SummaryAggregator.PROCESSED_TOOL_STATES_LIMIT) {
+      const oldest = this.processedToolStates.keys().next();
+      if (oldest.done) {
+        break;
+      }
+      this.processedToolStates.delete(oldest.value);
+    }
+    this.processedToolStates.set(key, sessionId);
+    return true;
+  }
+
+  private clearProcessedToolStatesForSession(sessionId: string): void {
+    for (const [key, owner] of this.processedToolStates) {
+      if (owner === sessionId) {
+        this.processedToolStates.delete(key);
+      }
+    }
+  }
   private thinkingFiredForMessages: Set<string> = new Set();
   private typingTimer: ReturnType<typeof setInterval> | null = null;
   private activeTypingSessions: Set<string> = new Set();
-  private partHashes: Map<string, Set<string>> = new Map();
   private completionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private stepFinishCosts: Map<string, number> = new Map();
   private lastStreamedMessageText: Map<string, string> = new Map();
+  /** Latest cumulative session totals reported by `session.usage.updated`. */
+  private latestCumulativeUsageBySession = new Map<string, { input: number; cacheRead: number }>();
+  /**
+   * Cumulative snapshot taken at the current step start; live growth during
+   * the step is measured against it.
+   */
+  private usageBaselineBySession = new Map<string, { input: number; cacheRead: number }>();
+  /** Exact context of the last completed step; anchor for live estimates. */
+  private lastStepTokensBySession = new Map<string, { input: number; cacheRead: number }>();
   private deltaTextByPart: Map<string, string> = new Map();
   private deltaCompletedParts: Set<string> = new Set();
+  /** Latest full snapshot per text part, to replace replays instead of duplicating. */
+  private partSnapshotByKey: Map<string, string> = new Map();
+  /**
+   * Events for not-yet-tracked sessions (child text/tools racing ahead of
+   * `session.created`). Replayed when the session gets tracked; capped with
+   * TTL so stray sessions cannot grow memory.
+   */
+  private pendingEarlyEventsBySession = new Map<string, { event: Event; at: number }[]>();
+  private static readonly EARLY_EVENT_TTL_MS = 120_000;
+  private static readonly EARLY_EVENTS_PER_SESSION = 50;
+  private static readonly EARLY_EVENT_SESSIONS = 50;
   private trackedSessionParents: Map<string, string | null> = new Map();
   private subagentStates: Map<string, SubagentState> = new Map();
   private subagentOrderByParent: Map<string, string[]> = new Map();
@@ -306,12 +432,69 @@ class SummaryAggregator {
     return this.trackedSessionIds.has(sessionId);
   }
 
+  /** Whether the aggregator currently processes events for the session. */
+  isTracked(sessionId: string): boolean {
+    return this.trackedSessionIds.has(sessionId);
+  }
+
   private getParentSessionId(sessionId: string): string | null {
     if (this.trackedSessionIds.has(sessionId)) {
       return sessionId;
     }
 
     return this.trackedSessionParents.get(sessionId) ?? null;
+  }
+
+  /** Stashes an event for an unknown session; returns true when buffered. */
+  private bufferEarlyEvent(sessionId: string, event: Event): boolean {
+    const tracked =
+      this.trackedSessionIds.has(sessionId) || this.trackedSessionParents.has(sessionId);
+    if (tracked) {
+      return false;
+    }
+
+    // The global stream carries foreign sessions too: cap the whole buffer so
+    // sessions that are never tracked cannot accumulate memory.
+    if (!this.pendingEarlyEventsBySession.has(sessionId)) {
+      while (
+        this.pendingEarlyEventsBySession.size >= SummaryAggregator.EARLY_EVENT_SESSIONS
+      ) {
+        const oldest = this.pendingEarlyEventsBySession.keys().next();
+        if (oldest.done || oldest.value === undefined) {
+          break;
+        }
+        this.pendingEarlyEventsBySession.delete(oldest.value);
+      }
+    }
+
+    const now = Date.now();
+    const buffered = this.pendingEarlyEventsBySession.get(sessionId) ?? [];
+    const fresh = buffered.filter(
+      (entry) => now - entry.at < SummaryAggregator.EARLY_EVENT_TTL_MS,
+    );
+    fresh.push({ event, at: now });
+    while (fresh.length > SummaryAggregator.EARLY_EVENTS_PER_SESSION) {
+      fresh.shift();
+    }
+    this.pendingEarlyEventsBySession.set(sessionId, fresh);
+    return true;
+  }
+
+  /** Replays buffered early events now that the session is tracked. */
+  private replayEarlyEvents(sessionId: string): void {
+    const buffered = this.pendingEarlyEventsBySession.get(sessionId);
+    if (!buffered || buffered.length === 0) {
+      return;
+    }
+
+    this.pendingEarlyEventsBySession.delete(sessionId);
+    const now = Date.now();
+    for (const entry of buffered) {
+      if (now - entry.at >= SummaryAggregator.EARLY_EVENT_TTL_MS) {
+        continue;
+      }
+      this.processEvent(entry.event);
+    }
   }
 
   private isTrackedChildSession(sessionId: string): boolean {
@@ -384,6 +567,10 @@ class SummaryAggregator {
     this.onQuestionCallback = callback;
   }
 
+  setOnQuestionSettled(callback: QuestionSettledCallback): void {
+    this.onQuestionSettledCallback = callback;
+  }
+
   setOnQuestionError(callback: QuestionErrorCallback): void {
     this.onQuestionErrorCallback = callback;
   }
@@ -422,6 +609,10 @@ class SummaryAggregator {
 
   setOnPermission(callback: PermissionCallback): void {
     this.onPermissionCallback = callback;
+  }
+
+  setOnPermissionReplied(callback: PermissionRepliedCallback): void {
+    this.onPermissionRepliedCallback = callback;
   }
 
   setOnSessionDiff(callback: SessionDiffCallback): void {
@@ -499,6 +690,13 @@ class SummaryAggregator {
         );
       }
 
+      // Live usage totals from the server (not a V1 event): refresh context
+      // numbers mid-run without waiting for the next assistant completion.
+      if ((event as { type?: unknown }).type === "session.usage.updated") {
+        this.handleUsageUpdated(event);
+        return;
+      }
+
       // Log all session-related events for debugging
       if (event.type.startsWith("session.")) {
         logger.debug(
@@ -541,10 +739,10 @@ class SummaryAggregator {
           this.handleQuestionAsked(event);
           break;
         case "question.replied":
-          logger.info(`[Aggregator] Question replied: requestID=${event.properties.requestID}`);
+          this.handleQuestionSettled(event, "answered");
           break;
         case "question.rejected":
-          logger.info(`[Aggregator] Question rejected: requestID=${event.properties.requestID}`);
+          this.handleQuestionSettled(event, "cancelled");
           break;
         case "session.diff":
           this.handleSessionDiff(event);
@@ -553,7 +751,7 @@ class SummaryAggregator {
           this.handlePermissionAsked(event);
           break;
         case "permission.replied":
-          logger.info(`[Aggregator] Permission replied: requestID=${event.properties.requestID}`);
+          this.handlePermissionReplied(event);
           break;
         default:
           logger.debug(`[Aggregator] Unhandled event type: ${event.type}`);
@@ -574,6 +772,7 @@ class SummaryAggregator {
   setSession(sessionId: string): void {
     this.trackedSessionIds.add(sessionId);
     this.trackedSessionParents.set(sessionId, null);
+    this.replayEarlyEvents(sessionId);
   }
 
   clearSession(sessionId: string): void {
@@ -589,13 +788,19 @@ class SummaryAggregator {
       this.messages.delete(messageKey);
       this.currentMessageParts.delete(messageKey);
       this.pendingParts.delete(messageKey);
-      this.partHashes.delete(messageKey);
       this.stepFinishCosts.delete(messageKey);
       this.lastStreamedMessageText.delete(messageKey);
       this.thinkingFiredForMessages.delete(messageKey);
       this.clearDeltaStateForMessage(messageKey);
+      this.clearSnapshotStateForMessage(messageKey);
       this.clearCompletionTimer(messageKey);
     }
+
+    this.latestCumulativeUsageBySession.delete(sessionId);
+    this.usageBaselineBySession.delete(sessionId);
+    this.lastStepTokensBySession.delete(sessionId);
+    this.pendingEarlyEventsBySession.delete(sessionId);
+    this.clearProcessedToolStatesForSession(sessionId);
 
     for (const [trackedSessionId, parentSessionId] of Array.from(
       this.trackedSessionParents.entries(),
@@ -616,11 +821,15 @@ class SummaryAggregator {
     this.currentMessageParts.clear();
     this.pendingParts.clear();
     this.messages.clear();
-    this.partHashes.clear();
     this.stepFinishCosts.clear();
     this.lastStreamedMessageText.clear();
     this.deltaTextByPart.clear();
     this.deltaCompletedParts.clear();
+    this.partSnapshotByKey.clear();
+    this.latestCumulativeUsageBySession.clear();
+    this.usageBaselineBySession.clear();
+    this.lastStepTokensBySession.clear();
+    this.pendingEarlyEventsBySession.clear();
     for (const timer of this.completionTimers.values()) {
       clearTimeout(timer);
     }
@@ -663,7 +872,11 @@ class SummaryAggregator {
   }
 
   private emitSubagentState(parentSessionId: string): void {
-    if (!this.onSubagentCallback || !this.trackedSessionIds.has(parentSessionId)) {
+    if (
+      !this.onSubagentCallback ||
+      (!this.trackedSessionIds.has(parentSessionId) &&
+        !this.isTrackedChildSession(parentSessionId))
+    ) {
       return;
     }
 
@@ -879,10 +1092,11 @@ class SummaryAggregator {
     if (pendingCardId) {
       this.attachSessionToSubagent(pendingCardId, sessionId);
       this.emitSubagentState(parentSessionId);
-      return;
+    } else {
+      this.getQueue(this.pendingChildSessionIdsByParent, parentSessionId).push(sessionId);
     }
 
-    this.getQueue(this.pendingChildSessionIdsByParent, parentSessionId).push(sessionId);
+    this.replayEarlyEvents(sessionId);
   }
 
   private handleSessionCreatedOrUpdated(
@@ -892,7 +1106,14 @@ class SummaryAggregator {
   ): void {
     const info = (event.properties as { info?: { id?: string; parentID?: string; title?: string } })
       .info;
-    if (!info?.id || !info.parentID || !this.trackedSessionIds.has(info.parentID)) {
+    if (!info?.id || !info.parentID) {
+      return;
+    }
+
+    // Depth-1 subagents hang off tracked roots; deeper nesting hangs off
+    // tracked children so grandchild transcripts land in the child topic.
+    const isRootParent = this.trackedSessionIds.has(info.parentID);
+    if (!isRootParent && !this.isTrackedChildSession(info.parentID)) {
       return;
     }
 
@@ -995,6 +1216,45 @@ class SummaryAggregator {
     this.emitSubagentState(subagent.parentSessionId);
   }
 
+  /**
+   * Inserts or replaces a text chunk keyed by its part id. Replays of the
+   * same part replace in place (matched by key, never by text content, so
+   * duplicate texts across different parts cannot confuse the lookup), and
+   * brand-new translator parts are ordered by their `:text:<ordinal>`
+   * suffix so out-of-order arrivals still read correctly.
+   */
+  private upsertPartEntry(
+    entries: MessagePartEntry[],
+    key: string | null,
+    text: string,
+  ): void {
+    if (key !== null) {
+      const existingIndex = entries.findIndex((entry) => entry.key === key);
+      if (existingIndex >= 0) {
+        entries[existingIndex] = { key, text };
+        return;
+      }
+
+      const ordinal = parseTextOrdinalFromPartKey(key);
+      if (ordinal !== null) {
+        for (let index = 0; index < entries.length; index++) {
+          const entryKey = entries[index]?.key;
+          if (!entryKey) {
+            continue;
+          }
+
+          const entryOrdinal = parseTextOrdinalFromPartKey(entryKey);
+          if (entryOrdinal !== null && entryOrdinal > ordinal) {
+            entries.splice(index, 0, { key, text });
+            return;
+          }
+        }
+      }
+    }
+
+    entries.push({ key, text });
+  }
+
   private handleMessageUpdated(
     event: Event & {
       type: "message.updated";
@@ -1002,83 +1262,101 @@ class SummaryAggregator {
   ): void {
     const { info } = event.properties;
 
-    if (this.isTrackedChildSession(info.sessionID)) {
-      if (info.role === "assistant") {
-        this.updateSubagentFromAssistantMessage(
-          info as {
-            sessionID: string;
-            providerID?: string;
-            modelID?: string;
-            agent?: string;
-          },
-        );
-      }
-      return;
+    const isChildSession = this.isTrackedChildSession(info.sessionID);
+    if (isChildSession && info.role === "assistant") {
+      this.updateSubagentFromAssistantMessage(
+        info as {
+          sessionID: string;
+          providerID?: string;
+          modelID?: string;
+          agent?: string;
+        },
+      );
     }
 
-    if (!this.isTrackedSession(info.sessionID)) {
+    if (!this.isTrackedSession(info.sessionID) && !isChildSession) {
+      this.bufferEarlyEvent(info.sessionID, event);
       return;
     }
 
     const messageID = info.id;
     const messageKey = this.getMessageKey(info.sessionID, messageID);
 
+    if (info.role !== "assistant") {
+      return;
+    }
+
     this.messages.set(messageKey, { role: info.role, sessionId: info.sessionID });
 
-    if (info.role === "assistant") {
-      if (!this.currentMessageParts.has(messageKey)) {
-        this.currentMessageParts.set(messageKey, []);
-        this.messageCount++;
-        this.startTypingIndicator(info.sessionID);
-      }
-
-      const pending = this.pendingParts.get(messageKey) || [];
-      const current = this.currentMessageParts.get(messageKey) || [];
-      this.currentMessageParts.set(messageKey, [...current, ...pending]);
-      this.pendingParts.delete(messageKey);
-      this.emitMessageUpdated(messageKey, info.sessionID);
-
-      const assistantMessage = info as { time?: { created: number; completed?: number } };
-      const time = assistantMessage.time;
-
-      if (time?.completed) {
-        // Extract and report tokens BEFORE onComplete so keyboard context is updated
-        const assistantInfo = info as {
-          cost?: number;
-          tokens?: {
-            input: number;
-            output: number;
-            reasoning: number;
-            cache: { read: number; write: number };
-          };
-        };
-
-        const messageCost =
-          typeof assistantInfo.cost === "number"
-            ? assistantInfo.cost
-            : this.stepFinishCosts.get(messageKey) || 0;
-
-        if (this.onTokensCallback && (assistantInfo.tokens || messageCost > 0)) {
-          const tokens: TokensInfo = {
-            input: assistantInfo.tokens?.input || 0,
-            output: assistantInfo.tokens?.output || 0,
-            reasoning: assistantInfo.tokens?.reasoning || 0,
-            cacheRead: assistantInfo.tokens?.cache?.read || 0,
-            cacheWrite: assistantInfo.tokens?.cache?.write || 0,
-            cost: messageCost,
-          };
-          logger.debug(
-            `[Aggregator] Tokens: input=${tokens.input}, output=${tokens.output}, reasoning=${tokens.reasoning}, cost=${tokens.cost}`,
-          );
-          // Call synchronously so keyboardManager is updated before onComplete sends the reply
-          this.onTokensCallback(info.sessionID, tokens);
-        }
-
-        this.scheduleMessageCompletion(messageKey, info.sessionID);
-      }
-
-      this.lastUpdated = Date.now();
+    if (!this.currentMessageParts.has(messageKey)) {
+      this.currentMessageParts.set(messageKey, []);
+      this.messageCount++;
+      this.startTypingIndicator(info.sessionID);
     }
+
+    const pending = this.pendingParts.get(messageKey) || [];
+    if (pending.length > 0) {
+      const current = this.currentMessageParts.get(messageKey) || [];
+      for (const entry of pending) {
+        this.upsertPartEntry(current, entry.key, entry.text);
+      }
+      this.currentMessageParts.set(messageKey, current);
+      this.pendingParts.delete(messageKey);
+    }
+    this.emitMessageUpdated(messageKey, info.sessionID);
+
+    const assistantMessage = info as { time?: { created: number; completed?: number } };
+    const time = assistantMessage.time;
+
+    if (time?.completed) {
+      // Extract and report tokens BEFORE onComplete so keyboard context is updated
+      const assistantInfo = info as {
+        cost?: number;
+        tokens?: {
+          input: number;
+          output: number;
+          reasoning: number;
+          cache: { read: number; write: number };
+        };
+      };
+
+      const messageCost =
+        typeof assistantInfo.cost === "number"
+          ? assistantInfo.cost
+          : this.stepFinishCosts.get(messageKey) || 0;
+
+      if (this.onTokensCallback && (assistantInfo.tokens || messageCost > 0)) {
+        const tokens: TokensInfo = {
+          input: assistantInfo.tokens?.input || 0,
+          output: assistantInfo.tokens?.output || 0,
+          reasoning: assistantInfo.tokens?.reasoning || 0,
+          cacheRead: assistantInfo.tokens?.cache?.read || 0,
+          cacheWrite: assistantInfo.tokens?.cache?.write || 0,
+          cost: messageCost,
+        };
+        logger.debug(
+          `[Aggregator] Tokens: input=${tokens.input}, output=${tokens.output}, reasoning=${tokens.reasoning}, cost=${tokens.cost}`,
+        );
+        // Call synchronously so keyboardManager is updated before onComplete sends the reply
+        this.onTokensCallback(info.sessionID, tokens);
+
+        // Anchor for live estimates: the exact context of this completed step.
+        this.lastStepTokensBySession.set(info.sessionID, {
+          input: tokens.input,
+          cacheRead: tokens.cacheRead,
+        });
+        this.anchorUsageBaseline(info.sessionID);
+      }
+
+      this.scheduleMessageCompletion(messageKey, info.sessionID);
+    }
+
+    if (!time?.completed) {
+      // Step start: anchor live usage growth to the latest cumulative totals.
+      this.anchorUsageBaseline(info.sessionID);
+    }
+
+    this.lastUpdated = Date.now();
   }
 
   private handleMessagePartUpdated(
@@ -1092,6 +1370,7 @@ class SummaryAggregator {
     const isTrackedChildSession = this.isTrackedChildSession(part.sessionID);
 
     if (!isCurrentRootSession && !isTrackedChildSession) {
+      this.bufferEarlyEvent(part.sessionID, event);
       return;
     }
 
@@ -1114,14 +1393,22 @@ class SummaryAggregator {
         const input = "input" in state ? (state.input as { [key: string]: unknown }) : undefined;
         const title = "title" in state ? state.title : undefined;
         this.updateSubagentToolState(part.sessionID, state, part.tool, input, title);
+        // Falls through to the shared tool dispatch below so the transcript
+        // topic shows the same tool activity as the parent card's current tool.
       } else if (part.type === "step-start") {
         this.updateSubagentStepStart(part.sessionID, (part as { snapshot?: string }).snapshot);
+        this.lastUpdated = Date.now();
+        return;
       } else if (part.type === "step-finish") {
         this.updateSubagentStepFinish(part.sessionID, (part as { snapshot?: string }).snapshot);
+        this.lastUpdated = Date.now();
+        return;
+      } else if (part.type !== "text" || !("text" in part) || !part.text) {
+        this.lastUpdated = Date.now();
+        return;
       }
-
-      this.lastUpdated = Date.now();
-      return;
+      // Child text parts use the shared snapshot handling below so the
+      // transcript topic streams the same text as the final message.
     }
 
     const messageID = part.messageID;
@@ -1138,26 +1425,15 @@ class SummaryAggregator {
         callback(sessionID);
       }
     } else if (part.type === "text" && "text" in part && part.text) {
-      const partHash = this.hashString(part.text);
-
-      if (!this.partHashes.has(messageKey)) {
-        this.partHashes.set(messageKey, new Set());
-      }
-
-      const hashes = this.partHashes.get(messageKey)!;
-
-      if (hashes.has(partHash)) {
-        return;
-      }
-
-      hashes.add(partHash);
-
       // Deltas already streamed live for this part are an overlay only; the
       // full snapshot arriving here is authoritative. Drop the overlay so the
-      // suffix is not counted twice, then push the snapshot as usual.
+      // suffix is not counted twice, then upsert the snapshot as usual.
       const deltaPartKey = `${messageKey}:${part.id}`;
       this.deltaTextByPart.delete(deltaPartKey);
       this.deltaCompletedParts.add(deltaPartKey);
+
+      const snapshotKey = `${messageKey}:${part.id}`;
+      this.partSnapshotByKey.set(snapshotKey, part.text);
 
       if (messageInfo && messageInfo.role === "assistant") {
         if (!this.currentMessageParts.has(messageKey)) {
@@ -1166,7 +1442,10 @@ class SummaryAggregator {
         }
 
         const parts = this.currentMessageParts.get(messageKey)!;
-        parts.push(part.text);
+        // The same part can be re-emitted (replay, regeneration, reconnect):
+        // upsert by part key instead of appending, or the live and final
+        // messages repeat the same text over and over.
+        this.upsertPartEntry(parts, snapshotKey, part.text);
         this.emitMessageUpdated(messageKey, part.sessionID);
 
         if (this.completionTimers.has(messageKey)) {
@@ -1178,7 +1457,9 @@ class SummaryAggregator {
         }
 
         const pending = this.pendingParts.get(messageKey)!;
-        pending.push(part.text);
+        // Same key replaces; an identical replay is ignored so the later
+        // merge cannot duplicate it.
+        this.upsertPartEntry(pending, snapshotKey, part.text);
       }
     } else if (part.type === "tool") {
       const state = part.state;
@@ -1220,8 +1501,7 @@ class SummaryAggregator {
       if (shouldEmitToolUpdate) {
         const processedStateKey = `${part.callID}:${status}`;
 
-        if (!this.processedToolStates.has(processedStateKey)) {
-          this.processedToolStates.add(processedStateKey);
+        if (this.markProcessedToolState(processedStateKey, part.sessionID)) {
 
           const toolData: ToolInfo = {
             sessionId: part.sessionID,
@@ -1249,8 +1529,7 @@ class SummaryAggregator {
 
         const completedKey = `completed-file-${part.callID}`;
 
-        if (!this.processedToolStates.has(completedKey)) {
-          this.processedToolStates.add(completedKey);
+        if (this.markProcessedToolState(completedKey, part.sessionID)) {
 
           const preparedFiles = this.prepareToolFiles(
             part.tool,
@@ -1302,15 +1581,24 @@ class SummaryAggregator {
 
   private getDeltaSuffix(messageKey: string): string {
     const prefix = `${messageKey}:`;
-    let suffix = "";
+    const overlays: Array<{ ordinal: number | null; index: number; text: string }> = [];
+    let index = 0;
 
     for (const [key, text] of this.deltaTextByPart) {
       if (key.startsWith(prefix)) {
-        suffix += text;
+        overlays.push({ ordinal: parseTextOrdinalFromPartKey(key), index, text });
       }
+      index++;
     }
 
-    return suffix;
+    overlays.sort((left, right) => {
+      if (left.ordinal !== null && right.ordinal !== null && left.ordinal !== right.ordinal) {
+        return left.ordinal - right.ordinal;
+      }
+      return left.index - right.index;
+    });
+
+    return overlays.map((overlay) => overlay.text).join("");
   }
 
   private clearDeltaStateForMessage(messageKey: string): void {
@@ -1325,6 +1613,16 @@ class SummaryAggregator {
     for (const key of Array.from(this.deltaCompletedParts)) {
       if (key.startsWith(prefix)) {
         this.deltaCompletedParts.delete(key);
+      }
+    }
+  }
+
+  private clearSnapshotStateForMessage(messageKey: string): void {
+    const prefix = `${messageKey}:`;
+
+    for (const key of Array.from(this.partSnapshotByKey.keys())) {
+      if (key.startsWith(prefix)) {
+        this.partSnapshotByKey.delete(key);
       }
     }
   }
@@ -1389,7 +1687,9 @@ class SummaryAggregator {
       return;
     }
 
-    if (!this.isTrackedSession(sessionId) || this.isTrackedChildSession(sessionId)) {
+    const isTrackedChild = this.isTrackedChildSession(sessionId);
+    if (!this.isTrackedSession(sessionId) && !isTrackedChild) {
+      this.bufferEarlyEvent(sessionId, event);
       return;
     }
 
@@ -1400,7 +1700,7 @@ class SummaryAggregator {
       return;
     }
 
-    this.deltaTextByPart.set(partKey, `${this.deltaTextByPart.get(partKey) ?? ""}${delta}`);
+    this.deltaTextByPart.set(partKey, nextDeltaText(this.deltaTextByPart.get(partKey) ?? "", delta));
 
     if (!this.messages.has(messageKey)) {
       this.messages.set(messageKey, { role: "assistant", sessionId });
@@ -1559,16 +1859,6 @@ class SummaryAggregator {
     return { files: [] };
   }
 
-  private hashString(str: string): string {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = (hash << 5) - hash + char;
-      hash = hash & hash;
-    }
-    return hash.toString(36);
-  }
-
   private handleSessionStatus(
     event: Event & {
       type: "session.status";
@@ -1611,8 +1901,7 @@ class SummaryAggregator {
     event: Event & {
       type: "session.idle";
     },
-  ): void {
-    const { sessionID } = event.properties;
+  ): void {    const { sessionID } = event.properties;
 
     if (this.isTrackedChildSession(sessionID)) {
       logger.info(`[Aggregator] Subagent session became idle: ${sessionID}`);
@@ -1631,6 +1920,115 @@ class SummaryAggregator {
     if (this.onSessionIdleCallback) {
       const callback = this.onSessionIdleCallback;
       callback(sessionID);
+    }
+  }
+
+  /**
+   * Live usage totals pushed by the server mid-run. Feeds the same tokens
+   * pipeline as completions so context numbers move while the agent works,
+   * but carries no cost: cost keeps accruing only per completed assistant
+   * message to avoid double counting.
+   */
+  private handleUsageUpdated(event: Event): void {
+    const properties = (event as { properties?: unknown }).properties as
+      | {
+          sessionID?: unknown;
+          sessionId?: unknown;
+          tokens?: {
+            input?: unknown;
+            output?: unknown;
+            reasoning?: unknown;
+            cache?: { read?: unknown; write?: unknown };
+          };
+        }
+      | undefined;
+
+    const sessionId =
+      typeof properties?.sessionID === "string"
+        ? properties.sessionID
+        : typeof properties?.sessionId === "string"
+          ? properties.sessionId
+          : null;
+    if (!sessionId || !this.isTrackedSession(sessionId)) {
+      return;
+    }
+
+    const numberOrZero = (value: unknown): number =>
+      typeof value === "number" && Number.isFinite(value) ? value : 0;
+
+    const tokens = properties?.tokens;
+    const cacheRecord = isRecord(tokens?.cache) ? tokens?.cache : undefined;
+    const input = numberOrZero(tokens?.input);
+    const output = numberOrZero(tokens?.output);
+    const reasoning = numberOrZero(tokens?.reasoning);
+    const cacheRead = numberOrZero(cacheRecord?.read);
+    const cacheWrite = numberOrZero(cacheRecord?.write);
+
+    if (input === 0 && output === 0 && reasoning === 0 && cacheRead === 0 && cacheWrite === 0) {
+      logger.debug("[Aggregator] Ignoring empty session.usage.updated", { sessionId });
+      return;
+    }
+
+    // Server totals are cumulative for the whole session, not the current
+    // window. Report them as live growth over the last completed step so the
+    // context display moves mid-step without ever showing session totals.
+    this.latestCumulativeUsageBySession.set(sessionId, { input, cacheRead });
+
+    let baseline = this.usageBaselineBySession.get(sessionId);
+    const lastStep = this.lastStepTokensBySession.get(sessionId);
+    if (!lastStep) {
+      logger.debug("[Aggregator] Ignoring session.usage.updated without a completed step", {
+        sessionId,
+      });
+      return;
+    }
+    if (!baseline) {
+      // First sight of cumulative totals for this step: anchor here so the
+      // live display starts moving immediately instead of waiting for the
+      // next step boundary.
+      baseline = { input, cacheRead };
+      this.usageBaselineBySession.set(sessionId, baseline);
+    }
+
+    let baseInput = baseline.input;
+    let baseCacheRead = baseline.cacheRead;
+    if (input < baseInput || cacheRead < baseCacheRead) {
+      // Server counters reset (restart/reconnect): re-anchor, no fake growth.
+      baseInput = input;
+      baseCacheRead = cacheRead;
+      this.usageBaselineBySession.set(sessionId, { input, cacheRead });
+    }
+
+    const liveTokens = {
+      input: lastStep.input + Math.max(0, input - baseInput),
+      output: 0,
+      reasoning: 0,
+      cacheRead: lastStep.cacheRead + Math.max(0, cacheRead - baseCacheRead),
+      cacheWrite: 0,
+      cost: 0,
+    };
+
+    const callback = this.onTokensCallback;
+    if (!callback) {
+      return;
+    }
+
+    void Promise.resolve(callback(sessionId, liveTokens)).catch((error) => {
+      logger.error("[Aggregator] Tokens callback failed", { sessionId }, error);
+    });
+  }
+
+  /**
+   * Anchors live usage growth to the latest cumulative totals. Called at step
+   * start and after each completed step; without a known anchor, cumulative
+   * server totals must never reach the context display.
+   */
+  private anchorUsageBaseline(sessionId: string): void {
+    const latest = this.latestCumulativeUsageBySession.get(sessionId);
+    if (latest) {
+      this.usageBaselineBySession.set(sessionId, { ...latest });
+    } else {
+      this.usageBaselineBySession.delete(sessionId);
     }
   }
 
@@ -1703,7 +2101,7 @@ class SummaryAggregator {
   ): void {
     const { id, sessionID, questions } = event.properties;
 
-    if (!this.isTrackedSession(sessionID)) {
+    if (!this.isTrackedSession(sessionID) && !this.isTrackedChildSession(sessionID)) {
       logger.debug(`[Aggregator] Ignoring question.asked for untracked session: ${sessionID}`);
       return;
     }
@@ -1717,6 +2115,37 @@ class SummaryAggregator {
         "[Aggregator] Error in question callback:",
       );
     }
+  }
+
+  private handleQuestionSettled(
+    event: Event & {
+      type: "question.replied" | "question.rejected";
+    },
+    outcome: QuestionSettledOutcome,
+  ): void {
+    const properties = event.properties as { sessionID?: unknown; requestID?: unknown };
+    const sessionId =
+      typeof properties.sessionID === "string" ? properties.sessionID : null;
+    const requestID =
+      typeof properties.requestID === "string" ? properties.requestID : null;
+
+    if (!sessionId && !requestID) {
+      return;
+    }
+
+    logger.info(
+      `[Aggregator] Question settled outside Telegram: session=${sessionId ?? "unknown"}, requestID=${requestID ?? "unknown"}, outcome=${outcome}`,
+    );
+
+    if (!this.onQuestionSettledCallback) {
+      return;
+    }
+
+    const callback = this.onQuestionSettledCallback;
+    invokeCallback(
+      () => callback(sessionId, requestID, outcome),
+      "[Aggregator] Error in question settled callback:",
+    );
   }
 
   private handleSessionDiff(event: Event): void {
@@ -1750,7 +2179,7 @@ class SummaryAggregator {
   ): void {
     const request = event.properties;
 
-    if (!this.isTrackedSession(request.sessionID)) {
+    if (!this.isTrackedSession(request.sessionID) && !this.isTrackedChildSession(request.sessionID)) {
       logger.debug(
         `[Aggregator] Ignoring permission.asked for untracked session: ${request.sessionID}`,
       );
@@ -1770,6 +2199,36 @@ class SummaryAggregator {
     }
   }
 
+  private handlePermissionReplied(
+    event: Event & {
+      type: "permission.replied";
+    },
+  ): void {
+    const properties = event.properties as { sessionID?: unknown; requestID?: unknown };
+    const sessionId =
+      typeof properties.sessionID === "string" ? properties.sessionID : null;
+    const requestID =
+      typeof properties.requestID === "string" ? properties.requestID : null;
+
+    if (!sessionId && !requestID) {
+      return;
+    }
+
+    logger.info(
+      `[Aggregator] Permission settled outside Telegram: session=${sessionId ?? "unknown"}, requestID=${requestID ?? "unknown"}`,
+    );
+
+    if (!this.onPermissionRepliedCallback) {
+      return;
+    }
+
+    const callback = this.onPermissionRepliedCallback;
+    invokeCallback(
+      () => callback(sessionId, requestID),
+      "[Aggregator] Error in permission replied callback:",
+    );
+  }
+
   private clearCompletionTimer(messageKey: string): void {
     const timer = this.completionTimers.get(messageKey);
     if (!timer) {
@@ -1786,7 +2245,7 @@ class SummaryAggregator {
     }
 
     const parts = this.currentMessageParts.get(messageKey) || [];
-    const messageText = `${parts.join("")}${this.getDeltaSuffix(messageKey)}`;
+    const messageText = `${parts.map((entry) => entry.text).join("")}${this.getDeltaSuffix(messageKey)}`;
     if (!messageText) {
       return;
     }
@@ -1828,7 +2287,7 @@ class SummaryAggregator {
 
   private finalizeMessageCompletion(messageKey: string, sessionId: string): void {
     const parts = this.currentMessageParts.get(messageKey) || [];
-    const messageText = `${parts.join("")}${this.getDeltaSuffix(messageKey)}`;
+    const messageText = `${parts.map((entry) => entry.text).join("")}${this.getDeltaSuffix(messageKey)}`;
 
     logger.debug(
       `[Aggregator] Message completed: messageKey=${messageKey}, textLength=${messageText.length}, totalParts=${parts.length}, session=${sessionId}`,
@@ -1842,11 +2301,11 @@ class SummaryAggregator {
     this.currentMessageParts.delete(messageKey);
     this.messages.delete(messageKey);
     this.pendingParts.delete(messageKey);
-    this.partHashes.delete(messageKey);
     this.stepFinishCosts.delete(messageKey);
     this.lastStreamedMessageText.delete(messageKey);
     this.thinkingFiredForMessages.delete(messageKey);
     this.clearDeltaStateForMessage(messageKey);
+    this.clearSnapshotStateForMessage(messageKey);
 
     logger.debug(
       `[Aggregator] Message completed cleanup: remaining messages=${this.currentMessageParts.size}`,

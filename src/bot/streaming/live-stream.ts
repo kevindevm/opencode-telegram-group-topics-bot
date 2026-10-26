@@ -2,12 +2,20 @@ import { buildThinkingMessage, hasOnlyThinkingLine } from "../utils/thinking-mes
 import { logger } from "../../utils/logger.js";
 import type { TelegramTextFormat } from "../utils/telegram-text.js";
 import type { TelegramRenderedPart } from "../../telegram/render/types.js";
-import { getTelegramRetryAfterMs } from "../utils/send-with-markdown-fallback.js";
+import {
+  getTelegramRetryAfterMs,
+  isTelegramMessageNotModifiedError,
+} from "../utils/send-with-markdown-fallback.js";
 
 const DEFAULT_THROTTLE_MS = 1000;
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 const THINKING_PREFIX = "__thinking__";
 const MAX_REPLACEABLE_SERVICE_LENGTH = 3500;
+const CLEAR_SESSION_TIMEOUT_MS = 5_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 interface LiveStreamOptions {
   sendText: (
@@ -436,6 +444,11 @@ export class LiveStream {
     });
   }
 
+  /** Telegram id of the message currently streamed for the session, if any. */
+  getLiveMessageId(sessionId: string): number | null {
+    return this.states.get(sessionId)?.messageId ?? null;
+  }
+
   async finalizeCurrentMessage(
     sessionId: string,
     options: {
@@ -443,6 +456,13 @@ export class LiveStream {
       includeKeyboard: boolean;
       rawFallbackText?: string;
       renderedPart?: TelegramRenderedPart;
+      /**
+       * Authoritative completion text. The live buffer can accumulate
+       * duplicated chunks mid-stream (cumulative deltas, replayed
+       * snapshots); when the turn ends the visible message must be
+       * rewritten with the corrected final text, not the live render.
+       */
+      finalText?: string;
     },
   ): Promise<boolean> {
     const state = this.states.get(sessionId);
@@ -459,7 +479,8 @@ export class LiveStream {
         return false;
       }
 
-      const text = renderEntries(latestState.entries);
+      const liveText = renderEntries(latestState.entries);
+      const text = options.finalText?.trim() ? options.finalText : liveText;
       if (!text) {
         return false;
       }
@@ -472,12 +493,23 @@ export class LiveStream {
       }
 
       if (options.renderedPart && this.editRenderedPart) {
-        await this.editRenderedPart(
-          sessionId,
-          latestState.messageId,
-          options.renderedPart,
-          options.includeKeyboard,
-        );
+        try {
+          await this.editRenderedPart(
+            sessionId,
+            latestState.messageId,
+            options.renderedPart,
+            options.includeKeyboard,
+          );
+        } catch (error) {
+          if (!isTelegramMessageNotModifiedError(error)) {
+            throw error;
+          }
+
+          logger.debug("[LiveStream] Suppressing no-op final message edit", {
+            sessionId,
+            messageId: latestState.messageId,
+          });
+        }
       } else {
         await this.editText(
           sessionId,
@@ -488,7 +520,6 @@ export class LiveStream {
           options.rawFallbackText,
         );
       }
-      latestState.lastSentText = text;
       latestState.messageId = null;
       latestState.lastSentText = "";
       latestState.entries = [];
@@ -504,11 +535,26 @@ export class LiveStream {
     });
   }
 
-  async cleanupAfterFinalDelivery(sessionId: string): Promise<void> {
-    const state = this.states.get(sessionId);
+  async cleanupAfterFinalDelivery(sessionId: string): Promise<void> {    const state = this.states.get(sessionId);
     if (!state) {
       return;
     }
+
+    const deleteMessage = async (messageId: number): Promise<void> => {
+      if (!this.deleteText) {
+        return;
+      }
+
+      try {
+        await this.deleteText(sessionId, messageId);
+      } catch (error) {
+        logger.warn("[LiveStream] Failed to delete stream message during final cleanup", {
+          sessionId,
+          messageId,
+          error,
+        });
+      }
+    };
 
     this.clearTimer(sessionId);
     await this.enqueueTask(sessionId, async () => {
@@ -516,19 +562,17 @@ export class LiveStream {
 
       const latestState = this.states.get(sessionId);
       if (!latestState || latestState.messageId === null) {
-        if (latestState && this.deleteText) {
+        if (latestState) {
           for (const archivedMessageId of latestState.assistant.archivedMessageIds) {
-            await this.deleteText(sessionId, archivedMessageId);
+            await deleteMessage(archivedMessageId);
           }
           latestState.assistant.archivedMessageIds = [];
         }
         return;
       }
 
-      if (this.deleteText) {
-        for (const archivedMessageId of latestState.assistant.archivedMessageIds) {
-          await this.deleteText(sessionId, archivedMessageId);
-        }
+      for (const archivedMessageId of latestState.assistant.archivedMessageIds) {
+        await deleteMessage(archivedMessageId);
       }
       latestState.assistant.archivedMessageIds = [];
 
@@ -541,9 +585,7 @@ export class LiveStream {
       const remainingText = renderEntries(remainingEntries);
 
       if (!remainingText) {
-        if (this.deleteText) {
-          await this.deleteText(sessionId, latestState.messageId);
-        }
+        await deleteMessage(latestState.messageId);
         latestState.messageId = null;
         latestState.lastSentText = "";
         latestState.entries = [];
@@ -551,8 +593,15 @@ export class LiveStream {
       }
 
       if (latestState.lastSentText !== remainingText) {
-        await this.editText(sessionId, latestState.messageId, remainingText, "raw", false);
-        latestState.lastSentText = remainingText;
+        try {
+          await this.editText(sessionId, latestState.messageId, remainingText, "raw", false);
+          latestState.lastSentText = remainingText;
+        } catch (error) {
+          logger.warn("[LiveStream] Failed to trim stream message during final cleanup", {
+            sessionId,
+            error,
+          });
+        }
       }
 
       latestState.entries = remainingEntries;
@@ -563,6 +612,39 @@ export class LiveStream {
         replaySuppressionPrefix: latestState.assistant.replaySuppressionPrefix,
         archivedMessageIds: [],
       };
+    });
+  }
+
+  /**
+   * Deletes the live stream message outright. Used when the final answer was
+   * delivered as fresh messages: keeping the stream (service lines included)
+   * next to them reads as duplication.
+   */
+  async deleteLiveMessage(sessionId: string): Promise<void> {
+    const state = this.states.get(sessionId);
+    if (!state || state.messageId === null || !this.deleteText) {
+      return;
+    }
+
+    this.clearTimer(sessionId);
+    await this.enqueueTask(sessionId, async () => {
+      const latestState = this.states.get(sessionId);
+      if (!latestState || latestState.messageId === null || !this.deleteText) {
+        return;
+      }
+
+      try {
+        await this.deleteText(sessionId, latestState.messageId);
+      } catch (error) {
+        logger.warn("[LiveStream] Failed to delete live message after final delivery", {
+          sessionId,
+          messageId: latestState.messageId,
+          error,
+        });
+      }
+
+      latestState.messageId = null;
+      latestState.lastSentText = "";
     });
   }
 
@@ -579,7 +661,15 @@ export class LiveStream {
 
   async clearAll(reason: string): Promise<void> {
     for (const sessionId of Array.from(this.states.keys())) {
-      await this.clearSession(sessionId, reason);
+      // Never let one hung session (e.g. a Telegram call stuck in a retry
+      // sleep) block the whole shutdown: move on after a bounded wait.
+      const cleared = this.clearSession(sessionId, reason);
+      const timedOut = sleep(CLEAR_SESSION_TIMEOUT_MS).then(() => true);
+      const done = cleared.then(() => false);
+      if (await Promise.race([done, timedOut])) {
+        logger.warn("[LiveStream] Timed out clearing session state", { sessionId, reason });
+        this.states.delete(sessionId);
+      }
     }
   }
 
@@ -844,7 +934,16 @@ export class LiveStream {
             return;
           }
 
-          logger.warn("[LiveStream] Failed to edit stream message", { sessionId, error });
+          // Fatal edit error (e.g. message can't be edited anymore): abandon
+          // the dead message so the next flush sends a fresh one instead of
+          // failing on the same message forever.
+          logger.warn("[LiveStream] Abandoning uneditable stream message", {
+            sessionId,
+            messageId: state.messageId,
+            error,
+          });
+          state.messageId = null;
+          state.lastSentText = "";
         }
         return;
       }
@@ -879,7 +978,15 @@ export class LiveStream {
           return;
         }
 
-        logger.warn("[LiveStream] Failed to sync rolled stream message", { sessionId, error });
+        // Same recovery as above: a dead rolled message must not block
+        // the rest of the stream.
+        logger.warn("[LiveStream] Abandoning uneditable rolled stream message", {
+          sessionId,
+          messageId: state.messageId,
+          error,
+        });
+        state.messageId = null;
+        state.lastSentText = "";
         return;
       }
 

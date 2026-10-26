@@ -21,6 +21,12 @@ export async function syncTopicTitleForSession(
     return false;
   }
 
+  // Ephemeral transcripts keep the ✅/❌ name set at finalize time; the
+  // regular title sync must not overwrite it.
+  if (binding.ephemeral) {
+    return false;
+  }
+
   const topicName = formatTopicTitle(sessionTitle);
   if (!topicName || binding.topicName === topicName) {
     return false;

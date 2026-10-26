@@ -10,6 +10,7 @@ const GROUP_LIMIT_PER_WINDOW = 20;
 const RATE_LIMITED_METHODS = new Set<string>([
   "sendMessage",
   "editMessageText",
+  "editMessageReplyMarkup",
   "sendDocument",
   "sendPhoto",
   "sendAudio",
@@ -17,7 +18,57 @@ const RATE_LIMITED_METHODS = new Set<string>([
   "sendVideo",
   "sendAnimation",
   "sendMediaGroup",
+  "deleteMessage",
+  "pinChatMessage",
+  "unpinChatMessage",
+  "answerCallbackQuery",
+  "createForumTopic",
+  "editForumTopic",
+  "closeForumTopic",
 ]);
+
+/**
+ * A 429 storm must never wedge the bot forever: after this many consecutive
+ * retry_after responses the job fails open so the queues keep draining and
+ * callers see an error they can handle.
+ */
+export const MAX_429_ATTEMPTS = 10;
+
+export class RateLimitExceededError extends Error {
+  constructor(method: string) {
+    super(`Telegram rate limit persisted for ${method}; giving up to keep queues draining`);
+    this.name = "RateLimitExceededError";
+  }
+}
+
+/**
+ * Runs a Telegram call with the same give-up budget as the queued paths.
+ * Use this for direct (non-queued) sends — pin edits, final deliveries,
+ * documents — so a persistent 429 storm fails loudly instead of wedging
+ * the per-session delivery chain forever.
+ */
+export async function runWithRateLimitRetries<T>(
+  label: string,
+  run: () => Promise<T>,
+  maxAttempts: number = MAX_429_ATTEMPTS,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      const retryAfterMs = getRetryAfterMs(error);
+      if (!retryAfterMs) {
+        throw error;
+      }
+      if (attempt >= maxAttempts) {
+        logger.warn(`[RateLimiter] Giving up on ${label} after ${attempt + 1} rate limits`);
+        throw new RateLimitExceededError(label);
+      }
+      logger.info(`[RateLimiter] Telegram rate limit for ${label}; retry in ${retryAfterMs + 100}ms`);
+      await sleep(retryAfterMs + 100);
+    }
+  }
+}
 
 interface QueueJob {
   method: string;
@@ -26,6 +77,7 @@ interface QueueJob {
   chatId: number | null;
   isGroupLike: boolean;
   notBefore: number;
+  attempts429: number;
   run: () => Promise<unknown>;
   resolves: Array<(value: unknown) => void>;
   rejects: Array<(error: unknown) => void>;
@@ -171,13 +223,18 @@ export class TelegramRateLimiter {
   }
 
   private async executeWithRetryAfter<T>(method: string, run: () => Promise<T>): Promise<T> {
-    while (true) {
+    for (let attempt = 0; ; attempt++) {
       try {
         return await run();
       } catch (error) {
         const retryAfterMs = getRetryAfterMs(error);
         if (!retryAfterMs) {
           throw error;
+        }
+
+        if (attempt >= MAX_429_ATTEMPTS) {
+          logger.warn(`[RateLimiter] Giving up on ${method} after ${attempt + 1} rate limits`);
+          throw new RateLimitExceededError(method);
         }
 
         const delayMs = retryAfterMs + 100;
@@ -213,6 +270,7 @@ export class TelegramRateLimiter {
         chatId,
         isGroupLike: isGroupLikeChat(chatId),
         notBefore: 0,
+        attempts429: 0,
         run: run as () => Promise<unknown>,
         resolves: [resolve],
         rejects: [reject],
@@ -353,6 +411,18 @@ export class TelegramRateLimiter {
       if (!retryAfterMs) {
         for (const reject of job.rejects) {
           reject(error);
+        }
+        return "done";
+      }
+
+      job.attempts429 += 1;
+      if (job.attempts429 > MAX_429_ATTEMPTS) {
+        logger.warn(
+          `[RateLimiter] Giving up on ${job.method} after ${job.attempts429} rate limits`,
+        );
+        const giveUp = new RateLimitExceededError(job.method);
+        for (const reject of job.rejects) {
+          reject(giveUp);
         }
         return "done";
       }

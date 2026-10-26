@@ -30,6 +30,32 @@ class BackgroundSessionTracker {
   private questionRequestIds = new Set<string>();
   private permissionRequestIds = new Set<string>();
 
+  /**
+   * Dedup ids are only meaningful for in-flight requests; cap the registries
+   * with FIFO eviction so an abandoned session (restart mid-run, deleted
+   * topic) cannot grow them for the lifetime of the process.
+   */
+  private static readonly MAX_TRACKED_IDS = 500;
+
+  private rememberId(registry: Set<string>, id: string): boolean {
+    if (registry.has(id)) {
+      return false;
+    }
+    while (registry.size >= BackgroundSessionTracker.MAX_TRACKED_IDS) {
+      const oldest = registry.values().next();
+      if (oldest.done) {
+        break;
+      }
+      registry.delete(oldest.value);
+    }
+    registry.add(id);
+    return true;
+  }
+
+  private rememberMessageId(messageId: string): boolean {
+    return this.rememberId(this.completedAssistantMessageIds, messageId);
+  }
+
   setDirectory(directory: string): void {
     if (this.directory === directory) {
       return;
@@ -97,11 +123,18 @@ class BackgroundSessionTracker {
 
     const title = info.title?.trim();
     if (title) {
+      while (this.sessionTitles.size >= BackgroundSessionTracker.MAX_TRACKED_IDS) {
+        const oldest = this.sessionTitles.keys().next();
+        if (oldest.done) {
+          break;
+        }
+        this.sessionTitles.delete(oldest.value);
+      }
       this.sessionTitles.set(info.id, title);
     }
 
     if (info.parentID) {
-      this.childSessionIds.add(info.id);
+      this.rememberId(this.childSessionIds, info.id);
     }
   }
 
@@ -132,8 +165,21 @@ class BackgroundSessionTracker {
       return;
     }
 
-    this.completedAssistantMessageIds.add(messageId);
-    this.pendingAssistantResponsesBySessionId.set(sessionId, { messageId });
+    if (this.rememberMessageId(messageId)) {
+      // Cap the pending map as well: sessions abandoned before going idle
+      // would otherwise linger here for the life of the process.
+      while (
+        this.pendingAssistantResponsesBySessionId.size >=
+        BackgroundSessionTracker.MAX_TRACKED_IDS
+      ) {
+        const oldest = this.pendingAssistantResponsesBySessionId.keys().next();
+        if (oldest.done) {
+          break;
+        }
+        this.pendingAssistantResponsesBySessionId.delete(oldest.value);
+      }
+      this.pendingAssistantResponsesBySessionId.set(sessionId, { messageId });
+    }
   }
 
   private handleSessionIdle(
@@ -185,11 +231,10 @@ class BackgroundSessionTracker {
 
     const deliveredRequestIds =
       kind === "question_asked" ? this.questionRequestIds : this.permissionRequestIds;
-    if (deliveredRequestIds.has(id)) {
+    if (!this.rememberId(deliveredRequestIds, id)) {
       return;
     }
 
-    deliveredRequestIds.add(id);
     this.emitNotification({
       kind,
       sessionId,

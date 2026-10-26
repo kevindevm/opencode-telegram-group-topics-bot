@@ -57,28 +57,76 @@ export interface CodeBlockMessage {
   codeLength: number;
 }
 
-export function buildCodeBlockMessage(
+/**
+ * Splits content into as many code block messages as needed so file content
+ * is always readable inline: no .txt document fallback. Binary content still
+ * returns null (it cannot render as text).
+ */
+export function buildCodeBlockMessages(
   caption: string,
   filename: string,
   content: string,
   maxLength: number = TELEGRAM_MESSAGE_LIMIT,
-): CodeBlockMessage | null {
+): CodeBlockMessage[] {
   if (looksLikeBinary(content)) {
-    return null;
+    return [];
   }
 
+  const language = languageFromFilename(filename);
   const captionPart = caption.trim();
   const separator = captionPart.length > 0 ? "\n\n" : "";
-  const text = `${captionPart}${separator}${content}`;
-
-  if (text.length > maxLength) {
-    return null;
+  const firstOverhead = captionPart.length + separator.length;
+  const firstLimit = maxLength - firstOverhead;
+  if (firstLimit <= 0) {
+    return [];
   }
 
-  return {
-    text,
-    language: languageFromFilename(filename),
-    codeOffset: captionPart.length + separator.length,
-    codeLength: content.length,
+  const chunks = splitContentByLines(content, firstLimit, maxLength);
+  return chunks.map((chunk, index) => {
+    const prefix = index === 0 ? `${captionPart}${separator}` : "";
+    const text = `${prefix}${chunk}`;
+    return {
+      text,
+      language,
+      codeOffset: prefix.length,
+      codeLength: chunk.length,
+    };
+  });
+}
+
+function splitContentByLines(content: string, firstLimit: number, restLimit: number): string[] {
+  const lines = content.split("\n");
+  const chunks: string[] = [];
+  let current = "";
+  let limit = firstLimit;
+
+  const push = () => {
+    if (current.length > 0) {
+      chunks.push(current);
+    }
+    current = "";
   };
+
+  for (const line of lines) {
+    const candidate = current.length === 0 ? line : `${current}\n${line}`;
+    if (candidate.length <= limit) {
+      current = candidate;
+      continue;
+    }
+
+    push();
+    if (line.length <= limit) {
+      current = line;
+    } else {
+      // Single huge line: hard-split it with the current chunk budget so the
+      // caption prefix never pushes the message over the Telegram limit.
+      for (let offset = 0; offset < line.length; offset += limit) {
+        chunks.push(line.slice(offset, offset + limit));
+      }
+    }
+    limit = restLimit;
+  }
+  push();
+
+  return chunks;
 }

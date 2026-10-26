@@ -2,6 +2,7 @@ import { t } from "../../i18n/index.js";
 import type { BackgroundSessionNotification } from "../../app/managers/background-session-manager.js";
 import { buildBackgroundSessionOpenKeyboard } from "../menus/session-selection-menu.js";
 import type { SessionTargetPolicy, TelegramEventDelivery } from "./telegram-event-delivery.js";
+import { DISPLAY_FLAG, isDisplayVisible } from "../../display/manager.js";
 
 function formatShortSessionId(sessionId: string): string {
   return sessionId.length <= 8 ? sessionId : sessionId.slice(0, 8);
@@ -37,6 +38,10 @@ export function createBackgroundNoticeDelivery(
   delivery: TelegramEventDelivery,
 ): (notification: BackgroundSessionNotification) => Promise<void> {
   return async (notification) => {
+    if (!isDisplayVisible(DISPLAY_FLAG.BACKGROUND)) {
+      return;
+    }
+
     const destination = policy.getDestination(notification.sessionId);
     if (!destination) {
       return;

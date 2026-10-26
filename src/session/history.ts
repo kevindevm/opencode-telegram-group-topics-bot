@@ -115,3 +115,11 @@ export async function loadLastVisibleTurn(
   const items = await loadSessionHistoryItems(sessionId, directory);
   return items[0] ?? null;
 }
+
+export async function loadLastUserMessage(
+  sessionId: string,
+  directory: string,
+): Promise<SessionHistoryItem | null> {
+  const items = await loadSessionHistoryItems(sessionId, directory);
+  return items.find((item) => item.role === "user") ?? null;
+}

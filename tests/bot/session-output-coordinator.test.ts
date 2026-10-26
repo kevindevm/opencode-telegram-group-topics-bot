@@ -310,4 +310,48 @@ describe("bot/session-output-coordinator", () => {
     expect(onFinalDeliveryCommitted).toHaveBeenCalledTimes(1);
     expect(onFinalDeliveryCommitted).toHaveBeenCalledWith("s1");
   });
+
+  it("retries finalization when the finalizer throws instead of stalling", async () => {
+    const onFinalizeSession = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("telegram down"))
+      .mockResolvedValue(true);
+    const onFinalDeliveryCommitted = vi.fn().mockResolvedValue(undefined);
+    const coordinator = createCoordinator({ onFinalizeSession, onFinalDeliveryCommitted });
+
+    coordinator.dispatch({
+      kind: "assistant_complete",
+      sessionId: "s1",
+      messageId: "m1",
+      text: "Reply",
+    });
+    coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(onFinalizeSession).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(onFinalizeSession).toHaveBeenCalledTimes(2);
+    expect(onFinalDeliveryCommitted).toHaveBeenCalledWith("s1");
+  });
+
+  it("gives up final delivery after repeated failures instead of retrying forever", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi.fn().mockRejectedValue(new Error("telegram down"));
+      const onFinalDeliveryCommitted = vi.fn();
+      const coordinator = createCoordinator({ onFinalizeSession, onFinalDeliveryCommitted });
+
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      expect(onFinalizeSession.mock.calls.length).toBeLessThanOrEqual(51);
+      expect(onFinalDeliveryCommitted).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

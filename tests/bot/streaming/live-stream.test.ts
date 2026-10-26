@@ -396,4 +396,133 @@ describe("bot/streaming/live-stream", () => {
       longText,
     );
   });
+
+  it("rewrites the stream message with the authoritative final text", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(121);
+    const editText = vi.fn().mockResolvedValue(undefined);
+    const stream = new LiveStream({ sendText, editText, throttleMs: 50 });
+
+    // Live buffer accumulated a duplicated chunk mid-stream.
+    await stream.updateAssistant("s1", "m1", "DescubiertoDescubiertoDescubierto");
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect(
+      stream.finalizeCurrentMessage("s1", {
+        format: "markdown_v2",
+        includeKeyboard: true,
+        rawFallbackText: "Descubierto",
+        finalText: "Descubierto",
+      }),
+    ).resolves.toBe(true);
+
+    expect(editText).toHaveBeenLastCalledWith(
+      "s1",
+      121,
+      "Descubierto",
+      "markdown_v2",
+      true,
+      "Descubierto",
+    );
+  });
+
+  it("exposes the live message id while a stream message is on screen", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(131);
+    const editText = vi.fn().mockResolvedValue(undefined);
+    const stream = new LiveStream({ sendText, editText, throttleMs: 50 });
+
+    expect(stream.getLiveMessageId("s1")).toBeNull();
+
+    await stream.updateAssistant("s1", "m1", "Hello");
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(stream.getLiveMessageId("s1")).toBe(131);
+
+    await expect(
+      stream.finalizeCurrentMessage("s1", {
+        format: "markdown_v2",
+        includeKeyboard: false,
+        rawFallbackText: "Hello",
+        finalText: "Hello",
+      }),
+    ).resolves.toBe(true);
+
+    expect(stream.getLiveMessageId("s1")).toBeNull();
+  });
+
+  it("treats a not-modified final edit as success", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(141);
+    const editText = vi.fn().mockResolvedValue(undefined);
+    const editRenderedPart = vi
+      .fn()
+      .mockRejectedValue(new Error("Bad Request: message is not modified"));
+    const stream = new LiveStream({ sendText, editText, editRenderedPart, throttleMs: 50 });
+
+    await stream.updateAssistant("s1", "m1", "Final answer");
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect(
+      stream.finalizeCurrentMessage("s1", {
+        format: "markdown_v2",
+        includeKeyboard: false,
+        renderedPart: {
+          text: "Final answer",
+          fallbackText: "Final answer",
+          source: "plain",
+        },
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it("survives delete failures during final cleanup", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(151);
+    const editText = vi.fn().mockResolvedValue(undefined);
+    const deleteText = vi.fn().mockRejectedValue(new Error("Bad Request: message to delete not found"));
+    const stream = new LiveStream({ sendText, editText, deleteText, throttleMs: 50 });
+
+    await stream.updateAssistant("s1", "m1", "Final answer");
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect(stream.cleanupAfterFinalDelivery("s1")).resolves.toBeUndefined();
+    expect(deleteText).toHaveBeenCalledWith("s1", 151);
+
+    vi.useRealTimers();
+  });
+
+  it("abandons an uneditable message so the next flush sends a fresh one", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(152);
+    const fatalEditError = Object.assign(new Error("message can't be edited"), {
+      error_code: 400,
+      description: "Bad Request: message can't be edited",
+    });
+    const editText = vi.fn().mockRejectedValueOnce(fatalEditError).mockResolvedValue(undefined);
+    const stream = new LiveStream({ sendText, editText, throttleMs: 50 });
+
+    await stream.updateAssistant("s1", "m1", "First");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(sendText).toHaveBeenCalledTimes(1);
+
+    // The live message becomes uneditable: the failed edit must not pin the
+    // stream to the dead message id.
+    await stream.updateAssistant("s1", "m1", "First continued");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(editText).toHaveBeenCalledTimes(1);
+
+    // Next flush sends a fresh message instead of failing on the dead one.
+    sendText.mockResolvedValueOnce(153);
+    await stream.updateAssistant("s1", "m1", "First continued more");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(sendText).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
 });

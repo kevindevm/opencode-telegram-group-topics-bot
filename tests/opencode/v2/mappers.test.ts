@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { FormInfo, ModelInfo, SessionMessageInfo } from "@opencode/client";
 import {
   toFormAnswer,
+  toV1FileDiff,
   toV1Message,
   toV1Providers,
   toV1Question,
@@ -343,5 +344,23 @@ describe("opencode/v2/mappers", () => {
     expect(providers[0]?.models.gpt?.limit.context).toBe(1000);
     expect(Object.keys(providers[0]?.models.gpt?.variants ?? {})).toEqual(["low", "high"]);
     expect(providers[0]?.models.gpt?.capabilities.input.image).toBe(true);
+  });
+
+  it("maps session diffs to the file key the dashboard reads", () => {
+    expect(
+      toV1FileDiff({
+        file: "src/a.ts",
+        patch: "@@",
+        additions: 2,
+        deletions: 1,
+        status: "modified",
+      }),
+    ).toEqual({
+      file: "src/a.ts",
+      patch: "@@",
+      additions: 2,
+      deletions: 1,
+      status: "modified",
+    });
   });
 });

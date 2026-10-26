@@ -2,6 +2,7 @@ import { permissionManager } from "../permission/manager.js";
 import { questionManager } from "../question/manager.js";
 import { renameManager } from "../rename/manager.js";
 import { taskCreationManager } from "../scheduled-task/creation-manager.js";
+import { cancelAllScheduledPermissionPolls } from "../bot/handlers/permission.js";
 import { interactionManager } from "./manager.js";
 import { logger } from "../utils/logger.js";
 
@@ -16,6 +17,7 @@ export function clearAllInteractionState(reason: string, scopeKey: string = "glo
   permissionManager.clear(scopeKey);
   renameManager.clear(scopeKey);
   taskCreationManager.clear(scopeKey);
+  cancelAllScheduledPermissionPolls(scopeKey);
   interactionManager.clear(reason, scopeKey);
 
   const hasAnyActiveState =

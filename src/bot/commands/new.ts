@@ -138,25 +138,26 @@ export function createNewCommand(deps: NewCommandDeps) {
     try {
       const scope = getScopeFromContext(ctx);
       const scopeKey = scope?.key ?? GLOBAL_SCOPE_KEY;
+      const threadOptions = getThreadSendOptions(scope?.threadId ?? null);
 
       if (isTopicScope(scope)) {
-        await ctx.reply(t(BOT_I18N_KEY.NEW_TOPIC_ONLY_IN_GENERAL));
+        await ctx.reply(t(BOT_I18N_KEY.NEW_TOPIC_ONLY_IN_GENERAL), threadOptions);
         return;
       }
 
       if (!isGeneralForumScope(ctx)) {
-        await ctx.reply(t(BOT_I18N_KEY.NEW_REQUIRES_FORUM_GENERAL));
+        await ctx.reply(t(BOT_I18N_KEY.NEW_REQUIRES_FORUM_GENERAL), threadOptions);
         return;
       }
 
       const currentProject = getCurrentProject(scopeKey);
       if (!currentProject) {
-        await ctx.reply(t("new.project_not_selected"));
+        await ctx.reply(t("new.project_not_selected"), threadOptions);
         return;
       }
 
       if (!(await projectDirectoryExists(currentProject.worktree))) {
-        await ctx.reply(t("projects.worktree_missing"));
+        await ctx.reply(t("projects.worktree_missing"), threadOptions);
         return;
       }
 
@@ -170,7 +171,7 @@ export function createNewCommand(deps: NewCommandDeps) {
       });
 
       if (error || !session) {
-        await ctx.reply(t("new.create_error"));
+        await ctx.reply(t("new.create_error"), threadOptions);
         return;
       }
 

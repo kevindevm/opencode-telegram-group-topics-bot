@@ -51,6 +51,10 @@ export async function handleAgentSelect(ctx: Context): Promise<boolean> {
       keyboardManager.initialize(ctx.api, ctx.chat.id, scopeKey);
     }
 
+    // Acknowledge the tap before any network I/O: refreshContextLimit can
+    // take seconds, and a late answer shows as a stuck button.
+    await ctx.answerCallbackQuery().catch(() => {});
+
     if (pinnedMessageManager.getContextLimit(scopeKey) === 0) {
       await pinnedMessageManager.refreshContextLimit(scopeKey);
     }
@@ -99,7 +103,9 @@ export async function handleAgentSelect(ctx: Context): Promise<boolean> {
     clearActiveInlineMenu("agent_selected", scopeKey);
 
     // Send confirmation message with updated keyboard
-    await ctx.answerCallbackQuery({ text: t("agent.changed_callback", { name: displayName }) });
+    await ctx
+      .answerCallbackQuery({ text: t("agent.changed_callback", { name: displayName }) })
+      .catch(() => {});
     await ctx.reply(t("agent.changed_message", { name: displayName }), {
       reply_markup: keyboard,
       ...getThreadSendOptions(threadId),

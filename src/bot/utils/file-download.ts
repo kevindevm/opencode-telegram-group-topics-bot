@@ -4,6 +4,7 @@ import { logger } from "../../utils/logger.js";
 
 const TELEGRAM_FILE_URL_BASE = "https://api.telegram.org/file/bot";
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB Telegram limit
+const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 export interface DownloadedFile {
   buffer: Buffer;
@@ -48,13 +49,20 @@ export async function downloadTelegramFile(api: Api, fileId: string): Promise<Do
     }
   }
 
-  const response = await fetch(fileUrl, fetchOptions);
+  const response = await fetch(fileUrl, {
+    ...fetchOptions,
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+  });
 
   if (!response.ok) {
     throw new Error(`Failed to download file: ${response.status} ${response.statusText}`);
   }
 
   const arrayBuffer = await response.arrayBuffer();
+  if (arrayBuffer.byteLength > MAX_FILE_SIZE_BYTES) {
+    const sizeMb = (arrayBuffer.byteLength / (1024 * 1024)).toFixed(2);
+    throw new Error(`File too large: ${sizeMb}MB (max 20MB)`);
+  }
   const buffer = Buffer.from(arrayBuffer);
 
   logger.debug(`[FileDownload] Downloaded ${buffer.length} bytes`);

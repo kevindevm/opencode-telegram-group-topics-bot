@@ -43,19 +43,42 @@ import {
   handleQuestionCallback,
   showCurrentQuestion,
   handleQuestionTextAnswer,
+  closeQuestionSettledOutside,
+  isDuplicateQuestionDelivery,
 } from "./handlers/question.js";
 import { handleRefreshCommand } from "./commands/refresh.js";
-import { handlePermissionCallback, showPermissionRequest } from "./handlers/permission.js";
+import { handlePermissionCallback, syncPermissionInteractionState, buildPermissionOutcomeText, cancelScheduledPermissionPoll, schedulePermissionPoll } from "./handlers/permission.js";
+import { permissionManager } from "../permission/manager.js";
 import { handleAgentSelect, showAgentSelectionMenu } from "./handlers/agent.js";
-import { handleModelSelect, showModelSelectionMenu } from "./handlers/model.js";
+import { handleModelSelect, handleModelSearchTextAnswer, showModelSelectionMenu } from "./handlers/model.js";
 import { handleVariantSelect, showVariantSelectionMenu } from "./handlers/variant.js";
 import { handleContextButtonPress, handleCompactConfirm } from "./handlers/context.js";
 import { handleInlineMenuCancel } from "./handlers/inline-menu.js";
+import { handleQueuedPromptCancel, handleQueuedPromptFront, handleQueuedPromptSteer } from "./handlers/prompt.js";
+import { displayCommand, handleDisplayCallback } from "./commands/display.js";
+import { queueCommand, handleQueueCallback } from "./commands/queue.js";
+import { trustCommand, handleTrustCallback } from "./commands/trust.js";
+import {
+  clearAllBackgroundOffers,
+  clearSessionBackgroundOffers,
+  handleToolBackgroundCallback,
+  noteToolBackgroundState,
+} from "../tool/background-offer.js";
+import { createRetryCommand } from "./commands/retry.js";
+import { diffCommand, commitCommand } from "./commands/diff.js";
+import { costCommand } from "./commands/cost.js";
+import { closeCommand } from "./commands/close.js";
+import { createForkCommand } from "./commands/fork.js";
+import { shareCommand } from "./commands/share.js";
+import { createSavedCommand } from "./commands/saved.js";
+import { addDailyCost } from "../settings/manager.js";
+import { formatUsd, recordSessionCost, shouldAlertBudget, todayKey } from "../session/cost-tracker.js";
+import { DISPLAY_FLAG, isDisplayVisible } from "../display/manager.js";
 import { questionManager } from "../question/manager.js";
 import { interactionManager } from "../interaction/manager.js";
 import { clearAllInteractionState } from "../interaction/cleanup.js";
 import { keyboardManager } from "../keyboard/manager.js";
-import { subscribeToEvents } from "../opencode/events.js";
+import { stopEventListening, subscribeToEvents } from "../opencode/events.js";
 import { summaryAggregator } from "../summary/aggregator.js";
 import {
   formatSummaryWithRawFallback,
@@ -63,6 +86,11 @@ import {
   getAssistantParseMode,
 } from "../summary/formatter.js";
 import { renderSubagentCards } from "../summary/subagent-formatter.js";
+import {
+  ensureSubagentTopic,
+  finalizeSubagentTopic,
+  isEphemeralTopicScope,
+} from "./handlers/subagent-topics.js";
 import {
   getCachedSessionProjects,
   ingestSessionInfoForCache,
@@ -86,13 +114,11 @@ import { handleDocumentMessage } from "./handlers/document.js";
 import { downloadTelegramFile, toDataUri } from "./utils/file-download.js";
 import { editBotRenderedPart, editBotText } from "./utils/telegram-text.js";
 import { sendBotRenderedPart, sendBotText } from "./utils/telegram-text.js";
-import {
-  getTelegramRetryAfterMs,
-  isTelegramMessageNotModifiedError,
-} from "./utils/send-with-markdown-fallback.js";
+import { isTelegramMessageNotModifiedError } from "./utils/send-with-markdown-fallback.js";
 import { extractCommandName } from "./utils/commands.js";
 import {
   isOperationAbortedSessionError,
+  isInvalidRequestSessionError,
   SessionErrorThrottle,
 } from "./utils/session-error-filter.js";
 import { getModelCapabilities, supportsInput } from "../model/capabilities.js";
@@ -101,11 +127,16 @@ import { getCurrentProject } from "../settings/manager.js";
 import {
   GLOBAL_SCOPE_KEY,
   SCOPE_CONTEXT,
+  createScopeKeyFromParams,
   getChatActionThreadOptions,
   getScopeFromContext,
   getThreadSendOptions,
 } from "./scope.js";
-import { TelegramRateLimiter } from "./telegram-rate-limiter.js";
+import {
+  RateLimitExceededError,
+  TelegramRateLimiter,
+  runWithRateLimitRetries,
+} from "./telegram-rate-limiter.js";
 import type { Event as OpenCodeEvent, FilePartInput } from "@opencode-ai/sdk/v2";
 import { getSessionRouteTarget, listAllTopicBindings } from "../topic/manager.js";
 import { BOT_COMMAND, DM_ALLOWED_COMMANDS } from "./commands/constants.js";
@@ -122,9 +153,17 @@ import { SessionOutputCoordinator } from "./session-output-coordinator.js";
 import { assistantRunState } from "./assistant-run-state.js";
 import { formatAssistantRunFooter } from "./utils/assistant-run-footer.js";
 import { renderAssistantFinalPartsSafe } from "./utils/assistant-rendering.js";
-import { buildCodeBlockMessage } from "./utils/code-block.js";
+import { buildCodeBlockMessages } from "./utils/code-block.js";
+import { buildSessionRetryMessage } from "./utils/retry-message.js";
 import { registerPcUserMessage, takePcUserText } from "./pc-user-mirror.js";
-import { truncateText } from "../session/history.js";
+import {
+  claimPcTextMirror,
+  isForwardedPrompt,
+} from "../session/forwarded-prompts.js";
+import { loadLastUserMessage, truncateText } from "../session/history.js";
+import { getTopicBindingBySessionId } from "../topic/manager.js";
+import { TOPIC_SESSION_STATUS } from "../settings/manager.js";
+import { ensureTopicSessionTracked, extractTrackableSessionId } from "./event-session-tracking.js";
 
 let botInstance: Bot<Context> | null = null;
 const chatIdInstance: number | null = null;
@@ -133,6 +172,102 @@ const renamedGeneralTopicChats = new Set<number>();
 const DM_ALLOWED_COMMAND_SET = new Set<string>(DM_ALLOWED_COMMANDS);
 const telegramRateLimiter = new TelegramRateLimiter();
 const eventCallbackByDirectory = new Map<string, (event: OpenCodeEvent) => void>();
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Single global SSE consumer. The server fans every event out to every
+ * connection, so one callback (registered once) replaces the old
+ * per-directory clones that processed every event N times.
+ */
+let sharedEventCallback: ((event: OpenCodeEvent) => void) | null = null;
+let sharedBackgroundTracker: BackgroundSessionTracker | null = null;
+
+/**
+ * Single background tracker for the shared stream. The tracker's directory
+ * is write-only bookkeeping; events are global, so one instance replaces the
+ * old per-subscription clones that notified N times.
+ */
+function getSharedBackgroundTracker(): BackgroundSessionTracker | null {
+  if (!config.bot.trackBackgroundSessions) {
+    return null;
+  }
+
+  if (!sharedBackgroundTracker) {
+    const tracker = new BackgroundSessionTracker();
+    tracker.setOnNotification(
+      createBackgroundNoticeDelivery(
+        {
+          getDestination: () => {
+            if (!botInstance || !chatIdInstance) {
+              return null;
+            }
+            return { api: botInstance.api, chatId: chatIdInstance };
+          },
+        },
+        new TelegramEventDelivery(),
+      ),
+    );
+    sharedBackgroundTracker = tracker;
+  }
+
+  return sharedBackgroundTracker;
+}
+
+function getSharedEventCallback(): (event: OpenCodeEvent) => void {
+  if (!sharedEventCallback) {
+    sharedEventCallback = (event: OpenCodeEvent): void => {
+      if (event.type === "session.created" || event.type === "session.updated") {
+        const info = (
+          event.properties as { info?: { directory?: string; time?: { updated?: number } } }
+        ).info;
+
+        if (info?.directory) {
+          safeBackgroundTask({
+            taskName: `session.cache.${event.type}`,
+            task: () => ingestSessionInfoForCache(info),
+          });
+        }
+      }
+
+      mirrorPcUserMessageEvent(event);
+      mirrorPcPromptOnRunStart(event);
+      ensureTopicSessionTracked(event);
+      ensureTopicManagersForLiveEvent(event);
+
+      const sessionTitleUpdate = extractSessionTitleUpdate(event);
+      if (sessionTitleUpdate && botInstance) {
+        const activeBot = botInstance;
+        safeBackgroundTask({
+          taskName: "topic.title.sync_from_event",
+          task: () =>
+            syncTopicTitleForSession(
+              activeBot.api,
+              sessionTitleUpdate.sessionId,
+              sessionTitleUpdate.title,
+            ),
+          onError: (syncError) => {
+            logger.debug("[Bot] Failed to sync topic title from session.updated", {
+              sessionId: sessionTitleUpdate.sessionId,
+              syncError,
+            });
+          },
+        });
+      }
+
+      // Process event through the shared background session tracker for
+      // PC->Telegram mirroring.
+      const currentSessionId = getCurrentSession()?.id ?? null;
+      getSharedBackgroundTracker()?.processEvent(
+        event as unknown as { type: string; properties?: unknown },
+        currentSessionId,
+      );
+
+      summaryAggregator.processEvent(event);
+    };
+  }
+
+  return sharedEventCallback;
+}
 
 async function ensureGeneralTopicName(ctx: Context): Promise<void> {
   if (!ctx.chat || ctx.chat.type === CHAT_TYPE.PRIVATE) {
@@ -198,6 +333,25 @@ function getTargetBySessionId(
   };
 }
 
+/**
+ * Transcript-only subagent topics reject new prompts (poll answers are
+ * handled by their own flows before this runs). Returns true when consumed.
+ */
+async function replyEphemeralTopicReadonly(ctx: Context): Promise<boolean> {
+  const scope = getScopeFromContext(ctx);
+  const chatId = ctx.chat?.id;
+  if (!scope || chatId === undefined || !isEphemeralTopicScope(scope.key)) {
+    return false;
+  }
+
+  await ctx.api
+    .sendMessage(chatId, t("subagent.topic_readonly"), {
+      ...getThreadSendOptions(scope.threadId),
+    })
+    .catch(() => {});
+  return true;
+}
+
 function asMirrorString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -258,6 +412,23 @@ function mirrorPcUserMessageEvent(event: OpenCodeEvent): void {
     return;
   }
 
+  // Skip when the run-start poll already mirrored the same text.
+  if (!claimPcTextMirror(payload.sessionId, payload.text)) {
+    return;
+  }
+
+  const mirrorScopeKey =
+    typeof payload.target.threadId === "number"
+      ? createScopeKeyFromParams({
+          chatId: payload.target.chatId,
+          threadId: payload.target.threadId,
+          context: SCOPE_CONTEXT.GROUP_TOPIC,
+        })
+      : undefined;
+  if (!isDisplayVisible(DISPLAY_FLAG.PC_MIRROR, mirrorScopeKey)) {
+    return;
+  }
+
   const activeBot = botInstance;
   safeBackgroundTask({
     taskName: "pc_user_mirror.send",
@@ -271,6 +442,142 @@ function mirrorPcUserMessageEvent(event: OpenCodeEvent): void {
       logger.error("[Bot] Failed to mirror PC user message to topic:", error);
     },
   });
+}
+
+/**
+ * Fallback mirror for PC prompts that never cross the inbox (V2 emits no
+ * user-message events for direct runs). When a run starts, the latest user
+ * message must be fresh, bot-forwarded texts are skipped by peek, and the
+ * claim dedups against the inbox-delivery path.
+ */
+function mirrorPcPromptOnRunStart(event: OpenCodeEvent): void {
+  if (event.type !== "session.status") {
+    return;
+  }
+
+  const properties = event.properties as {
+    sessionID?: unknown;
+    status?: { type?: unknown };
+  };
+  const sessionId = properties.sessionID;
+  if (typeof sessionId !== "string" || !sessionId || properties.status?.type !== "busy") {
+    return;
+  }
+
+  if (!botInstance) {
+    return;
+  }
+
+  const activeBot = botInstance;
+  safeBackgroundTask({
+    taskName: "pc_user_mirror.run_start",
+    task: async () => {
+      // Let the just-sent message land in history before reading it back.
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+
+      const binding = getTopicBindingBySessionId(sessionId);
+      if (
+        !binding ||
+        (binding.status !== TOPIC_SESSION_STATUS.ACTIVE &&
+          binding.status !== TOPIC_SESSION_STATUS.ABANDONED) ||
+        !binding.projectWorktree
+      ) {
+        return;
+      }
+
+      let lastUser: Awaited<ReturnType<typeof loadLastUserMessage>>;
+      try {
+        lastUser = await loadLastUserMessage(sessionId, binding.projectWorktree);
+      } catch (error) {
+        logger.debug("[Bot] Run-start mirror: could not load last user message", {
+          sessionId,
+          error,
+        });
+        return;
+      }
+
+      const text = lastUser?.text?.trim() ?? "";
+      if (!text) {
+        return;
+      }
+
+      // Only fresh prompts: an older latest message means the new text is not
+      // in history yet (or this busy event belongs to an older turn).
+      if (Date.now() - (lastUser?.created ?? 0) > 120_000) {
+        return;
+      }
+
+      if (isForwardedPrompt(sessionId, text)) {
+        return;
+      }
+
+      if (!claimPcTextMirror(sessionId, text)) {
+        return;
+      }
+
+      const scopeKey = createScopeKeyFromParams({
+        chatId: binding.chatId,
+        threadId: binding.threadId,
+        context: SCOPE_CONTEXT.GROUP_TOPIC,
+      });
+      if (!isDisplayVisible(DISPLAY_FLAG.PC_MIRROR, scopeKey)) {
+        return;
+      }
+
+      logger.info(`[Bot] Mirroring PC prompt on run start for session ${sessionId}`);
+      await activeBot.api
+        .sendMessage(binding.chatId, t("pcuser.echo", { text: truncateText(text, 3900) }), {
+          ...getThreadSendOptions(binding.threadId),
+        })
+        .catch((error: unknown) => {
+          logger.error("[Bot] Failed to mirror PC prompt on run start:", error);
+        });
+    },
+  });
+}
+
+/**
+ * Self-heals the per-topic UI state on live events: after a restart (or when
+ * a session only ever runs from the PC) the pinned dashboard and keyboard
+ * are uninitialized, so cost/context would freeze even though messages flow.
+ * Attaching on the first live event of a bound session restores both.
+ */
+function ensureTopicManagersForLiveEvent(event: OpenCodeEvent): void {
+  if (!botInstance) {
+    return;
+  }
+
+  const sessionId = extractTrackableSessionId(event);
+  if (!sessionId) {
+    return;
+  }
+
+  const binding = getTopicBindingBySessionId(sessionId);
+  if (
+    !binding ||
+    binding.ephemeral ||
+    (binding.status !== TOPIC_SESSION_STATUS.ACTIVE &&
+      binding.status !== TOPIC_SESSION_STATUS.ABANDONED)
+  ) {
+    return;
+  }
+
+  const activeBot = botInstance;
+  if (!pinnedMessageManager.isInitialized(binding.scopeKey)) {
+    pinnedMessageManager.initialize(activeBot.api, binding.chatId, binding.scopeKey, binding.threadId);
+  }
+  keyboardManager.initialize(activeBot.api, binding.chatId, binding.scopeKey);
+
+  if (pinnedMessageManager.getState(binding.scopeKey).sessionId !== sessionId) {
+    void pinnedMessageManager
+      .attachSession(sessionId, binding.scopeKey)
+      .catch((error: unknown) => {
+        logger.debug("[Bot] Failed to attach live session to pinned dashboard:", {
+          sessionId,
+          error,
+        });
+      });
+  }
 }
 
 function extractSessionTitleUpdate(
@@ -323,6 +630,8 @@ const TOOL_STREAM_PREFIX = "__tool__";
 const SESSION_ERROR_MESSAGE_MAX_LENGTH = 3500;
 const FINAL_DELIVERY_SETTLE_MS = Math.max(1500, config.bot.responseStreamThrottleMs + 500);
 const FILE_MUTATION_TOOLS = new Set(["write", "edit", "apply_patch"]);
+/** Past this many code blocks, long files go out as a single .txt document. */
+const MAX_CODE_BLOCK_MESSAGES = 5;
 const sessionErrorThrottle = new SessionErrorThrottle(3000);
 
 function getToolStreamKey(callId: string): string {
@@ -362,6 +671,21 @@ async function finalizeSessionDelivery(
       syncKeyboardContextFromPinnedState(target.scopeKey);
       await pinnedMessageManager.flush(target.scopeKey);
     }
+
+    if (target) {
+      seedLiveKeyboardRepostBaseline(target.scopeKey);
+      // The in-place finalize path edits text only (reply keyboards cannot be
+      // attached by edit), so push one silent refresh to guarantee the topic
+      // ends the turn with a current keyboard. Fingerprint dedup makes this
+      // a no-op when nothing changed.
+      if (botInstance && keyboardManager.isInitialized(target.scopeKey)) {
+        await keyboardManager
+          .sendKeyboardUpdate(target.chatId, target.scopeKey)
+          .catch((error: unknown) => {
+            logger.debug("[Bot] Failed to repost final keyboard", { sessionId, error });
+          });
+      }
+    }
   } finally {
     if (deliveryComplete) {
       // Coordinator decides when this finalize attempt is the committed final delivery.
@@ -392,8 +716,13 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
         return;
       }
 
+      const toolScopeKey = getTargetBySessionId(sessionId)?.scopeKey;
       const isFileMutationTool = FILE_MUTATION_TOOLS.has(toolInfo.tool);
-      if (config.bot.hideToolCallMessages || isFileMutationTool || toolInfo.tool === "task") {
+      if (
+        !isDisplayVisible(DISPLAY_FLAG.TOOL_CALLS, toolScopeKey) ||
+        isFileMutationTool ||
+        toolInfo.tool === "task"
+      ) {
         return;
       }
 
@@ -427,7 +756,28 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
       }
     },
     onSubagent: async ({ sessionId, subagents }) => {
-      if (config.bot.hideToolCallMessages) {
+      if (botInstance) {
+        const activeBot = botInstance;
+        for (const subagent of subagents) {
+          if (!subagent.sessionId) {
+            continue;
+          }
+          const ensured = await ensureSubagentTopic(activeBot.api, sessionId, subagent);
+          if (
+            ensured &&
+            (subagent.status === "completed" || subagent.status === "error")
+          ) {
+            await finalizeSubagentTopic(
+              activeBot.api,
+              subagent.sessionId,
+              subagent.status,
+              subagent.description,
+            );
+          }
+        }
+      }
+
+      if (!isDisplayVisible(DISPLAY_FLAG.TOOL_CALLS, getTargetBySessionId(sessionId)?.scopeKey)) {
         return;
       }
 
@@ -445,7 +795,8 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
         return;
       }
 
-      if (config.bot.hideToolFileMessages) {
+      const fileScopeKey = getTargetBySessionId(sessionId)?.scopeKey;
+      if (!isDisplayVisible(DISPLAY_FLAG.TOOL_FILES, fileScopeKey)) {
         return;
       }
 
@@ -462,7 +813,7 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
           const caption = prepareDocumentCaption(
             entry.line || toolMessage || entry.fileData.caption,
           );
-          if (config.bot.codeBlocksInText) {
+          if (isDisplayVisible(DISPLAY_FLAG.CODE_BLOCKS, fileScopeKey)) {
             const sentAsCodeBlock = await sendSessionCodeBlockMessage(sessionId, {
               ...entry.fileData,
               caption,
@@ -486,12 +837,17 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
         return;
       }
 
-      await liveStream.sealCurrentMessage(sessionId, true);
-
       const target = getTargetBySessionId(sessionId);
       if (!target) {
         return;
       }
+
+      if (isDuplicateQuestionDelivery(target.scopeKey, requestId)) {
+        logger.debug(`[Bot] Ignoring duplicate question delivery: requestID=${requestId}`);
+        return;
+      }
+
+      await liveStream.sealCurrentMessage(sessionId, true);
 
       if (questionManager.isActive(target.scopeKey)) {
         logger.warn("[Bot] Replacing active poll with a new one");
@@ -529,7 +885,7 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
       logger.info(
         `[Bot] Received permission request from agent: type=${request.permission}, requestID=${request.id}`,
       );
-      await showPermissionRequest(
+      schedulePermissionPoll(
         botInstance.api,
         target.chatId,
         request,
@@ -538,7 +894,7 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
       );
     },
     onThinking: async ({ sessionId }) => {
-      if (config.bot.hideThinkingMessages || !botInstance) {
+      if (!isDisplayVisible(DISPLAY_FLAG.THINKING, getTargetBySessionId(sessionId)?.scopeKey) || !botInstance) {
         return;
       }
 
@@ -585,8 +941,12 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
           ? `${normalizedMessage.slice(0, SESSION_ERROR_MESSAGE_MAX_LENGTH - 3)}...`
           : normalizedMessage;
 
+      const templateKey = isInvalidRequestSessionError(normalizedMessage)
+        ? "bot.session_error_invalid_request"
+        : "bot.session_error";
+
       await botInstance.api
-        .sendMessage(target.chatId, t("bot.session_error", { message: truncatedMessage }), {
+        .sendMessage(target.chatId, t(templateKey, { message: truncatedMessage }), {
           ...getThreadSendOptions(target.threadId),
         })
         .catch((err) => {
@@ -598,14 +958,15 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
         return;
       }
 
-      const normalizedMessage = retryInfo.message.trim() || t("common.unknown_error");
-      const truncatedMessage =
-        normalizedMessage.length > SESSION_ERROR_MESSAGE_MAX_LENGTH
-          ? `${normalizedMessage.slice(0, SESSION_ERROR_MESSAGE_MAX_LENGTH - 3)}...`
-          : normalizedMessage;
-
-      const retryMessage = t("bot.session_retry", { message: truncatedMessage });
-      liveStream.pushServiceUpdate(sessionId, retryMessage);
+      liveStream.replaceServiceByPrefix(
+        sessionId,
+        "🔁",
+        buildSessionRetryMessage({
+          message: retryInfo.message,
+          next: retryInfo.next,
+          maxLength: SESSION_ERROR_MESSAGE_MAX_LENGTH,
+        }),
+      );
     },
   },
 });
@@ -682,6 +1043,7 @@ async function deliverAssistantCompletion(sessionId: string, messageText: string
         includeKeyboard: keyboardManager.isInitialized(target.scopeKey),
         rawFallbackText: formattedParts[0]?.rawFallbackText,
         renderedPart: finalParts[0],
+        finalText: finalMessageText,
       });
 
       if (finalizedInPlace) {
@@ -692,6 +1054,7 @@ async function deliverAssistantCompletion(sessionId: string, messageText: string
           threadId: target.threadId,
           text: normalizedMessageText,
         });
+        clearPromptResponseMode(sessionId);
 
         logger.debug("[Bot] Assistant completion finalized in place", {
           sessionId,
@@ -705,36 +1068,25 @@ async function deliverAssistantCompletion(sessionId: string, messageText: string
     for (let index = 0; index < finalParts.length; index++) {
       const isLastPart = index === finalParts.length - 1;
 
-      while (true) {
-        try {
-          await sendBotRenderedPart({
-            api: activeBot.api,
-            chatId: target.chatId,
-            part: finalParts[index],
-            options: {
-              ...(isLastPart && keyboardManager.isInitialized(target.scopeKey)
-                ? { reply_markup: keyboardManager.getKeyboard(target.scopeKey) }
-                : {}),
-              disable_notification: !isLastPart,
-              ...getThreadSendOptions(target.threadId),
+      // Bounded 429 retries: a persistent storm fails this delivery (and the
+      // coordinator reschedules) instead of wedging the session chain.
+      await runWithRateLimitRetries(`final:${sessionId}`, () =>
+        sendBotRenderedPart({
+          api: activeBot.api,
+          chatId: target.chatId,
+          part: finalParts[index],
+          options: {
+            link_preview_options: {
+              is_disabled: !isDisplayVisible(DISPLAY_FLAG.LINK_PREVIEWS, target.scopeKey),
             },
-          });
-          break;
-        } catch (error) {
-          const retryAfterMs = getTelegramRetryAfterMs(error);
-          if (!retryAfterMs) {
-            throw error;
-          }
-
-          logger.info(
-            `[Bot] Telegram rate limit; retrying final message send in ${retryAfterMs}ms`,
-            {
-              sessionId,
-            },
-          );
-          await new Promise((resolve) => setTimeout(resolve, retryAfterMs + 100));
-        }
-      }
+            ...(isLastPart && keyboardManager.isInitialized(target.scopeKey)
+              ? { reply_markup: keyboardManager.getKeyboard(target.scopeKey) }
+              : {}),
+            disable_notification: !isLastPart,
+            ...getThreadSendOptions(target.threadId),
+          },
+        }),
+      );
     }
 
     const ttsSent = await sendTtsResponseForSession({
@@ -744,6 +1096,11 @@ async function deliverAssistantCompletion(sessionId: string, messageText: string
       threadId: target.threadId,
       text: normalizedMessageText,
     });
+    clearPromptResponseMode(sessionId);
+
+    // The answer went out as fresh messages: remove the live stream message
+    // (service lines included) instead of leaving it next to the finals.
+    await liveStream.deleteLiveMessage(sessionId);
 
     logger.debug("[Bot] Assistant completion finalized", {
       sessionId,
@@ -769,11 +1126,93 @@ function syncKeyboardContextFromPinnedState(scopeKey: string): void {
   keyboardManager.updateContext(contextInfo.tokensUsed, contextInfo.tokensLimit, scopeKey);
 }
 
+const liveKeyboardRepostByScope = new Map<string, { at: number; percent: number }>();
+const LIVE_KEYBOARD_REPOST_MIN_INTERVAL_MS = 30_000;
+const LIVE_KEYBOARD_REPOST_MIN_PERCENT_DELTA = 5;
+const LIVE_KEYBOARD_REPOST_MAX_SCOPES = 200;
+const TYPING_INDICATOR_MIN_INTERVAL_MS = 5_000;
+const lastTypingIndicatorByScope = new Map<string, number>();
+
+/** Records a repost baseline, evicting the oldest scope when the map grows. */
+function trackLiveKeyboardRepost(scopeKey: string, at: number, percent: number): void {
+  liveKeyboardRepostByScope.set(scopeKey, { at, percent });
+  while (liveKeyboardRepostByScope.size > LIVE_KEYBOARD_REPOST_MAX_SCOPES) {
+    const oldest = liveKeyboardRepostByScope.keys().next();
+    if (oldest.done) {
+      break;
+    }
+    liveKeyboardRepostByScope.delete(oldest.value);
+  }
+}
+
+/**
+ * Reposts the reply keyboard mid-run so its context button stops lagging a
+ * full turn behind. Reply keyboards cannot be edited in place: Telegram only
+ * swaps them when a new message carries reply_markup, and stream edits never
+ * do. To avoid spamming the topic, reposts happen only while a live stream
+ * message is on screen, at most every 30s, and only once the displayed
+ * percent moved by at least 5 points (identical markups are also skipped by
+ * the manager fingerprint).
+ */
+async function refreshLiveKeyboardProgress(sessionId: string): Promise<void> {
+  const target = getTargetBySessionId(sessionId);
+  if (!target || !botInstance) {
+    return;
+  }
+
+  if (!keyboardManager.isInitialized(target.scopeKey)) {
+    return;
+  }
+
+  if (liveStream.getLiveMessageId(sessionId) === null) {
+    return;
+  }
+
+  const contextInfo = contextStateManager.get(target.scopeKey);
+  if (!contextInfo || contextInfo.tokensLimit <= 0) {
+    return;
+  }
+
+  const percent = Math.round((contextInfo.tokensUsed / contextInfo.tokensLimit) * 100);
+  const now = Date.now();
+  const last = liveKeyboardRepostByScope.get(target.scopeKey);
+  if (last && now - last.at < LIVE_KEYBOARD_REPOST_MIN_INTERVAL_MS) {
+    return;
+  }
+  if (last && Math.abs(percent - last.percent) < LIVE_KEYBOARD_REPOST_MIN_PERCENT_DELTA) {
+    return;
+  }
+  trackLiveKeyboardRepost(target.scopeKey, now, percent);
+
+  try {
+    await keyboardManager.sendKeyboardUpdate(target.chatId, target.scopeKey);
+  } catch (error) {
+    logger.debug("[Bot] Failed to repost live keyboard", { sessionId, error });
+  }
+}
+
+/**
+ * Records the keyboard state delivered with the final message, so the next
+ * turn does not repost an identical keyboard on its first tokens event.
+ */
+function seedLiveKeyboardRepostBaseline(scopeKey: string): void {
+  const contextInfo = contextStateManager.get(scopeKey);
+  if (!contextInfo || contextInfo.tokensLimit <= 0) {
+    return;
+  }
+
+  trackLiveKeyboardRepost(
+    scopeKey,
+    Date.now(),
+    Math.round((contextInfo.tokensUsed / contextInfo.tokensLimit) * 100),
+  );
+}
+
 async function sendSessionTextMessage(
   sessionId: string,
   text: string,
   format: "raw" | "markdown_v2" = "raw",
-  includeKeyboard: boolean = false,
+  _includeKeyboard: boolean = false,
 ): Promise<number | null> {
   if (!botInstance) {
     return null;
@@ -789,14 +1228,15 @@ async function sendSessionTextMessage(
     return null;
   }
 
+  // NOTE: never attach the reply keyboard here. Telegram does not allow
+  // editing the text of a message sent with a reply keyboard ("message
+  // can't be edited"), which would kill the whole live stream. The keyboard
+  // refreshes through final messages and silent reposts instead.
   const message = await sendBotText({
     api: activeBot.api,
     chatId: target.chatId,
     text,
     options: {
-      ...(includeKeyboard && keyboardManager.isInitialized(target.scopeKey)
-        ? { reply_markup: keyboardManager.getKeyboard(target.scopeKey) }
-        : {}),
       disable_notification: true,
       ...getThreadSendOptions(target.threadId),
     },
@@ -881,51 +1321,61 @@ async function sendSessionCodeBlockMessage(
     return false;
   }
 
-  const block = buildCodeBlockMessage(
+  // Long files go out as several code blocks so content stays readable
+  // inline; documents are only a last resort for binary content.
+  const blocks = buildCodeBlockMessages(
     fileData.caption,
     fileData.filename,
     fileData.buffer.toString("utf8"),
   );
-  if (!block) {
+  if (blocks.length === 0) {
+    return false;
+  }
+
+  // Too many blocks would flood the topic: fall back to the .txt document
+  // so very long files stay one message. Short files always render inline.
+  if (blocks.length > MAX_CODE_BLOCK_MESSAGES) {
+    logger.debug(
+      `[Bot] File too long for code blocks (${blocks.length} messages): ${fileData.filename}, falling back to document`,
+    );
     return false;
   }
 
   const activeBot = botInstance;
-  const codeEntity = {
-    type: "pre" as const,
-    offset: block.codeOffset,
-    length: block.codeLength,
-    ...(block.language ? { language: block.language } : {}),
-  };
+  for (const block of blocks) {
+    const codeEntity = {
+      type: "pre" as const,
+      offset: block.codeOffset,
+      length: block.codeLength,
+      ...(block.language ? { language: block.language } : {}),
+    };
 
-  while (true) {
     try {
-      await activeBot.api.sendMessage(target.chatId, block.text, {
-        entities: [codeEntity],
-        disable_notification: true,
-        ...getThreadSendOptions(target.threadId),
-      });
-      logger.debug(
-        `[Bot] Sent code block: ${fileData.filename} (${block.codeLength} chars, session=${sessionId})`,
+      // Bounded 429 retries; any other send error falls back to document.
+      await runWithRateLimitRetries(`codeblock:${fileData.filename}`, () =>
+        activeBot.api.sendMessage(target.chatId, block.text, {
+          entities: [codeEntity],
+          disable_notification: true,
+          ...getThreadSendOptions(target.threadId),
+        }),
       );
-      return true;
     } catch (error) {
-      const retryAfterMs = getTelegramRetryAfterMs(error);
-      if (!retryAfterMs) {
-        logger.debug(
-          "[Bot] Code block send failed; falling back to document",
-          { sessionId, filename: fileData.filename, error },
-        );
-        return false;
+      if (error instanceof RateLimitExceededError) {
+        throw error;
       }
-
-      logger.info(
-        `[Bot] Telegram rate limit; retrying code block in ${retryAfterMs}ms`,
-        { sessionId, filename: fileData.filename },
-      );
-      await new Promise((resolve) => setTimeout(resolve, retryAfterMs + 100));
+      logger.debug("[Bot] Code block send failed; falling back to document", {
+        sessionId,
+        filename: fileData.filename,
+        error,
+      });
+      return false;
     }
   }
+
+  logger.debug(
+    `[Bot] Sent code block: ${fileData.filename} (${blocks.length} message(s), session=${sessionId})`,
+  );
+  return true;
 }
 
 async function sendSessionDocumentMessage(
@@ -946,35 +1396,38 @@ async function sendSessionDocumentMessage(
     return;
   }
 
+  // Bot API limits: bots cannot send files larger than 50MB, and captions
+  // are cut at 1024 chars. Fail fast with a clear log instead of a raw 400.
+  const TELEGRAM_BOT_MAX_FILE_BYTES = 50 * 1024 * 1024;
+  const TELEGRAM_CAPTION_LIMIT = 1024;
+  if (fileData.buffer.length > TELEGRAM_BOT_MAX_FILE_BYTES) {
+    logger.warn("[Bot] Skipping document send: file exceeds Telegram 50MB bot limit", {
+      sessionId,
+      filename: fileData.filename,
+      bytes: fileData.buffer.length,
+    });
+    return;
+  }
+  const caption =
+    fileData.caption.length > TELEGRAM_CAPTION_LIMIT
+      ? `${fileData.caption.slice(0, TELEGRAM_CAPTION_LIMIT - 1)}…`
+      : fileData.caption;
+
   logger.debug(
     `[Bot] Sending code file: ${fileData.filename} (${fileData.buffer.length} bytes, session=${sessionId})`,
   );
 
-  while (true) {
-    try {
-      await activeBot.api.sendDocument(
-        target.chatId,
-        new InputFile(fileData.buffer, fileData.filename),
-        {
-          caption: fileData.caption,
-          disable_notification: true,
-          ...getThreadSendOptions(target.threadId),
-        },
-      );
-      return;
-    } catch (error) {
-      const retryAfterMs = getTelegramRetryAfterMs(error);
-      if (!retryAfterMs) {
-        throw error;
-      }
-
-      logger.info(`[Bot] Telegram rate limit; retrying document send in ${retryAfterMs}ms`, {
-        sessionId,
-        filename: fileData.filename,
-      });
-      await new Promise((resolve) => setTimeout(resolve, retryAfterMs + 100));
-    }
-  }
+  await runWithRateLimitRetries(`document:${fileData.filename}`, () =>
+    activeBot.api.sendDocument(
+      target.chatId,
+      new InputFile(fileData.buffer, fileData.filename),
+      {
+        caption,
+        disable_notification: true,
+        ...getThreadSendOptions(target.threadId),
+      },
+    ),
+  );
 }
 
 const liveStream = new LiveStream({
@@ -1073,35 +1526,15 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
     return;
   }
 
-  // Background session tracker: processes SSE events from sessions running in the background
-  // (e.g., started from PC) and delivers notifications to Telegram.
-  // Gated by TRACK_BACKGROUND_SESSIONS; without a single-chat destination the
-  // delivery resolves to null, so the tracker stays inert until topics-aware
-  // routing lands.
-  const backgroundTracker = config.bot.trackBackgroundSessions
-    ? new BackgroundSessionTracker()
-    : null;
-  backgroundTracker?.setDirectory(directory);
-  if (backgroundTracker) {
-    backgroundTracker.setOnNotification(
-      createBackgroundNoticeDelivery(
-        {
-          getDestination: () => {
-            if (!botInstance || !chatIdInstance) {
-              return null;
-            }
-            return { api: botInstance.api, chatId: chatIdInstance };
-          },
-        },
-        new TelegramEventDelivery(),
-      ),
-    );
-  }
+  // Background session tracker is shared (see getSharedBackgroundTracker):
+  // the SSE stream is global, so one tracker replaces the old
+  // per-subscription clones that notified N times.
+  getSharedBackgroundTracker();
 
   summaryAggregator.setOnCleared(() => {
     sessionOutputCoordinator.clearAll();
     void liveStream.clearAll("summary_aggregator_clear");
-    backgroundTracker?.clear();
+    sharedBackgroundTracker?.clear();
   });
 
   summaryAggregator.setOnMessageUpdated((sessionId, messageId, messageText) => {
@@ -1123,15 +1556,46 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
   });
 
   summaryAggregator.setOnTool(async (toolInfo) => {
+    const toolTarget = getTargetBySessionId(toolInfo.sessionId);
+    const toolScopeKey = toolTarget?.scopeKey;
     sessionOutputCoordinator.dispatch({
       kind: "tool",
       sessionId: toolInfo.sessionId,
       toolInfo,
       visibleToUser:
-        !config.bot.hideToolCallMessages &&
+        isDisplayVisible(
+          DISPLAY_FLAG.TOOL_CALLS,
+          toolScopeKey,
+        ) &&
         !FILE_MUTATION_TOOLS.has(toolInfo.tool) &&
         toolInfo.tool !== "task",
     });
+    if (toolTarget && botInstance) {
+      const input = toolInfo.input as { command?: unknown; code?: unknown } | undefined;
+      const commandPreview =
+        typeof input?.command === "string"
+          ? input.command
+          : typeof input?.code === "string"
+            ? input.code
+            : toolInfo.tool;
+      noteToolBackgroundState({
+        api: botInstance.api,
+        sessionId: toolInfo.sessionId,
+        callId: toolInfo.callId,
+        tool: toolInfo.tool,
+        status:
+          "status" in toolInfo.state
+            ? (toolInfo.state.status as string | undefined)
+            : undefined,
+        commandPreview,
+        chatId: toolTarget.chatId,
+        threadId: toolTarget.threadId,
+      });
+    } else if (toolInfo.tool === "bash" || toolInfo.tool === "execute") {
+      logger.debug("[BackgroundOffer] Skipping offer: no topic target for session", {
+        sessionId: toolInfo.sessionId,
+      });
+    }
   });
 
   summaryAggregator.setOnSubagent((sessionId, subagents) => {
@@ -1139,7 +1603,10 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
       kind: "subagent",
       sessionId,
       subagents,
-      visibleToUser: !config.bot.hideToolCallMessages,
+      visibleToUser: isDisplayVisible(
+        DISPLAY_FLAG.TOOL_CALLS,
+        getTargetBySessionId(sessionId)?.scopeKey,
+      ),
     });
   });
 
@@ -1157,6 +1624,33 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
       sessionId,
       questions,
       requestId: requestID,
+    });
+  });
+
+  summaryAggregator.setOnQuestionSettled((sessionId, requestID, outcome) => {
+    if (!sessionId || !requestID || !botInstance) {
+      return;
+    }
+
+    const target = getTargetBySessionId(sessionId);
+    if (!target) {
+      return;
+    }
+
+    const activeBot = botInstance;
+    safeBackgroundTask({
+      taskName: "question.settled_from_event",
+      task: () =>
+        closeQuestionSettledOutside(
+          activeBot.api,
+          target.chatId,
+          target.scopeKey,
+          requestID,
+          outcome,
+        ),
+      onError: (error) => {
+        logger.debug("[Bot] Failed to settle question poll from event:", error);
+      },
     });
   });
 
@@ -1186,6 +1680,60 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
     });
   });
 
+  summaryAggregator.setOnPermissionReplied((sessionId, requestID) => {
+    if (!requestID || !botInstance) {
+      return;
+    }
+
+    permissionManager.markSettled(requestID);
+    cancelScheduledPermissionPoll(requestID);
+    const activeBot = botInstance;
+    safeBackgroundTask({
+      taskName: "permission.settled_from_event",
+      task: async () => {
+        let matched = false;
+        for (const scopeKey of permissionManager.getActiveScopeKeys()) {
+          const match = permissionManager.getRequestByID(requestID, scopeKey);
+          if (!match) {
+            continue;
+          }
+
+          matched = true;
+          const target = getTargetBySessionId(match.request.sessionID);
+          if (!target) {
+            logger.warn(
+              `[Bot] Dropping permission state without a topic target: requestID=${requestID}, session=${match.request.sessionID}`,
+            );
+          } else {
+            logger.info(
+              `[Bot] Marking Telegram permission poll settled outside: requestID=${requestID}, session=${sessionId ?? match.request.sessionID}`,
+            );
+            await activeBot.api
+              .editMessageText(
+                target.chatId,
+                match.messageId,
+                buildPermissionOutcomeText(match.request, "settled_outside"),
+              )
+              .catch(() => {});
+          }
+
+          permissionManager.removeByMessageId(match.messageId, scopeKey);
+          syncPermissionInteractionState(scopeKey, {});
+          return;
+        }
+
+        if (!matched) {
+          logger.debug(
+            `[Bot] Permission settled outside has no local poll: requestID=${requestID}, session=${sessionId ?? "unknown"}`,
+          );
+        }
+      },
+      onError: (error) => {
+        logger.debug("[Bot] Failed to settle permission poll from event:", error);
+      },
+    });
+  });
+
   summaryAggregator.setOnTypingIndicator((sessionId) => {
     if (!botInstance) {
       return;
@@ -1194,6 +1742,21 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
     const target = getTargetBySessionId(sessionId);
     if (!target) {
       return;
+    }
+
+    // Typing events fire per SSE event; throttle per scope so a busy turn
+    // cannot flood Telegram (sendChatAction bypasses the rate-limiter queue).
+    const now = Date.now();
+    const lastTypingAt = lastTypingIndicatorByScope.get(target.scopeKey) ?? 0;
+    if (now - lastTypingAt < TYPING_INDICATOR_MIN_INTERVAL_MS) {
+      return;
+    }
+    lastTypingIndicatorByScope.set(target.scopeKey, now);
+    if (lastTypingIndicatorByScope.size > LIVE_KEYBOARD_REPOST_MAX_SCOPES) {
+      const oldest = lastTypingIndicatorByScope.keys().next();
+      if (!oldest.done) {
+        lastTypingIndicatorByScope.delete(oldest.value);
+      }
     }
 
     void botInstance.api
@@ -1216,23 +1779,60 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
     sessionOutputCoordinator.dispatch({
       kind: "thinking",
       sessionId,
-      visibleToUser: !config.bot.hideThinkingMessages,
+      visibleToUser: isDisplayVisible(
+        DISPLAY_FLAG.THINKING,
+        getTargetBySessionId(sessionId)?.scopeKey,
+      ),
     });
   });
 
   summaryAggregator.setOnTokens(async (sessionId, tokens) => {
     const target = getTargetBySessionId(sessionId);
     if (!target) {
+      logger.debug("[Bot] Ignoring tokens for session without a topic target", { sessionId });
       return;
     }
 
     try {
       logger.debug(`[Bot] Received tokens: input=${tokens.input}, output=${tokens.output}`);
 
+      if (tokens.cost > 0) {
+        recordSessionCost(sessionId, tokens.cost);
+        const day = todayKey();
+        const dayTotal = addDailyCost(day, tokens.cost);
+        if (shouldAlertBudget(day, dayTotal, config.cost.budgetAlertUsd)) {
+          await botInstance?.api
+            .sendMessage(
+              target.chatId,
+              t("cost.budget_alert", {
+                today: formatUsd(dayTotal),
+                budget: formatUsd(config.cost.budgetAlertUsd),
+              }),
+              getThreadSendOptions(target.threadId),
+            )
+            .catch(() => {});
+        }
+      }
+
       // Update keyboardManager SYNCHRONOUSLY before any await
       // This ensures keyboard has correct context when onComplete sends the reply
       const contextSize = tokens.input + tokens.cacheRead;
       let contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
+      // Sanity gate: the live window can never exceed the model limit.
+      // Anything bigger is cumulative accounting leaking into the display.
+      // Refresh first: the cached limit may be stale after a model switch.
+      if (contextLimit > 0 && contextSize > contextLimit) {
+        await pinnedMessageManager.refreshContextLimit(target.scopeKey).catch(() => {});
+        contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
+        if (contextLimit > 0 && contextSize > contextLimit) {
+          logger.warn("[Bot] Ignoring implausible context size", {
+            sessionId,
+            contextSize,
+            contextLimit,
+          });
+          return;
+        }
+      }
       if (contextLimit > 0) {
         keyboardManager.updateContext(contextSize, contextLimit, target.scopeKey);
       }
@@ -1247,6 +1847,10 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
           }
         }
       }
+
+      // Live stream edits never carry reply_markup, so without this the visible
+      // keyboard would freeze at the turn-start numbers until final delivery.
+      await refreshLiveKeyboardProgress(sessionId);
     } catch (err) {
       logger.error("[Bot] Error updating pinned message with tokens:", err);
     }
@@ -1284,6 +1888,7 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
   });
 
   summaryAggregator.setOnSessionIdle((sessionId) => {
+    clearSessionBackgroundOffers(sessionId);
     sessionOutputCoordinator.dispatch({
       kind: "session_idle",
       sessionId,
@@ -1327,58 +1932,11 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
     pinnedMessageManager.addFileChange(change, target.scopeKey);
   });
 
-  let eventCallback = eventCallbackByDirectory.get(directory);
-
-  if (!eventCallback) {
-    eventCallback = (event: OpenCodeEvent): void => {
-      if (event.type === "session.created" || event.type === "session.updated") {
-        const info = (
-          event.properties as { info?: { directory?: string; time?: { updated?: number } } }
-        ).info;
-
-        if (info?.directory) {
-          safeBackgroundTask({
-            taskName: `session.cache.${event.type}`,
-            task: () => ingestSessionInfoForCache(info),
-          });
-        }
-      }
-
-      mirrorPcUserMessageEvent(event);
-
-      const sessionTitleUpdate = extractSessionTitleUpdate(event);
-      if (sessionTitleUpdate && botInstance) {
-        const activeBot = botInstance;
-        safeBackgroundTask({
-          taskName: "topic.title.sync_from_event",
-          task: () =>
-            syncTopicTitleForSession(
-              activeBot.api,
-              sessionTitleUpdate.sessionId,
-              sessionTitleUpdate.title,
-            ),
-          onError: (syncError) => {
-            logger.debug("[Bot] Failed to sync topic title from session.updated", {
-              sessionId: sessionTitleUpdate.sessionId,
-              syncError,
-            });
-          },
-        });
-      }
-
-      // Process event through background session tracker for PC->Telegram mirroring
-      const currentSessionId = getCurrentSession()?.id ?? null;
-      backgroundTracker?.processEvent(
-        event as unknown as { type: string; properties?: unknown },
-        currentSessionId,
-      );
-
-      summaryAggregator.processEvent(event);
-    };
-
-    eventCallbackByDirectory.set(directory, eventCallback);
-    logger.info(`[Bot] Subscribing to OpenCode events for project: ${directory}`);
-  }
+  // Single shared consumer: the SSE stream is global, so every directory
+  // registers the same callback and each event is processed exactly once.
+  const eventCallback = getSharedEventCallback();
+  eventCallbackByDirectory.set(directory, eventCallback);
+  logger.info(`[Bot] Subscribing to OpenCode events for project: ${directory}`);
 
   subscribeToEvents(directory, eventCallback).catch((err) => {
     logger.error("Failed to subscribe to events:", err);
@@ -1396,7 +1954,8 @@ export async function subscribeToKnownProjects(): Promise<void> {
 
     // Keep topic-bound sessions tracked across service restarts so their
     // events reach Telegram without waiting for the next user action.
-    if (binding.sessionId) {
+    // Ephemeral subagent transcripts are tracked as children, never roots.
+    if (binding.sessionId && !binding.ephemeral) {
       summaryAggregator.setSession(binding.sessionId);
     }
   }
@@ -1465,7 +2024,10 @@ export function createBot(): Bot<Context> {
 
   // Heartbeat for diagnostics: verify the event loop is not blocked
   let heartbeatCounter = 0;
-  setInterval(() => {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+  }
+  heartbeatTimer = setInterval(() => {
     heartbeatCounter++;
     if (heartbeatCounter % 6 === 0) {
       // Log every 30 seconds (5 sec * 6)
@@ -1579,6 +2141,17 @@ export function createBot(): Bot<Context> {
   bot.command(BOT_COMMAND.HELP, helpCommand);
   bot.command(BOT_COMMAND.STATUS, statusCommand);
   bot.command(BOT_COMMAND.REFRESH, handleRefreshCommand);
+  bot.command(BOT_COMMAND.DISPLAY, displayCommand);
+  bot.command(BOT_COMMAND.QUEUE, queueCommand);
+  bot.command(BOT_COMMAND.TRUST, trustCommand);
+  bot.command(BOT_COMMAND.RETRY, createRetryCommand({ bot, ensureEventSubscription }));
+  bot.command(BOT_COMMAND.DIFF, diffCommand);
+  bot.command(BOT_COMMAND.COMMIT, commitCommand);
+  bot.command(BOT_COMMAND.COST, costCommand);
+  bot.command(BOT_COMMAND.CLOSE, closeCommand);
+  bot.command(BOT_COMMAND.FORK, createForkCommand({ ensureEventSubscription }));
+  bot.command(BOT_COMMAND.SHARE, shareCommand);
+  bot.command(BOT_COMMAND.SAVED, createSavedCommand({ bot, ensureEventSubscription }));
   bot.command(BOT_COMMAND.LAST, lastCommand);
   bot.command(BOT_COMMAND.TTS, ttsCommand);
   bot.command(BOT_COMMAND.OPENCODE_START, opencodeStartCommand);
@@ -1609,13 +2182,34 @@ export function createBot(): Bot<Context> {
 
     try {
       const handledInlineCancel = await handleInlineMenuCancel(ctx);
+      const handledQuestion = await handleQuestionCallback(ctx);
+      const handledPermission = await handlePermissionCallback(ctx);
+      const handledDisplay = await handleDisplayCallback(ctx);
+      const handledToolBackground = await handleToolBackgroundCallback(ctx);
+      const callbackScopeKey = getScopeFromContext(ctx)?.key;
+      if (
+        !handledQuestion &&
+        !handledPermission &&
+        !handledToolBackground &&
+        callbackScopeKey &&
+        isEphemeralTopicScope(callbackScopeKey)
+      ) {
+        // Transcript-only subagent topics: polls and display stay usable,
+        // everything else that would mutate scope state or create sessions
+        // is rejected with a toast instead of running.
+        await ctx.answerCallbackQuery({ text: t("subagent.topic_readonly") }).catch(() => {});
+        return;
+      }
+      const handledQueuedCancel = await handleQueuedPromptCancel(ctx);
+      const handledQueuedFront = await handleQueuedPromptFront(ctx);
+      const handledQueuedSteer = await handleQueuedPromptSteer(ctx);
+      const handledQueue = await handleQueueCallback(ctx);
+      const handledTrust = await handleTrustCallback(ctx);
       const handledSession = await handleSessionSelect(ctx);
       const handledRecent = await handleRecentSelect(ctx);
       const handledProject = await handleProjectSelect(ctx);
       const handledOpen = await handleOpenCallback(ctx);
       const handledTaskList = await handleTaskListCallback(ctx);
-      const handledQuestion = await handleQuestionCallback(ctx);
-      const handledPermission = await handlePermissionCallback(ctx);
       const handledRefreshCommand = await handleRefreshCommand(ctx);
       const handledAgent = await handleAgentSelect(ctx);
       const handledModel = await handleModelSelect(ctx);
@@ -1631,11 +2225,18 @@ export function createBot(): Bot<Context> {
       });
 
       logger.debug(
-        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, session=${handledSession}, recent=${handledRecent}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
+        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, queuedCancel=${handledQueuedCancel}, queuedFront=${handledQueuedFront}, queuedSteer=${handledQueuedSteer}, queue=${handledQueue}, trust=${handledTrust}, toolBackground=${handledToolBackground}, display=${handledDisplay}, session=${handledSession}, recent=${handledRecent}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
       );
 
       if (
         !handledInlineCancel &&
+        !handledQueuedCancel &&
+        !handledQueuedFront &&
+        !handledQueuedSteer &&
+        !handledQueue &&
+        !handledTrust &&
+        !handledToolBackground &&
+        !handledDisplay &&
         !handledSession &&
         !handledRecent &&
         !handledProject &&
@@ -1654,7 +2255,7 @@ export function createBot(): Bot<Context> {
         !handledSkills
       ) {
         logger.debug("Unknown callback query:", ctx.callbackQuery?.data);
-        await ctx.answerCallbackQuery({ text: t("callback.unknown_command") });
+        await ctx.answerCallbackQuery({ text: t("callback.unknown_command") }).catch(() => {});
       }
     } catch (err) {
       logger.error("[Bot] Error handling callback:", err);
@@ -1799,6 +2400,10 @@ export function createBot(): Bot<Context> {
       return;
     }
 
+    if (await replyEphemeralTopicReadonly(ctx)) {
+      return;
+    }
+
     await handleVoiceMessage(ctx, voicePromptDeps);
   });
 
@@ -1824,6 +2429,10 @@ export function createBot(): Bot<Context> {
       return;
     }
 
+    if (await replyEphemeralTopicReadonly(ctx)) {
+      return;
+    }
+
     await handleVoiceMessage(ctx, voicePromptDeps);
   });
 
@@ -1833,6 +2442,10 @@ export function createBot(): Bot<Context> {
 
     if (isGroupGeneralControlScope(ctx)) {
       await replyGeneralControlPromptRestriction(ctx);
+      return;
+    }
+
+    if (await replyEphemeralTopicReadonly(ctx)) {
       return;
     }
 
@@ -1908,6 +2521,10 @@ export function createBot(): Bot<Context> {
       return;
     }
 
+    if (await replyEphemeralTopicReadonly(ctx)) {
+      return;
+    }
+
     const deps = { bot, ensureEventSubscription, prepareSessionForPrompt };
     await handleDocumentMessage(ctx, deps);
   });
@@ -1942,6 +2559,12 @@ export function createBot(): Bot<Context> {
       return;
     }
 
+    // Transcript-only subagent topics reject new prompts (poll answers
+    // were already handled above).
+    if (await replyEphemeralTopicReadonly(ctx)) {
+      return;
+    }
+
     if (taskCreationManager.isActive(scopeKey) && isReplyKeyboardControlText(text)) {
       logger.debug("[Bot] Ignoring reply keyboard control text during task setup");
       return;
@@ -1955,6 +2578,11 @@ export function createBot(): Bot<Context> {
 
     const handledSkillArgs = await handleSkillTextArguments(ctx, promptDeps);
     if (handledSkillArgs) {
+      return;
+    }
+
+    const handledModelSearch = await handleModelSearchTextAnswer(ctx);
+    if (handledModelSearch) {
       return;
     }
 
@@ -1989,7 +2617,15 @@ export function cleanupBotRuntime(reason: string): void {
   summaryAggregator.clear();
   sessionOutputCoordinator.clearAll();
   void liveStream.clearAll(reason);
+  stopEventListening();
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
   eventCallbackByDirectory.clear();
+  sharedEventCallback = null;
+  sharedBackgroundTracker = null;
+  clearAllBackgroundOffers();
   initializedCommandChats.clear();
   renamedGeneralTopicChats.clear();
   botInstance = null;

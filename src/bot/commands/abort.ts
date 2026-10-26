@@ -9,7 +9,8 @@ import { summaryAggregator } from "../../summary/aggregator.js";
 import { updateTopicBindingStatusBySessionId } from "../../topic/manager.js";
 import { t } from "../../i18n/index.js";
 import { logger } from "../../utils/logger.js";
-import { getScopeKeyFromContext } from "../scope.js";
+import { getScopeFromContext, getScopeKeyFromContext, getThreadSendOptions } from "../scope.js";
+import { clearPromptResponseMode } from "../handlers/prompt.js";
 
 type SessionState = "idle" | "busy" | "not-found";
 
@@ -74,6 +75,7 @@ export async function abortCurrentOperation(
   options: AbortCurrentOperationOptions = {},
 ): Promise<void> {
   const scopeKey = getScopeKeyFromContext(ctx);
+  const threadOptions = getThreadSendOptions(getScopeFromContext(ctx)?.threadId ?? null);
   const currentSession = getCurrentSession(scopeKey);
   const activeInteraction = interactionManager.getSnapshot(scopeKey);
 
@@ -82,15 +84,19 @@ export async function abortCurrentOperation(
     if (options.notifyUser !== false) {
       await ctx.reply(
         activeInteraction ? t("stop.cancelled_interaction") : t("stop.no_active_session"),
+        threadOptions,
       );
     }
     return;
   }
 
   stopLocalStreaming(scopeKey, currentSession.id);
+  clearPromptResponseMode(currentSession.id);
 
   const waitingMessage =
-    options.notifyUser === false ? null : await ctx.reply(t("stop.in_progress"));
+    options.notifyUser === false
+      ? null
+      : await ctx.reply(t("stop.in_progress"), threadOptions);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 5000);
@@ -153,6 +159,11 @@ export async function abortCurrentOperation(
       return;
     }
 
+    if (!ctx.chat || !waitingMessage) {
+      logger.error("[Abort] Cannot report abort failure: no chat context", { error });
+      return;
+    }
+
     if (error instanceof Error && error.name === "AbortError") {
       await ctx.api.editMessageText(
         ctx.chat!.id,
@@ -175,6 +186,9 @@ export async function abortCommand(ctx: CommandContext<Context>) {
     await abortCurrentOperation(ctx);
   } catch (error) {
     logger.error("[Abort] Unexpected error:", error);
-    await ctx.reply(t("stop.error"));
+    await ctx.reply(
+      t("stop.error"),
+      getThreadSendOptions(getScopeFromContext(ctx)?.threadId ?? null),
+    );
   }
 }

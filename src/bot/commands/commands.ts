@@ -687,7 +687,10 @@ export async function handleCommandTextArguments(
 
   const argumentsText = text.trim();
   if (!argumentsText) {
-    await ctx.reply(t("commands.arguments_empty"));
+    await ctx.reply(
+      t("commands.arguments_empty"),
+      getThreadSendOptions(ctx.message?.message_thread_id ?? null),
+    );
     return true;
   }
 

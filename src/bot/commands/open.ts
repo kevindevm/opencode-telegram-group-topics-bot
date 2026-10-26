@@ -243,6 +243,7 @@ async function selectDirectory(ctx: Context, directory: string): Promise<void> {
 }
 
 export async function openCommand(ctx: CommandContext<Context>): Promise<void> {
+  const threadOptions = getThreadSendOptions(getScopeFromContext(ctx)?.threadId ?? null);
   try {
     const scopeKey = getScopeKeyFromContext(ctx);
     const lockState = getProjectLockState(ctx, scopeKey);
@@ -253,7 +254,7 @@ export async function openCommand(ctx: CommandContext<Context>): Promise<void> {
               project: lockState.projectName ?? t("pinned.unknown"),
             })
           : t(BOT_I18N_KEY.PROJECTS_LOCKED_TOPIC_SCOPE);
-      await ctx.reply(message, getThreadSendOptions(getScopeFromContext(ctx)?.threadId ?? null));
+      await ctx.reply(message, threadOptions);
       return;
     }
 
@@ -263,7 +264,7 @@ export async function openCommand(ctx: CommandContext<Context>): Promise<void> {
     if (roots.length === 1) {
       const view = await renderBrowseView(roots[0]);
       if ("error" in view) {
-        await ctx.reply(t("open.scan_error", { error: view.error }));
+        await ctx.reply(t("open.scan_error", { error: view.error }), threadOptions);
         return;
       }
 
@@ -282,7 +283,7 @@ export async function openCommand(ctx: CommandContext<Context>): Promise<void> {
     });
   } catch (error) {
     logger.error("[Bot] Error opening directory browser:", error);
-    await ctx.reply(t("open.open_error"));
+    await ctx.reply(t("open.open_error"), threadOptions);
   }
 }
 
@@ -306,7 +307,7 @@ export async function handleOpenCallback(ctx: Context): Promise<boolean> {
     const navPath = decodePathFromCallback(CALLBACK_NAV_PREFIX, data);
     if (navPath !== null) {
       if (!isWithinAllowedRoot(navPath)) {
-        await ctx.answerCallbackQuery({ text: t("open.access_denied") });
+        await ctx.answerCallbackQuery({ text: t("open.access_denied") }).catch(() => {});
         return true;
       }
 
@@ -317,7 +318,7 @@ export async function handleOpenCallback(ctx: Context): Promise<boolean> {
     const pageInfo = decodePaginationCallback(data);
     if (pageInfo !== null) {
       if (!isWithinAllowedRoot(pageInfo.path)) {
-        await ctx.answerCallbackQuery({ text: t("open.access_denied") });
+        await ctx.answerCallbackQuery({ text: t("open.access_denied") }).catch(() => {});
         return true;
       }
 
@@ -328,7 +329,7 @@ export async function handleOpenCallback(ctx: Context): Promise<boolean> {
     const selectPath = decodePathFromCallback(CALLBACK_SELECT_PREFIX, data);
     if (selectPath !== null) {
       if (!isWithinAllowedRoot(selectPath)) {
-        await ctx.answerCallbackQuery({ text: t("open.access_denied") });
+        await ctx.answerCallbackQuery({ text: t("open.access_denied") }).catch(() => {});
         return true;
       }
 
@@ -336,10 +337,14 @@ export async function handleOpenCallback(ctx: Context): Promise<boolean> {
       return true;
     }
 
-    return false;
+    // Known prefix but nothing decodes (e.g. the in-memory path index was
+    // lost on restart): tell the user to reopen the menu instead of the
+    // generic "unknown command" toast.
+    await ctx.answerCallbackQuery({ text: t("open.menu_expired") }).catch(() => {});
+    return true;
   } catch (error) {
     logger.error("[Bot] Error handling open callback:", error);
-    await ctx.answerCallbackQuery({ text: t("callback.processing_error") });
+    await ctx.answerCallbackQuery({ text: t("callback.processing_error") }).catch(() => {});
     return true;
   }
 }

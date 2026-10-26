@@ -10,8 +10,10 @@ import { processUserPrompt, type ProcessPromptDeps } from "./prompt.js";
 import type { FilePartInput } from "@opencode-ai/sdk/v2";
 import { logger } from "../../utils/logger.js";
 import { t } from "../../i18n/index.js";
+import { getThreadSendOptions } from "../scope.js";
 
 const TELEGRAM_DOWNLOAD_TIMEOUT_MS = 30_000;
+const TELEGRAM_DOWNLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const TELEGRAM_DOWNLOAD_MAX_REDIRECTS = 3;
 
 let telegramDownloadAgent: https.RequestOptions["agent"] | null | undefined;
@@ -68,9 +70,16 @@ async function downloadTelegramFileByUrl(url: string, redirectDepth: number = 0)
         }
 
         const chunks: Buffer[] = [];
+        let downloadedBytes = 0;
 
         response.on("data", (chunk: Buffer | string) => {
-          chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+          const piece = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+          downloadedBytes += piece.length;
+          if (downloadedBytes > TELEGRAM_DOWNLOAD_MAX_BYTES) {
+            response.destroy(new Error("Telegram file exceeds 20MB voice/audio limit"));
+            return;
+          }
+          chunks.push(piece);
         });
 
         response.on("end", () => {
@@ -181,21 +190,28 @@ export async function handleVoiceMessage(ctx: Context, deps: VoiceMessageDeps): 
     return;
   }
 
+  const chatId = ctx.chat?.id;
+  if (!chatId) {
+    logger.warn("[Voice] Received voice/audio message with no chat context");
+    return;
+  }
+
   // Check if STT is configured
+  const threadOptions = getThreadSendOptions(ctx.message?.message_thread_id ?? null);
   if (!sttConfigured()) {
-    await ctx.reply(t("stt.not_configured"));
+    await ctx.reply(t("stt.not_configured"), threadOptions);
     return;
   }
 
   // Send "recognizing..." status message (will be edited later)
-  const statusMessage = await ctx.reply(t("stt.recognizing"));
+  const statusMessage = await ctx.reply(t("stt.recognizing"), threadOptions);
 
   try {
     // Download the audio file from Telegram
     const fileData = await downloadFile(ctx, fileId);
     if (!fileData) {
       await ctx.api.editMessageText(
-        ctx.chat!.id,
+        chatId,
         statusMessage.message_id,
         t("stt.error", { error: "download failed" }),
       );
@@ -207,7 +223,7 @@ export async function handleVoiceMessage(ctx: Context, deps: VoiceMessageDeps): 
 
     const recognizedText = result.text.trim();
     if (!recognizedText) {
-      await ctx.api.editMessageText(ctx.chat!.id, statusMessage.message_id, t("stt.empty_result"));
+      await ctx.api.editMessageText(chatId, statusMessage.message_id, t("stt.empty_result"));
       return;
     }
 
@@ -216,7 +232,7 @@ export async function handleVoiceMessage(ctx: Context, deps: VoiceMessageDeps): 
     // we still send the recognized text to OpenCode as a prompt.
     try {
       await ctx.api.editMessageText(
-        ctx.chat!.id,
+        chatId,
         statusMessage.message_id,
         t("stt.recognized", { text: recognizedText }),
       );
@@ -244,13 +260,15 @@ export async function handleVoiceMessage(ctx: Context, deps: VoiceMessageDeps): 
 
     try {
       await ctx.api.editMessageText(
-        ctx.chat!.id,
+        chatId,
         statusMessage.message_id,
         t("stt.error", { error: errorMessage }),
       );
     } catch {
       // If we can't edit the status message, try sending a new one
-      await ctx.reply(t("stt.error", { error: errorMessage })).catch(() => {});
+      await ctx
+        .reply(t("stt.error", { error: errorMessage }), threadOptions)
+        .catch(() => {});
     }
   }
 }

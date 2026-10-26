@@ -257,6 +257,10 @@ describe("bot/commands/open", () => {
     expect(callbackData).toMatch(/open:nav:#\d+/);
 
     clearOpenPathIndex();
-    await expect(handleOpenCallback(createCallbackContext(callbackData))).resolves.toBe(false);
+    const staleCtx = createCallbackContext(callbackData);
+    await expect(handleOpenCallback(staleCtx as never)).resolves.toBe(true);
+    expect(staleCtx.answerCallbackQuery).toHaveBeenCalledWith({
+      text: t("open.menu_expired"),
+    });
   });
 });

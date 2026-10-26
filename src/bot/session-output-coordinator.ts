@@ -272,11 +272,15 @@ export class SessionOutputCoordinator {
     this.clearFinalDeliveryTimer(sessionId);
     this.pendingFinalDeliveries.delete(sessionId);
     this.activityVersions.delete(sessionId);
+    this.finalDeliveryAttempts.delete(sessionId);
   }
 
   clearSession(sessionId: string): void {
     this.cancelFinalDelivery(sessionId);
     this.pendingAssistantCompletions.delete(sessionId);
+    // Drop the delivery chain so post-clear work never waits behind a
+    // stale (possibly hung) task from before the reset.
+    this.sessionTasks.delete(sessionId);
   }
 
   clearAll(): void {
@@ -288,6 +292,7 @@ export class SessionOutputCoordinator {
     this.pendingFinalDeliveries.clear();
     this.pendingAssistantCompletions.clear();
     this.activityVersions.clear();
+    this.sessionTasks.clear();
   }
 
   private clearFinalDeliveryTimer(sessionId: string): void {
@@ -311,12 +316,30 @@ export class SessionOutputCoordinator {
       text: normalizedText,
       version: nextVersion,
     });
+    // Fresh content deserves a fresh retry budget.
+    this.finalDeliveryAttempts.delete(sessionId);
   }
+
+  private readonly finalDeliveryAttempts = new Map<string, number>();
+  private static readonly MAX_FINAL_DELIVERY_ATTEMPTS = 50;
 
   private async runFinalDelivery(sessionId: string): Promise<boolean> {
     const completionSnapshot = this.pendingAssistantCompletions.get(sessionId) ?? null;
-    const finalized = await this.onFinalizeSession(sessionId, completionSnapshot?.text ?? null);
+    let finalized: boolean;
+    try {
+      finalized = await this.onFinalizeSession(sessionId, completionSnapshot?.text ?? null);
+    } catch (error) {
+      if (!this.noteFinalDeliveryAttempt(sessionId, error)) {
+        return false;
+      }
+      logger.error("[Bot] Session final delivery failed; will retry", { sessionId }, error);
+      this.scheduleFinalDelivery(sessionId);
+      return false;
+    }
     if (!finalized) {
+      if (!this.noteFinalDeliveryAttempt(sessionId)) {
+        return false;
+      }
       this.scheduleFinalDelivery(sessionId);
       return false;
     }
@@ -328,11 +351,34 @@ export class SessionOutputCoordinator {
       return false;
     }
 
+    this.finalDeliveryAttempts.delete(sessionId);
     this.pendingFinalDeliveries.delete(sessionId);
     this.activityVersions.delete(sessionId);
     this.pendingAssistantCompletions.delete(sessionId);
     await this.onFinalDeliveryCommitted(sessionId);
     return true;
+  }
+
+  /**
+   * Counts consecutive failed delivery attempts so a permanently failing
+   * session (deleted topic, revoked token) does not retry forever. Returns
+   * false once the budget is exhausted; the pending delivery is dropped with
+   * a loud error instead of looping silently every settle interval.
+   */
+  private noteFinalDeliveryAttempt(sessionId: string, error?: unknown): boolean {
+    const attempts = (this.finalDeliveryAttempts.get(sessionId) ?? 0) + 1;
+    this.finalDeliveryAttempts.set(sessionId, attempts);
+    if (attempts < SessionOutputCoordinator.MAX_FINAL_DELIVERY_ATTEMPTS) {
+      return true;
+    }
+    logger.error(
+      `[Bot] Session final delivery failed ${attempts} times; giving up to avoid an endless retry loop`,
+      { sessionId, error },
+    );
+    this.finalDeliveryAttempts.delete(sessionId);
+    this.pendingFinalDeliveries.delete(sessionId);
+    this.pendingAssistantCompletions.delete(sessionId);
+    return false;
   }
 
   private shouldMarkActivity(action: SessionOutputAction): boolean {

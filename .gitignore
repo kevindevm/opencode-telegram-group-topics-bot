@@ -8,6 +8,18 @@ yarn-error.log*
 
 # Environment
 .env
+.env.*
+!.env.example
+
+# Logs and backups
+*.log
+*.bak
+*.orig
+*.pem
+*.key
+*.service
+backups/
+data/
 
 # OS
 .DS_Store

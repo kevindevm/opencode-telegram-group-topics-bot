@@ -102,10 +102,3 @@ export function createAgentKeyboard(currentAgent: string): Keyboard {
 
   return keyboard.resized().persistent();
 }
-
-/**
- * Remove Reply Keyboard (for cleanup)
- */
-export function removeKeyboard(): { remove_keyboard: true } {
-  return { remove_keyboard: true };
-}

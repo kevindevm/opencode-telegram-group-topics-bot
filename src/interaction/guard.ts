@@ -1,6 +1,7 @@
 import type { Context } from "grammy";
 import { interactionManager } from "./manager.js";
 import { getScopeKeyFromContext } from "../bot/scope.js";
+import { MODEL_SEARCH_CANCEL_CALLBACK } from "../bot/handlers/model.js";
 import type {
   BlockReason,
   ExpectedInput,
@@ -104,6 +105,15 @@ function isAllowedRenameCancelCallback(ctx: Context, state: InteractionState): b
   );
 }
 
+function isAllowedSearchCancelCallback(ctx: Context, state: InteractionState): boolean {
+  return (
+    state.kind === "custom" &&
+    state.expectedInput === "text" &&
+    state.metadata.flow === "model-search" &&
+    ctx.callbackQuery?.data === MODEL_SEARCH_CANCEL_CALLBACK
+  );
+}
+
 export function resolveInteractionGuardDecision(ctx: Context): GuardDecision {
   const scopeKey = getScopeKeyFromContext(ctx);
   const state = interactionManager.getSnapshot(scopeKey);
@@ -142,7 +152,10 @@ export function resolveInteractionGuardDecision(ctx: Context): GuardDecision {
     return createBlockDecision(inputType, state, "expected_text", command);
   }
 
-  if (inputType === "callback" && isAllowedRenameCancelCallback(ctx, state)) {
+  if (
+    inputType === "callback" &&
+    (isAllowedRenameCancelCallback(ctx, state) || isAllowedSearchCancelCallback(ctx, state))
+  ) {
     return createAllowDecision(inputType, state, command);
   }
 

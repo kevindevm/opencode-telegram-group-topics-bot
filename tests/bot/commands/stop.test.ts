@@ -78,7 +78,7 @@ describe("bot/commands/abort", () => {
 
     await abortCommand(ctx as never);
 
-    expect(replyMock).toHaveBeenCalledWith(t("stop.cancelled_interaction"));
+    expect(replyMock).toHaveBeenCalledWith(t("stop.cancelled_interaction"), {});
     expect(questionManager.isActive()).toBe(false);
     expect(permissionManager.isActive()).toBe(false);
     expect(renameManager.isWaitingForName()).toBe(false);
@@ -112,7 +112,7 @@ describe("bot/commands/abort", () => {
 
     await abortCommand(ctx as never);
 
-    expect(replyMock).toHaveBeenCalledWith(t("stop.cancelled_interaction"));
+    expect(replyMock).toHaveBeenCalledWith(t("stop.cancelled_interaction"), {});
     expect(taskCreationManager.isActive()).toBe(false);
     expect(interactionManager.getSnapshot()).toBeNull();
     expect(mocked.abortMock).not.toHaveBeenCalled();
@@ -148,7 +148,7 @@ describe("bot/commands/abort", () => {
 
     await abortCommand(ctx as never);
 
-    expect(replyMock).toHaveBeenCalledWith(t("stop.in_progress"));
+    expect(replyMock).toHaveBeenCalledWith(t("stop.in_progress"), {});
     expect(mocked.abortMock).toHaveBeenCalled();
     expect(editMessageTextMock).toHaveBeenCalledWith(777, 88, t("stop.success"));
 

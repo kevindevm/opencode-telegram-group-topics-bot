@@ -143,13 +143,26 @@ Model picker behavior:
 - [x] Interactive question and permission flows (buttons + custom text answers)
 - [x] Single-active interaction routing with contextual blocking and cleanup recovery
 - [x] Pinned status updates (session, project, model, context usage, changed files)
+- [x] Pinned dashboard always kept live: repainted on every completion, coalesced during long runs (flood-safe), recreated automatically if the message is lost, never resurrected after an explicit clear
 - [x] Session cost tracking in scoped pinned messages
 - [x] Model and agent selection from Telegram (favorites first, recent next, no duplicates)
 - [x] Context/variant controls from Telegram keyboard
 - [x] Scheduled tasks with dedicated per-project scheduled topics in forum groups
 - [x] Sending code blocks as files when needed
 - [x] Configurable batching of service messages (thinking + tool updates): recommended `>=2` sec for Telegram rate limits; `0` = immediate
+- [x] Prompt queue for busy sessions with per-message cancel, move-to-front, and interrupt-and-run; `/queue` to list and clear it
+- [x] Queued prompts survive bot restarts (persisted to settings, re-validated and auto-dispatched on startup)
+- [x] Trust levels per session (`/trust ask|edits|all`) to auto-answer permission popups
+- [x] Resend the last prompt (`/retry`, with optional corrected text)
+- [x] Review session changes (`/diff`) and commit them (`/commit <msg>`)
+- [x] Session and daily spend (`/cost`) with optional `BUDGET_ALERT_USD` warning
+- [x] Send a long-running bash command to the background from Telegram (⏪ button, `session.background` on V2)
+- [x] Close session topics (`/close`), clone sessions into new topics (`/fork`), export transcripts (`/share`)
+- [x] Scheduled task ops in `/tasklist`: pause/resume, run-now, last-run log with back navigation
+- [x] User-saved prompt shortcuts (`/saved add|run|list|del`)
 - [x] Configurable service message visibility via env flags (`HIDE_THINKING_MESSAGES`, `HIDE_TOOL_CALL_MESSAGES`)
+- [x] Runtime display toggles via `/display` (thinking, tool calls, tool files, code blocks, background notices, PC mirror, link previews); per-topic overrides persisted in `settings.json`
+- [x] Auto-start of a managed OpenCode server at bot startup when none is reachable (`OPENCODE_AUTO_START`, default true)
 - [x] Voice/audio transcription via Whisper-compatible APIs (OpenAI/Groq/Together and compatible providers)
 - [x] Optional global audio replies with `/tts` via OpenAI-compatible APIs
 - [x] Single-user security model (allowed Telegram user ID)

@@ -5,6 +5,8 @@ import { interactionManager } from "../../../src/interaction/manager.js";
 import {
   handleQuestionCallback,
   handleQuestionTextAnswer,
+  closeQuestionSettledOutside,
+  isDuplicateQuestionDelivery,
   showCurrentQuestion,
 } from "../../../src/bot/handlers/question.js";
 import type { Question } from "../../../src/question/types.js";
@@ -279,5 +281,112 @@ describe("bot/handlers/question", () => {
       { message_thread_id: 777 },
     );
     expect(questionManager.isActive(topicScope)).toBe(false);
+  });
+});
+
+describe("isDuplicateQuestionDelivery", () => {
+  const scopeKey = "dup-scope";
+
+  beforeEach(() => {
+    questionManager.clear(scopeKey);
+  });
+
+  it("returns false without an active poll", () => {
+    expect(isDuplicateQuestionDelivery(scopeKey, "frm-1")).toBe(false);
+  });
+
+  it("returns false for missing request ids", () => {
+    questionManager.startQuestions([QUESTION_ONE], "frm-1", scopeKey);
+
+    expect(isDuplicateQuestionDelivery(scopeKey, null)).toBe(false);
+    expect(isDuplicateQuestionDelivery(scopeKey, "")).toBe(false);
+  });
+
+  it("returns false for a different request id", () => {
+    questionManager.startQuestions([QUESTION_ONE], "frm-1", scopeKey);
+
+    expect(isDuplicateQuestionDelivery(scopeKey, "frm-2")).toBe(false);
+  });
+
+  it("returns true for the active poll request id", () => {
+    questionManager.startQuestions([QUESTION_ONE], "frm-1", scopeKey);
+
+    expect(isDuplicateQuestionDelivery(scopeKey, "frm-1")).toBe(true);
+  });
+});
+
+describe("closeQuestionSettledOutside", () => {
+  const scopeKey = "settle-scope";
+
+  function createEditApi(): {
+    api: Context["api"];
+    editMessageText: ReturnType<typeof vi.fn>;
+  } {
+    const editMessageText = vi.fn().mockResolvedValue(true);
+    const api = { editMessageText } as unknown as Context["api"];
+    return { api, editMessageText };
+  }
+
+  function startPoll(messageId: number): void {
+    questionManager.startQuestions([QUESTION_ONE], "frm-settle", scopeKey);
+    questionManager.setActiveMessageId(messageId, scopeKey);
+    interactionManager.start({ kind: "question", expectedInput: "callback" }, scopeKey);
+  }
+
+  beforeEach(() => {
+    questionManager.clear(scopeKey);
+    interactionManager.clear("test_setup", scopeKey);
+  });
+
+  it("closes an answered poll with the outcome line", async () => {
+    startPoll(900);
+    const { api, editMessageText } = createEditApi();
+
+    const closed = await closeQuestionSettledOutside(api, 123, scopeKey, "frm-settle", "answered");
+
+    expect(closed).toBe(true);
+    expect(editMessageText).toHaveBeenCalledWith(
+      123,
+      900,
+      expect.stringContaining(t("question.settled_outside.answered")),
+    );
+    expect(editMessageText.mock.calls[0]?.[2]).toContain("Pick one");
+    expect(questionManager.isActive(scopeKey)).toBe(false);
+    expect(interactionManager.getSnapshot(scopeKey)).toBeNull();
+  });
+
+  it("closes a cancelled poll with the cancelled line", async () => {
+    startPoll(901);
+    const { api, editMessageText } = createEditApi();
+
+    const closed = await closeQuestionSettledOutside(api, 123, scopeKey, "frm-settle", "cancelled");
+
+    expect(closed).toBe(true);
+    expect(editMessageText).toHaveBeenCalledWith(
+      123,
+      901,
+      expect.stringContaining(t("question.settled_outside.cancelled")),
+    );
+    expect(questionManager.isActive(scopeKey)).toBe(false);
+  });
+
+  it("ignores settled events for other requests", async () => {
+    startPoll(902);
+    const { api, editMessageText } = createEditApi();
+
+    const closed = await closeQuestionSettledOutside(api, 123, scopeKey, "frm-other", "answered");
+
+    expect(closed).toBe(false);
+    expect(editMessageText).not.toHaveBeenCalled();
+    expect(questionManager.isActive(scopeKey)).toBe(true);
+  });
+
+  it("ignores settled events without an active poll", async () => {
+    const { api, editMessageText } = createEditApi();
+
+    const closed = await closeQuestionSettledOutside(api, 123, scopeKey, "frm-gone", "answered");
+
+    expect(closed).toBe(false);
+    expect(editMessageText).not.toHaveBeenCalled();
   });
 });

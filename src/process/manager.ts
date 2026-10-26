@@ -51,10 +51,17 @@ class ProcessManager implements ProcessManagerInterface {
     }
   }
 
+  private transitionInProgress: Promise<ProcessOperationResult> | null = null;
+
   /**
    * Start the OpenCode server process
    */
   async start(): Promise<ProcessOperationResult> {
+    if (this.transitionInProgress) {
+      logger.warn("[ProcessManager] Start requested while a transition is in progress; joining it");
+      return this.transitionInProgress;
+    }
+
     if (this.state.isRunning) {
       return {
         success: false,
@@ -62,6 +69,15 @@ class ProcessManager implements ProcessManagerInterface {
       };
     }
 
+    this.transitionInProgress = this.doStart();
+    try {
+      return await this.transitionInProgress;
+    } finally {
+      this.transitionInProgress = null;
+    }
+  }
+
+  private async doStart(): Promise<ProcessOperationResult> {
     try {
       logger.info("[ProcessManager] Starting OpenCode server process...");
 
@@ -140,6 +156,14 @@ class ProcessManager implements ProcessManagerInterface {
    * Falls back to SIGKILL if timeout is exceeded
    */
   async stop(timeoutMs: number = 5000): Promise<ProcessOperationResult> {
+    if (this.transitionInProgress) {
+      logger.warn("[ProcessManager] Stop requested while a transition is in progress; joining it");
+      const inProgress = await this.transitionInProgress;
+      if (!inProgress.success || !this.state.isRunning) {
+        return inProgress;
+      }
+    }
+
     if (!this.state.isRunning || !this.state.pid) {
       return {
         success: false,
@@ -147,8 +171,17 @@ class ProcessManager implements ProcessManagerInterface {
       };
     }
 
+    const pid = this.state.pid;
+    this.transitionInProgress = this.doStop(timeoutMs, pid);
     try {
-      const pid = this.state.pid;
+      return await this.transitionInProgress;
+    } finally {
+      this.transitionInProgress = null;
+    }
+  }
+
+  private async doStop(timeoutMs: number, pid: number): Promise<ProcessOperationResult> {
+    try {
       logger.info(`[ProcessManager] Stopping process PID=${pid}...`);
 
       // On Windows, use taskkill to kill the entire process tree
@@ -157,7 +190,7 @@ class ProcessManager implements ProcessManagerInterface {
         try {
           // /F = force terminate, /T = terminate tree, /PID = process id
           logger.debug(`[ProcessManager] Using taskkill to terminate process tree for PID=${pid}`);
-          await execAsync(`taskkill /F /T /PID ${pid}`);
+          await execAsync(`taskkill /F /T /PID ${pid}`, { timeout: 10_000 });
           logger.info(`[ProcessManager] Process tree terminated successfully for PID=${pid}`);
         } catch (err) {
           // taskkill returns error if process not found, which is ok
@@ -282,15 +315,17 @@ class ProcessManager implements ProcessManagerInterface {
     return new Promise<boolean>((resolve) => {
       const exitHandler = () => {
         logger.debug("[ProcessManager] Process exited gracefully");
+        clearTimeout(timer);
         resolve(true);
       };
 
       childProcess.once("exit", exitHandler);
 
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         childProcess.removeListener("exit", exitHandler);
         resolve(false);
       }, timeoutMs);
+      timer.unref?.();
     });
   }
 
@@ -298,6 +333,14 @@ class ProcessManager implements ProcessManagerInterface {
    * Clean up state and settings
    */
   private cleanup(): void {
+    const childProcess = this.state.process;
+    if (childProcess) {
+      childProcess.removeAllListeners("error");
+      childProcess.removeAllListeners("exit");
+      childProcess.stdout?.removeAllListeners("data");
+      childProcess.stderr?.removeAllListeners("data");
+      childProcess.unref?.();
+    }
     this.state = {
       process: null,
       pid: null,

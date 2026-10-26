@@ -29,6 +29,7 @@ export interface TopicBindingInput {
   projectWorktree?: string;
   topicName?: string;
   status?: TopicSessionStatus;
+  ephemeral?: boolean;
 }
 
 export interface SessionRouteTarget {
@@ -51,7 +52,7 @@ function buildBinding(
 ): TopicSessionBinding {
   const timestamp = nowTimestamp();
 
-  return {
+  const nextBinding: TopicSessionBinding = {
     scopeKey: input.scopeKey,
     chatId: input.chatId,
     threadId: input.threadId,
@@ -63,7 +64,10 @@ function buildBinding(
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
     closedAt: existing?.closedAt,
+    ...((input.ephemeral ?? existing?.ephemeral) ? { ephemeral: true as const } : {}),
   };
+
+  return nextBinding;
 }
 
 function ensureTopicBindingsHydrated(): void {
