@@ -90,7 +90,7 @@ opencode-telegram-group-topics-bot start
 #### 方式 C：从源码运行
 
 ```bash
-git clone https://github.com/shanekunz/opencode-telegram-group-topics-bot.git
+git clone https://github.com/kevindevm/opencode-telegram-group-topics-bot.git
 cd opencode-telegram-group-topics-bot
 npm install
 npm run build
