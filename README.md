@@ -68,7 +68,8 @@ Fork sync notes: [`FORK_SYNC.md`](./FORK_SYNC.md)
 - **🧩 Subagent transcript topics** — each subagent gets a read-only topic with the full live transcript; the parent keeps a compact status card.
 - **Pinned dashboards** — per-topic pinned message with session, project, model, context usage, cost, and changed files.
 - **Prompt queue** — prompts sent while a session is busy are queued, survive restarts, and support per-message cancel, move-to-front, and interrupt-and-run via `/queue`.
-- **Permissions and questions** — interactive `allow once` / `always` / `reject` flows and question flows with buttons, custom text, and voice answers; per-session trust levels via `/trust ask|edits|all`.
+- **Permissions and questions** — interactive `allow once` / `always` / `reject` flows and question polls with full numbered options in the message plus short numbered buttons, custom text, and voice answers; per-session trust levels via `/trust ask|edits|all`.
+- **Final-answer footer** — every answer closes with agent, model, and elapsed time (`🛠️ Build · opus · 1m 30s`), so the last message is always recognizable.
 - **Pickers and keyboard** — model, agent, variant, and context controls from the persistent keyboard, favorites first.
 - **`/display` menu** — per-chat/topic show/hide toggles plus an agent shortcut and a Cancel button; overrides persist in `settings.json`.
 - **Session management** — `/retry` the last prompt, `/diff`, `/commit`, `/cost` spend tracking with `BUDGET_ALERT_USD`, `/close`, `/fork`, `/share`, `/rename`, `/refresh`, saved prompt shortcuts (`/saved`), custom commands (`/commands`), skills (`/skills`).
@@ -180,7 +181,7 @@ nssm set OpenCodeTelegramBot Start SERVICE_AUTO_START
 nssm start OpenCodeTelegramBot
 ```
 
-Config then lives in `%APPDATA%\opencode-telegram-group-topics-bot\.env` (or wherever `OPENCODE_TELEGRAM_HOME` points). A scheduled task that runs `opencode pair` at logon keeps the CLI paired; the service itself manages the bot process and restarts it on failure.
+Config then lives in `%APPDATA%\opencode-telegram-group-topics-bot\.env` (or wherever `OPENCODE_TELEGRAM_HOME` points) — the service reads that file, not the repo's `.env`. A scheduled task that runs `opencode pair` at logon keeps the CLI paired; the service itself manages the bot process and restarts it on failure.
 
 ### 5. Complete the Setup Wizard
 
@@ -240,8 +241,9 @@ Any plain text message in a session topic is treated as a prompt when no blockin
 | `/retry`          | Resend the last prompt                                                   |
 | `/diff`           | Show changed files in this session                                       |
 | `/commit`         | Commit session changes with a message                                    |
-| `/cost`           | Show session and daily spend                                             |
+| `/cost`           | Show session (incl. subagents) and daily spend                     |
 | `/close`          | Close this session topic                                                 |
+| `/cleanup`        | Delete subagent transcript topics                                        |
 | `/fork`           | Clone this session into a new topic                                      |
 | `/share`          | Export this session transcript as a file                                 |
 | `/saved`          | Saved prompt shortcuts                                                   |
@@ -333,6 +335,7 @@ Installed-mode config paths:
 | `STT_PROTOCOL` | `openai` (POST `{URL}/audio/transcriptions` with key) or `plain` (POST the URL as-is with an `audio` wav field, no auth; converted with ffmpeg) | No | `openai` |
 | `STT_AUDIO_FIELD` | Multipart field carrying the audio (defaults: `file` for openai, `audio` for plain) | No | - |
 | `STT_TIMEOUT_SEC` | Per-transcription timeout in seconds | No | `60` |
+| `STT_FFMPEG_PATH` | Absolute ffmpeg path (plain mode wav conversion; only needed when ffmpeg is not on PATH) | No | - |
 | `STT_MODEL` | STT model name passed to `/audio/transcriptions` | No | `whisper-large-v3-turbo` |
 | `STT_LANGUAGE` | Optional language hint | No | - |
 | `STT_NOTE_PROMPT` | Optional extra prompt/note sent with transcription requests | No | - |
@@ -347,7 +350,7 @@ Keep your `.env` private — it contains your bot token. All `/display` flags ap
 
 ### Optional: Voice and Audio Transcription
 
-If `STT_API_URL` and `STT_API_KEY` are set, the bot transcribes Telegram voice/audio messages before sending them to OpenCode.
+If `STT_API_URL` is set, the bot transcribes Telegram voice/audio messages before sending them to OpenCode (`STT_API_KEY` is additionally required for `openai`-protocol servers).
 
 Minimal custom workers are supported via `STT_PROTOCOL=plain`: the bot POSTs the URL as-is with an `audio` wav field and no auth (non-wav input is converted with ffmpeg, so it must be on PATH). Requests are serialized because reference workers are single CPU instances.
 
