@@ -9,10 +9,13 @@ import { DEFAULT_ALLOWED_INTERACTION_COMMANDS } from "../../interaction/manager.
 import { logger } from "../../utils/logger.js";
 import { safeBackgroundTask } from "../../utils/safe-background-task.js";
 import { t } from "../../i18n/index.js";
-import { getScopeKeyFromContext, getThreadIdFromScopeKey, getThreadSendOptions } from "../scope.js";
-import { truncateTelegramText } from "../utils/telegram-text.js";
+import { getScopeKeyFromContext, getThreadIdFromScopeKey, getThreadSendOptions } from "../scope.js";import { truncateTelegramText } from "../utils/telegram-text.js";
+import {
+  editMessageWithMarkdownFallback,
+  escapeTelegramMarkdownV2,
+  sendMessageWithMarkdownFallback,
+} from "../utils/send-with-markdown-fallback.js";
 
-const MAX_BUTTON_LENGTH = 60;
 const QUESTION_ALLOWED_COMMANDS = [...DEFAULT_ALLOWED_INTERACTION_COMMANDS, "/last"];
 
 function getCallbackMessageId(ctx: Context): number | null {
@@ -196,15 +199,25 @@ async function updateQuestionMessage(ctx: Context, scopeKey: string): Promise<vo
     return;
   }
 
-  await ctx
-    .editMessageText(formatQuestionText(question, scopeKey), {
+  const messageId = ctx.callbackQuery?.message?.message_id;
+  if (typeof messageId !== "number" || !ctx.chat) {
+    return;
+  }
+
+  await editMessageWithMarkdownFallback({
+    api: ctx.api,
+    chatId: ctx.chat.id,
+    messageId,
+    text: formatQuestionText(question, scopeKey),
+    options: {
       reply_markup: buildQuestionKeyboard(
         question,
         questionManager.getSelectedOptions(questionManager.getCurrentIndex(scopeKey), scopeKey),
         scopeKey,
       ),
-    })
-    .catch(() => {});
+    },
+    parseMode: "MarkdownV2",
+  }).catch(() => {});
 }
 
 export async function showCurrentQuestion(
@@ -219,13 +232,19 @@ export async function showCurrentQuestion(
     return;
   }
 
-  const message = await bot.sendMessage(chatId, formatQuestionText(question, scopeKey), {
-    reply_markup: buildQuestionKeyboard(
-      question,
-      questionManager.getSelectedOptions(questionManager.getCurrentIndex(scopeKey), scopeKey),
-      scopeKey,
-    ),
-    ...getThreadSendOptions(threadId),
+  const message = await sendMessageWithMarkdownFallback({
+    api: bot,
+    chatId,
+    text: formatQuestionText(question, scopeKey),
+    options: {
+      reply_markup: buildQuestionKeyboard(
+        question,
+        questionManager.getSelectedOptions(questionManager.getCurrentIndex(scopeKey), scopeKey),
+        scopeKey,
+      ),
+      ...getThreadSendOptions(threadId),
+    },
+    parseMode: "MarkdownV2",
   });
 
   questionManager.addMessageId(message.message_id, scopeKey);
@@ -302,7 +321,13 @@ export async function closeQuestionSettledOutside(
   clearQuestionInteraction("question_settled_outside", scopeKey);
 
   if (closedText !== null && messageId !== null) {
-    await api.editMessageText(chatId, messageId, closedText).catch(() => {});
+    await editMessageWithMarkdownFallback({
+      api,
+      chatId,
+      messageId,
+      text: closedText,
+      parseMode: "MarkdownV2",
+    }).catch(() => {});
   }
 
   return true;
@@ -409,18 +434,22 @@ function formatQuestionText(
   const progressText = totalQuestions > 0 ? `${currentIndex + 1}/${totalQuestions}` : "";
 
   const headerTitle = [progressText, question.header].filter(Boolean).join(" ");
-  const header = headerTitle ? `${headerTitle}\n\n` : "";
-  const multiple = question.multiple ? t("question.multi_hint") : "";
-  // The full option texts live here, numbered: buttons only carry short
-  // labels (60-char Telegram limit, no scrolling), so nothing is lost when
-  // a label + description does not fit the button.
+  // Model-written text may carry markdown characters: escape everything and
+  // add back only our own bold number markers. Buttons carry just the
+  // number, so the full text lives here and nothing is lost to truncation.
+  const header = headerTitle ? `${escapeTelegramMarkdownV2(headerTitle)}\n\n` : "";
+  const multiple = question.multiple ? escapeTelegramMarkdownV2(t("question.multi_hint")) : "";
   const optionsList = question.options
     .map((option, index) => {
       const detail = option.description ? ` — ${option.description}` : "";
-      return `${index + 1}. ${option.label}${detail}`;
+      // Bold number, then an escaped dot: a bare "." after the closing "*"
+      // is rejected by Telegram's MarkdownV2 parser.
+      return `*${index + 1}*\\. ${escapeTelegramMarkdownV2(`${option.label}${detail}`)}`;
     })
-    .join("\n");
-  return truncateTelegramText(`${header}${question.question}${multiple}\n\n${optionsList}`);
+    .join("\n\n");
+  return truncateTelegramText(
+    `${header}${escapeTelegramMarkdownV2(question.question)}${multiple}\n\n${optionsList}`,
+  );
 }
 
 function buildQuestionKeyboard(
@@ -431,11 +460,10 @@ function buildQuestionKeyboard(
   const keyboard = new InlineKeyboard();
   const questionIndex = questionManager.getCurrentIndex(scopeKey);
 
-  question.options.forEach((option, index) => {
+  question.options.forEach((_option, index) => {
     const isSelected = selectedOptions.has(index);
     const icon = isSelected ? "✅ " : "";
-    const buttonText = formatButtonText(option.label, option.description, icon, index);
-    keyboard.text(buttonText, `question:select:${questionIndex}:${index}`).row();
+    keyboard.text(`${icon}${index + 1}`, `question:select:${questionIndex}:${index}`).row();
   });
 
   if (question.multiple) {
@@ -445,28 +473,6 @@ function buildQuestionKeyboard(
   keyboard.text(t("question.button.custom"), `question:custom:${questionIndex}`).row();
   keyboard.text(t("question.button.cancel"), `question:cancel:${questionIndex}`);
   return keyboard;
-}
-
-function formatButtonText(
-  label: string,
-  description: string,
-  icon: string,
-  index: number,
-): string {
-  // Numbered short label: the full text lives numbered in the message body,
-  // so a truncated button still maps 1:1 to its option.
-  const numbered = `${icon}${index + 1}. ${label}`;
-  const full = description && icon === "" ? `${numbered} - ${description}` : numbered;
-
-  if (full.length > MAX_BUTTON_LENGTH) {
-    const short = `${icon}${index + 1}. ${label}`;
-    if (short.length > MAX_BUTTON_LENGTH) {
-      return `${icon}${index + 1}`;
-    }
-    return short;
-  }
-
-  return full;
 }
 
 function formatAnswersSummary(answers: Array<{ question: string; answer: string }>): string {

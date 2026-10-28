@@ -23,7 +23,7 @@ describe("bot/assistant-run-state", () => {
     });
   });
 
-  it("clears the run after finish", () => {
+  it("returns the finished snapshot and consumes it so later deliveries fall back", () => {
     assistantRunState.startRun("s1", { startedAt: 123 });
 
     expect(assistantRunState.finishRun("s1", "done")).toEqual({
@@ -33,6 +33,37 @@ describe("bot/assistant-run-state", () => {
       configuredProviderID: undefined,
       configuredModelID: undefined,
     });
+    // Consumed: a late, unrelated delivery finds no run and falls back to
+    // `agent · model` without duration instead of showing a growing clock.
     expect(assistantRunState.getRun("s1")).toBeNull();
+    expect(assistantRunState.finishRun("s1", "done")).toBeNull();
+  });
+
+  it("leaves the run untouched until the last message of the turn finishes it", () => {
+    assistantRunState.startRun("s1", { startedAt: 123, configuredAgent: "build" });
+
+    // Non-last deliveries never touch the run (no footer taken, none consumed).
+    expect(assistantRunState.getRun("s1")).toMatchObject({
+      sessionId: "s1",
+      startedAt: 123,
+      configuredAgent: "build",
+    });
+
+    assistantRunState.finishRun("s1", "final_delivery_sent");
+
+    // The last message consumed it: nothing leaks into the next turn.
+    expect(assistantRunState.getRun("s1")).toBeNull();
+  });
+
+  it("replaces the finished run when the next prompt starts", () => {
+    assistantRunState.startRun("s1", { startedAt: 123, configuredAgent: "build" });
+    assistantRunState.finishRun("s1", "done");
+
+    assistantRunState.startRun("s1", { startedAt: 456, configuredAgent: "plan" });
+
+    expect(assistantRunState.getRun("s1")).toMatchObject({
+      startedAt: 456,
+      configuredAgent: "plan",
+    });
   });
 });

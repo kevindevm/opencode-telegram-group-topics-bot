@@ -126,10 +126,12 @@ describe("pinned manager scoped state", () => {
   });
 
   it("loads assistant cost from history into the scoped pinned message", async () => {
-    const api = createApi();
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
 
-    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
-    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+      setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+      setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
     opencodeMocks.messages.mockResolvedValue({
       data: [
         {
@@ -153,8 +155,10 @@ describe("pinned manager scoped state", () => {
     pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
     await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
 
-    // History load only schedules the repaint; flush paints it.
+    // History load only schedules the repaint; the trailing edit paints it.
     await pinnedMessageManager.flush("chat:-1:10");
+    expect(api.editMessageText).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(16_000);
 
     expect(api.sendMessage).toHaveBeenCalledWith(
       -1,
@@ -173,6 +177,9 @@ describe("pinned manager scoped state", () => {
         tokensUsed: 1500,
       }),
     );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("repaints with debounce after tokens and file changes, and exactly on flush", async () => {
@@ -311,50 +318,62 @@ describe("pinned manager scoped state", () => {
   });
 
   it("recreates the dashboard when Telegram reports message to edit not found", async () => {
-    const api = createApi();
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
 
-    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
-    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+      setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+      setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
 
-    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
-    await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
-    api.sendMessage.mockClear();
+      pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+      await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+      api.sendMessage.mockClear();
 
-    // Change state so the flush actually attempts an edit.
-    await pinnedMessageManager.onMessageComplete(
-      { input: 100, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
-      "chat:-1:10",
-    );
-    api.editMessageText.mockRejectedValueOnce(
-      new Error("Bad Request: message to edit not found"),
-    );
-    await pinnedMessageManager.flush("chat:-1:10");
+      // Change state so the flush actually attempts an edit.
+      await pinnedMessageManager.onMessageComplete(
+        { input: 100, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
+        "chat:-1:10",
+      );
+      api.editMessageText.mockRejectedValueOnce(
+        new Error("Bad Request: message to edit not found"),
+      );
+      await pinnedMessageManager.flush("chat:-1:10");
+      await vi.advanceTimersByTimeAsync(16_000);
 
-    expect(api.sendMessage).toHaveBeenCalledTimes(1);
-    expect(pinnedMessageManager.getState("chat:-1:10").messageId).toBe(101);
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(pinnedMessageManager.getState("chat:-1:10").messageId).toBe(101);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("recreates the dashboard when Telegram refuses to edit it (48h window)", async () => {
-    const api = createApi();
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
 
-    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
-    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+      setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+      setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
 
-    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
-    await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
-    api.sendMessage.mockClear();
+      pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+      await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+      api.sendMessage.mockClear();
 
-    await pinnedMessageManager.onMessageComplete(
-      { input: 200, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.02 },
-      "chat:-1:10",
-    );
-    api.editMessageText.mockRejectedValueOnce(
-      new Error("Bad Request: message can't be edited"),
-    );
-    await pinnedMessageManager.flush("chat:-1:10");
+      await pinnedMessageManager.onMessageComplete(
+        { input: 200, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.02 },
+        "chat:-1:10",
+      );
+      api.editMessageText.mockRejectedValueOnce(
+        new Error("Bad Request: message can't be edited"),
+      );
+      await pinnedMessageManager.flush("chat:-1:10");
+      await vi.advanceTimersByTimeAsync(16_000);
 
-    expect(api.sendMessage).toHaveBeenCalledTimes(1);
-    expect(pinnedMessageManager.getState("chat:-1:10").messageId).toBe(101);
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(pinnedMessageManager.getState("chat:-1:10").messageId).toBe(101);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("never pins a dashboard in the General control topic", async () => {
@@ -419,33 +438,39 @@ describe("pinned manager scoped state", () => {
   });
 
   it("paints a fresh dashboard on reopen and keeps editing that message", async () => {
-    const api = createApi();
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
 
-    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
-    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+      setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+      setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
 
-    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
-    await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
-    await pinnedMessageManager.clear("chat:-1:10");
+      pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+      await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+      await pinnedMessageManager.clear("chat:-1:10");
 
-    await pinnedMessageManager.onSessionChange("s2", "thread 10 reopened", "chat:-1:10");
+      await pinnedMessageManager.onSessionChange("s2", "thread 10 reopened", "chat:-1:10");
 
-    const reopenedId = pinnedMessageManager.getState("chat:-1:10").messageId;
-    expect(reopenedId).not.toBeNull();
-    expect(reopenedId).toBe(101);
+      const reopenedId = pinnedMessageManager.getState("chat:-1:10").messageId;
+      expect(reopenedId).not.toBeNull();
+      expect(reopenedId).toBe(101);
 
-    // New activity after reopen edits the new message, never the old one.
-    pinnedMessageManager.addFileChange(
-      { file: "/repo/a/b.ts", additions: 2, deletions: 0 },
-      "chat:-1:10",
-    );
-    await pinnedMessageManager.flush("chat:-1:10");
+      // New activity after reopen edits the new message, never the old one.
+      pinnedMessageManager.addFileChange(
+        { file: "/repo/a/b.ts", additions: 2, deletions: 0 },
+        "chat:-1:10",
+      );
+      await pinnedMessageManager.flush("chat:-1:10");
+      await vi.advanceTimersByTimeAsync(16_000);
 
-    expect(api.editMessageText).toHaveBeenCalledWith(
-      -1,
-      reopenedId,
-      expect.stringContaining("b.ts"),
-    );
+      expect(api.editMessageText).toHaveBeenCalledWith(
+        -1,
+        reopenedId,
+        expect.stringContaining("b.ts"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reloads context from history after compaction", async () => {
@@ -578,6 +603,7 @@ describe("pinned manager scoped state", () => {
       );
       // Paint the file entry first so clearing it is a visible change.
       await pinnedMessageManager.flush("chat:-1:10");
+      await vi.advanceTimersByTimeAsync(16_000);
       expect(api.editMessageText).toHaveBeenLastCalledWith(
         -1,
         expect.any(Number),

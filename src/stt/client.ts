@@ -27,7 +27,10 @@ export function isSttConfigured(): boolean {
 
 function runFfmpeg(input: Buffer, args: string[]): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const child = execFile("ffmpeg", args, { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 }, (error, stdout, _stderr) => {
+    // Overridable: services often run with a minimal PATH where ffmpeg is
+    // not visible (spawn ENOENT). Point STT_FFMPEG_PATH at ffmpeg.exe.
+    const binary = config.stt.ffmpegPath || "ffmpeg";
+    const child = execFile(binary, args, { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 }, (error, stdout, _stderr) => {
       if (error) {
         reject(error);
         return;

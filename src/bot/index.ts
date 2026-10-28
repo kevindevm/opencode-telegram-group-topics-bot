@@ -651,6 +651,7 @@ function getToolStreamKey(callId: string): string {
 async function finalizeSessionDelivery(
   sessionId: string,
   pendingCompletionText: string | null,
+  isLast = true,
 ): Promise<boolean> {
   let deliveryComplete = false;
 
@@ -668,9 +669,15 @@ async function finalizeSessionDelivery(
 
     await liveStream.flushSession(sessionId);
     if (pendingCompletionText) {
-      deliveryComplete = await deliverAssistantCompletion(sessionId, pendingCompletionText)
+      deliveryComplete = await deliverAssistantCompletion(sessionId, pendingCompletionText, isLast)
         .then(() => true)
         .catch((error) => {
+          // Rate limits are transient and must never fail the turn: rethrow so
+          // the coordinator retries without spending the give-up budget.
+          // Anything else converts to a budgeted retry below.
+          if (error instanceof RateLimitExceededError) {
+            throw error;
+          }
           logger.error("[Bot] Failed to deliver pending assistant completion", {
             sessionId,
             error,
@@ -724,6 +731,9 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
     summaryAggregator.stopTypingIndicator(sessionId);
     await liveStream.sealCurrentMessage(sessionId, true);
     await dispatchNextQueuedPrompt(sessionId);
+  },
+  onFinalDeliveryGiveUp: (sessionId) => {
+    assistantRunState.clearRun(sessionId, "final_delivery_gave_up");
   },
   handlers: {
     onAssistantUpdate: async ({ sessionId, messageId, text }) => {
@@ -1038,7 +1048,11 @@ function prepareDocumentCaption(caption: string): string {
   return `${normalizedCaption.slice(0, TELEGRAM_DOCUMENT_CAPTION_MAX_LENGTH - 3)}...`;
 }
 
-async function deliverAssistantCompletion(sessionId: string, messageText: string): Promise<void> {
+async function deliverAssistantCompletion(
+  sessionId: string,
+  messageText: string,
+  includeDuration = true,
+): Promise<void> {
   const normalizedMessageText = messageText.trim();
   if (!normalizedMessageText) {
     return;
@@ -1050,15 +1064,15 @@ async function deliverAssistantCompletion(sessionId: string, messageText: string
     return;
   }
 
-  // The footer marks this as the final answer; the store fallback covers
-  // runs whose record is gone, so it never goes out without one.
-  const currentRun = assistantRunState.getRun(sessionId);
+  // Only the last message of the turn carries any footer; earlier ones go
+  // out as plain text so the agent · model · clock line appears exactly once.
   const storedModel = getStoredModel(target.scopeKey);
-  const finalMessageText =
-    `${normalizedMessageText}\n\n${formatAssistantRunFooter(currentRun, {
-      agentName: getStoredAgent(target.scopeKey),
-      modelID: storedModel.modelID,
-    })}`;
+  const finalMessageText = includeDuration
+    ? `${normalizedMessageText}\n\n${formatAssistantRunFooter(assistantRunState.getRun(sessionId), {
+        agentName: getStoredAgent(target.scopeKey),
+        modelID: storedModel.modelID,
+      })}`
+    : normalizedMessageText;
 
   if (!botInstance) {
     clearPromptResponseMode(sessionId);
@@ -1103,7 +1117,9 @@ async function deliverAssistantCompletion(sessionId: string, messageText: string
           sessionId,
           ttsSent,
         });
-        assistantRunState.finishRun(sessionId, "final_delivery_in_place");
+        if (includeDuration) {
+          assistantRunState.finishRun(sessionId, "final_delivery_in_place");
+        }
         return;
       }
     }
@@ -1156,7 +1172,9 @@ async function deliverAssistantCompletion(sessionId: string, messageText: string
       partCount: finalParts.length,
       ttsSent,
     });
-    assistantRunState.finishRun(sessionId, "final_delivery_sent");
+    if (includeDuration) {
+      assistantRunState.finishRun(sessionId, "final_delivery_sent");
+    }
   } catch (err) {
     clearPromptResponseMode(sessionId);
     logger.error("Failed to send message to Telegram:", err);

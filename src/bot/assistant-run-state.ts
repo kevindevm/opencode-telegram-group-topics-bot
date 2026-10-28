@@ -14,9 +14,21 @@ export interface AssistantRunInfo extends AssistantRunStartInfo {
 class AssistantRunState {
   private readonly runs = new Map<string, AssistantRunInfo>();
 
+  /** Upper bound so finished runs of dead sessions cannot grow forever. */
+  private static readonly MAX_RUNS = 500;
+
   startRun(sessionId: string, info: AssistantRunStartInfo): void {
     if (!sessionId) {
       return;
+    }
+
+    // Bounded so finished runs of dead sessions cannot grow forever.
+    while (this.runs.size >= AssistantRunState.MAX_RUNS && !this.runs.has(sessionId)) {
+      const oldest = this.runs.keys().next();
+      if (oldest.done) {
+        break;
+      }
+      this.runs.delete(oldest.value);
     }
 
     this.runs.set(sessionId, {
@@ -46,7 +58,13 @@ class AssistantRunState {
       return null;
     }
 
+    // Consumed, not kept: only the last message of a turn takes the footer,
+    // and the delivery layer only finishes the run for that message. Deleting
+    // here guarantees a stale run can never leak its clock into a later,
+    // unrelated delivery (the timer visibly kept growing). A delivery that
+    // finds no run falls back to `agent · model` without duration.
     this.runs.delete(sessionId);
+
     logger.debug("[AssistantRunState] Finished run", { sessionId, reason });
     return { ...run };
   }

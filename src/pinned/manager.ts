@@ -353,10 +353,27 @@ class PinnedMessageManager {
   }
 
   async flush(scopeKey: string = "global"): Promise<void> {
-    // Pin failures must never break message delivery.
+    // Pin failures must never break message delivery. Repaints go through
+    // the throttle like every other trigger: flush runs on every
+    // final-delivery attempt (including coordinator retries), and a direct
+    // edit here would turn each retry into fresh flood-control ammunition.
+    // The trailing edit still carries the latest state. Only a missing
+    // dashboard is created immediately — a topic must never be left without
+    // one while its session is active.
     try {
       await this.refreshProjectMetadata(scopeKey);
-      await this.updatePinnedMessage(scopeKey);
+
+      const context = this.getContext(scopeKey);
+      if (
+        !context.state.messageId &&
+        context.state.sessionId &&
+        !isControlScope(scopeKey)
+      ) {
+        await this.updatePinnedMessage(scopeKey);
+        return;
+      }
+
+      this.scheduleThrottledUpdate(scopeKey);
     } catch (err) {
       logger.error("[PinnedManager] Error flushing pinned message:", err);
     }

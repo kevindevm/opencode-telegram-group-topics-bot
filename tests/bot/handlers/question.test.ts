@@ -289,14 +289,14 @@ describe("bot/handlers/question", () => {
       { reply_markup: { inline_keyboard: Array<Array<{ text: string }>> } },
     ];
     expect(chatId).toBe(123);
-    // Full text is in the scrollable body, numbered...
-    expect(text).toContain(`1. ${longLabel} — ${longDescription}`);
-    // ...while buttons stay short and numbered for the 1:1 mapping.
+    // Full text is in the scrollable body, numbered and bold (hyphens get
+    // MarkdownV2-escaped, so match the escaped form)...
+    expect(text).toContain(`*1*\\. ${longLabel}`);
+    expect(text).toContain("spawns a durable worker per queue with exponential backoff and dead\\-letter routing");
+    // ...separated by a blank line, while buttons carry just the number.
     const buttons = options.reply_markup.inline_keyboard.flat();
-    const optionButton = buttons.find((button) => button.text.startsWith("1."));
+    const optionButton = buttons.find((button) => button.text === "1");
     expect(optionButton).toBeDefined();
-    expect(optionButton!.text.length).toBeLessThanOrEqual(60);
-    expect(optionButton!.text).toContain("1.");
   });
 
   it("sends poll completion summary back into the originating topic", async () => {    const api = createApi([500, 501]);
@@ -384,6 +384,7 @@ describe("closeQuestionSettledOutside", () => {
       123,
       900,
       expect.stringContaining(t("question.settled_outside.answered")),
+      expect.objectContaining({ parse_mode: "MarkdownV2" }),
     );
     expect(editMessageText.mock.calls[0]?.[2]).toContain("Pick one");
     expect(questionManager.isActive(scopeKey)).toBe(false);
@@ -401,6 +402,7 @@ describe("closeQuestionSettledOutside", () => {
       123,
       901,
       expect.stringContaining(t("question.settled_outside.cancelled")),
+      expect.objectContaining({ parse_mode: "MarkdownV2" }),
     );
     expect(questionManager.isActive(scopeKey)).toBe(false);
   });

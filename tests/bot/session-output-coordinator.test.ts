@@ -5,12 +5,14 @@ describe("bot/session-output-coordinator", () => {
   function createCoordinator(overrides?: {
     onFinalizeSession?: ReturnType<typeof vi.fn>;
     onFinalDeliveryCommitted?: ReturnType<typeof vi.fn>;
+    onFinalDeliveryGiveUp?: ReturnType<typeof vi.fn>;
   }): SessionOutputCoordinator {
     return new SessionOutputCoordinator({
       settleMs: 100,
       onFinalizeSession: overrides?.onFinalizeSession ?? vi.fn().mockResolvedValue(true),
       onFinalDeliveryCommitted:
         overrides?.onFinalDeliveryCommitted ?? vi.fn().mockResolvedValue(undefined),
+      onFinalDeliveryGiveUp: overrides?.onFinalDeliveryGiveUp,
       handlers: {
         onAssistantUpdate: vi.fn().mockResolvedValue(undefined),
         onAssistantComplete: vi.fn().mockResolvedValue(undefined),
@@ -65,7 +67,7 @@ describe("bot/session-output-coordinator", () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(onFinalizeSession).toHaveBeenCalledTimes(1);
-    expect(onFinalizeSession).toHaveBeenCalledWith("s1", null);
+    expect(onFinalizeSession).toHaveBeenCalledWith("s1", null, true);
   });
 
   it("cancels pending finalization", async () => {
@@ -225,8 +227,8 @@ describe("bot/session-output-coordinator", () => {
     await vi.runAllTimersAsync();
 
     expect(onFinalizeSession).toHaveBeenCalledTimes(2);
-    expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "First");
-    expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "Second");
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "First", false);
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "Second", true);
   });
 
   it("keeps the pending completion when finalization reports failure", async () => {
@@ -242,10 +244,10 @@ describe("bot/session-output-coordinator", () => {
     coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
 
     await vi.advanceTimersByTimeAsync(100);
-    expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "Retry me");
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "Retry me", true);
 
     await vi.advanceTimersByTimeAsync(100);
-    expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "Retry me");
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "Retry me", true);
   });
 
   it("flushes pending final delivery immediately for the next prompt", async () => {
@@ -265,7 +267,7 @@ describe("bot/session-output-coordinator", () => {
 
     expect(flushed).toBe(true);
     expect(onFinalizeSession).toHaveBeenCalledTimes(1);
-    expect(onFinalizeSession).toHaveBeenCalledWith("s1", "Reply");
+    expect(onFinalizeSession).toHaveBeenCalledWith("s1", "Reply", true);
     expect(onFinalDeliveryCommitted).toHaveBeenCalledWith("s1");
   });
 
@@ -285,7 +287,7 @@ describe("bot/session-output-coordinator", () => {
     const flushed = await coordinator.flushPendingFinalDelivery("s1");
 
     expect(flushed).toBe(true);
-    expect(onFinalizeSession).toHaveBeenCalledWith("s1", "Lost idle turn");
+    expect(onFinalizeSession).toHaveBeenCalledWith("s1", "Lost idle turn", true);
     expect(onFinalDeliveryCommitted).toHaveBeenCalledWith("s1");
   });
 
@@ -318,14 +320,14 @@ describe("bot/session-output-coordinator", () => {
     coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
 
     await vi.advanceTimersByTimeAsync(100);
-    expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "One");
-    expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "Two");
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "One", false);
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "Two", false);
 
     // "Two" failed: retried before "Three", order preserved.
     await vi.advanceTimersByTimeAsync(100);
-    expect(onFinalizeSession).toHaveBeenNthCalledWith(3, "s1", "Two");
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(3, "s1", "Two", false);
     await vi.advanceTimersByTimeAsync(100);
-    expect(onFinalizeSession).toHaveBeenNthCalledWith(4, "s1", "Three");
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(4, "s1", "Three", true);
   });
 
   it("does not commit an older finalization when a newer completion arrives during delivery", async () => {
@@ -351,7 +353,7 @@ describe("bot/session-output-coordinator", () => {
     coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
 
     await vi.advanceTimersByTimeAsync(100);
-    expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "Old");
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "Old", true);
 
     coordinator.dispatch({
       kind: "assistant_complete",
@@ -366,7 +368,7 @@ describe("bot/session-output-coordinator", () => {
 
     await vi.advanceTimersByTimeAsync(100);
 
-    expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "New");
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "New", true);
     expect(onFinalDeliveryCommitted).toHaveBeenCalledTimes(1);
     expect(onFinalDeliveryCommitted).toHaveBeenCalledWith("s1");
   });
@@ -400,7 +402,12 @@ describe("bot/session-output-coordinator", () => {
     try {
       const onFinalizeSession = vi.fn().mockRejectedValue(new Error("telegram down"));
       const onFinalDeliveryCommitted = vi.fn();
-      const coordinator = createCoordinator({ onFinalizeSession, onFinalDeliveryCommitted });
+      const onFinalDeliveryGiveUp = vi.fn();
+      const coordinator = createCoordinator({
+        onFinalizeSession,
+        onFinalDeliveryCommitted,
+        onFinalDeliveryGiveUp,
+      });
 
       coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
 
@@ -410,6 +417,47 @@ describe("bot/session-output-coordinator", () => {
 
       expect(onFinalizeSession.mock.calls.length).toBeLessThanOrEqual(51);
       expect(onFinalDeliveryCommitted).not.toHaveBeenCalled();
+      // The dropped turn releases its run record so no stale clock leaks
+      // into a later delivery.
+      expect(onFinalDeliveryGiveUp).toHaveBeenCalledWith("s1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never drops a rate-limited final delivery, no matter how long the flood lasts", async () => {
+    vi.useFakeTimers();
+    try {
+      const { RateLimitExceededError } = await import(
+        "../../src/bot/telegram-rate-limiter.js"
+      );
+      const onFinalizeSession = vi.fn(async () => {
+        throw new RateLimitExceededError("final:s1");
+      });
+      const onFinalDeliveryCommitted = vi.fn().mockResolvedValue(undefined);
+      const coordinator = createCoordinator({ onFinalizeSession, onFinalDeliveryCommitted });
+
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m1",
+        text: "Reply",
+      });
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+
+      // Far beyond the give-up budget: still retrying, nothing dropped.
+      for (let attempt = 0; attempt < 70; attempt++) {
+        await vi.advanceTimersByTimeAsync(15_000);
+      }
+      expect(onFinalizeSession.mock.calls.length).toBeGreaterThan(51);
+      expect(onFinalDeliveryCommitted).not.toHaveBeenCalled();
+
+      // Flood over: the very same turn text finally lands.
+      onFinalizeSession.mockResolvedValue(true);
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(onFinalizeSession).toHaveBeenLastCalledWith("s1", "Reply", true);
+      expect(onFinalDeliveryCommitted).toHaveBeenCalledWith("s1");
     } finally {
       vi.useRealTimers();
     }

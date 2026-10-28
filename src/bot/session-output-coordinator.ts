@@ -1,4 +1,5 @@
 import { logger } from "../utils/logger.js";
+import { RateLimitExceededError } from "./telegram-rate-limiter.js";
 import type { Question } from "../question/types.js";
 import type { PermissionRequest } from "../permission/types.js";
 import type {
@@ -92,8 +93,14 @@ interface SessionOutputActionHandlers {
 
 interface SessionOutputCoordinatorOptions {
   settleMs: number;
-  onFinalizeSession: (sessionId: string, pendingCompletionText: string | null) => Promise<boolean>;
+  onFinalizeSession: (
+    sessionId: string,
+    pendingCompletionText: string | null,
+    isLast: boolean,
+  ) => Promise<boolean>;
   onFinalDeliveryCommitted: (sessionId: string) => Promise<void>;
+  /** Optional: invoked once when the give-up budget is exhausted and the pending turn is dropped. */
+  onFinalDeliveryGiveUp?: (sessionId: string) => Promise<void> | void;
   handlers: SessionOutputActionHandlers;
 }
 
@@ -106,8 +113,10 @@ export class SessionOutputCoordinator {
   private readonly onFinalizeSession: (
     sessionId: string,
     pendingCompletionText: string | null,
+    isLast: boolean,
   ) => Promise<boolean>;
   private readonly onFinalDeliveryCommitted: (sessionId: string) => Promise<void>;
+  private readonly onFinalDeliveryGiveUp?: (sessionId: string) => Promise<void> | void;
   private readonly handlers: SessionOutputActionHandlers;
   private readonly sessionTasks = new Map<string, Promise<void>>();
   private readonly finalDeliveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -125,6 +134,7 @@ export class SessionOutputCoordinator {
     this.settleMs = options.settleMs;
     this.onFinalizeSession = options.onFinalizeSession;
     this.onFinalDeliveryCommitted = options.onFinalDeliveryCommitted;
+    this.onFinalDeliveryGiveUp = options.onFinalDeliveryGiveUp;
     this.handlers = options.handlers;
   }
 
@@ -250,7 +260,7 @@ export class SessionOutputCoordinator {
     this.scheduleFinalDelivery(sessionId);
   }
 
-  scheduleFinalDelivery(sessionId: string): void {
+  scheduleFinalDelivery(sessionId: string, delayMs: number = this.settleMs): void {
     if (!sessionId) {
       return;
     }
@@ -274,7 +284,7 @@ export class SessionOutputCoordinator {
 
         return await this.runFinalDelivery(sessionId);
       });
-    }, this.settleMs);
+    }, delayMs);
 
     this.finalDeliveryTimers.set(sessionId, timer);
   }
@@ -284,6 +294,7 @@ export class SessionOutputCoordinator {
     this.pendingFinalDeliveries.delete(sessionId);
     this.activityVersions.delete(sessionId);
     this.finalDeliveryAttempts.delete(sessionId);
+    this.rateLimitStreaks.delete(sessionId);
   }
 
   clearSession(sessionId: string): void {
@@ -303,6 +314,7 @@ export class SessionOutputCoordinator {
     this.pendingFinalDeliveries.clear();
     this.pendingAssistantCompletions.clear();
     this.activityVersions.clear();
+    this.rateLimitStreaks.clear();
     this.sessionTasks.clear();
   }
 
@@ -341,6 +353,14 @@ export class SessionOutputCoordinator {
 
   private readonly finalDeliveryAttempts = new Map<string, number>();
   private static readonly MAX_FINAL_DELIVERY_ATTEMPTS = 50;
+  /**
+   * Delay before retrying a rate-limited final delivery. Long on purpose:
+   * Telegram flood waits are measured in seconds-to-minutes, and hammering
+   * every settle interval only extends them.
+   */
+  private static readonly RATE_LIMIT_RETRY_DELAY_MS = 15_000;
+  /** Consecutive rate-limited final deliveries per session (log throttling). */
+  private readonly rateLimitStreaks = new Map<string, number>();
 
   private async runFinalDelivery(sessionId: string): Promise<boolean> {
     const snapshot = this.pendingAssistantCompletions.get(sessionId) ?? [];
@@ -348,11 +368,27 @@ export class SessionOutputCoordinator {
     // fresh queue and trigger another round instead of being committed early.
     this.pendingAssistantCompletions.delete(sessionId);
 
-    const deliverNext = async (text: string | null): Promise<boolean> => {
+    const deliverNext = async (text: string | null, isLast: boolean): Promise<boolean> => {
       let finalized: boolean;
       try {
-        finalized = await this.onFinalizeSession(sessionId, text);
+        finalized = await this.onFinalizeSession(sessionId, text, isLast);
       } catch (error) {
+        // Telegram flood control is transient: keep the turn queued and
+        // retry with a long delay instead of spending the give-up budget.
+        // Dropping here is what froze topics after a 429 storm even though
+        // the retry_after window had long passed.
+        if (error instanceof RateLimitExceededError) {
+          const streak = (this.rateLimitStreaks.get(sessionId) ?? 0) + 1;
+          this.rateLimitStreaks.set(sessionId, streak);
+          if (streak === 1 || streak % 10 === 0) {
+            logger.warn("[Bot] Session final delivery rate-limited; keeping it queued", {
+              sessionId,
+              streak,
+            });
+          }
+          this.scheduleFinalDelivery(sessionId, SessionOutputCoordinator.RATE_LIMIT_RETRY_DELAY_MS);
+          return false;
+        }
         if (!this.noteFinalDeliveryAttempt(sessionId, error)) {
           return false;
         }
@@ -372,12 +408,18 @@ export class SessionOutputCoordinator {
 
     if (snapshot.length === 0) {
       // No turn text, but the flush still repaints pin/keyboard state.
-      if (!(await deliverNext(null))) {
+      if (!(await deliverNext(null, true))) {
         return false;
       }
     } else {
       for (let index = 0; index < snapshot.length; index++) {
-        if (!(await deliverNext(snapshot[index]?.text ?? null))) {
+        // Only the very last message of the turn carries any footer;
+        // earlier ones go out plain. Arrivals queued mid-delivery mean
+        // this batch is not the last, so none of them takes the footer.
+        const arrivalsPending = (this.pendingAssistantCompletions.get(sessionId)?.length ?? 0) > 0;
+        const isLast =
+          index === snapshot.length - 1 && !arrivalsPending;
+        if (!(await deliverNext(snapshot[index]?.text ?? null, isLast))) {
           // Keep the undelivered tail ahead of any arrivals from the retry
           // window so turn order is preserved.
           const remaining = snapshot.slice(index).filter((item) => item.text.trim().length > 0);
@@ -395,6 +437,7 @@ export class SessionOutputCoordinator {
     }
 
     this.finalDeliveryAttempts.delete(sessionId);
+    this.rateLimitStreaks.delete(sessionId);
     this.pendingFinalDeliveries.delete(sessionId);
     this.activityVersions.delete(sessionId);
     this.pendingAssistantCompletions.delete(sessionId);
@@ -421,6 +464,18 @@ export class SessionOutputCoordinator {
     this.finalDeliveryAttempts.delete(sessionId);
     this.pendingFinalDeliveries.delete(sessionId);
     this.pendingAssistantCompletions.delete(sessionId);
+    // The turn is dropped: clear any run record so its clock can never leak
+    // into a later, unrelated delivery.
+    void (async () => {
+      try {
+        await this.onFinalDeliveryGiveUp?.(sessionId);
+      } catch (giveUpError) {
+        logger.warn("[Bot] Final delivery give-up hook failed", {
+          sessionId,
+          error: giveUpError,
+        });
+      }
+    })();
     return false;
   }
 

@@ -69,7 +69,7 @@ Fork sync notes: [`FORK_SYNC.md`](./FORK_SYNC.md)
 - **Pinned dashboards** — per-topic pinned message with session, project, model, context usage, cost, and changed files.
 - **Prompt queue** — prompts sent while a session is busy are queued, survive restarts, and support per-message cancel, move-to-front, and interrupt-and-run via `/queue`.
 - **Permissions and questions** — interactive `allow once` / `always` / `reject` flows and question polls with full numbered options in the message plus short numbered buttons, custom text, and voice answers; per-session trust levels via `/trust ask|edits|all`.
-- **Final-answer footer** — every answer closes with agent, model, and elapsed time (`🛠️ Build · opus · 1m 30s`), so the last message is always recognizable.
+- **Final-answer footer** — only the last message of a turn carries the `agent · model · elapsed` footer (`🛠️ Build · opus · 1m 30s`), so the end of the answer is always recognizable. Earlier messages go out plain.
 - **Pickers and keyboard** — model, agent, variant, and context controls from the persistent keyboard, favorites first.
 - **`/display` menu** — per-chat/topic show/hide toggles plus an agent shortcut and a Cancel button; overrides persist in `settings.json`.
 - **Session management** — `/retry` the last prompt, `/diff`, `/commit`, `/cost` spend tracking with `BUDGET_ALERT_USD`, `/close`, `/fork`, `/share`, `/rename`, `/refresh`, saved prompt shortcuts (`/saved`), custom commands (`/commands`), skills (`/skills`).

@@ -203,6 +203,7 @@ export const config = {
     model: getEnvVar("STT_MODEL", false) || "whisper-large-v3-turbo",
     language: getEnvVar("STT_LANGUAGE", false),
     notePrompt: getEnvVar("STT_NOTE_PROMPT", false),
+    ffmpegPath: getEnvVar("STT_FFMPEG_PATH", false),
     timeoutMs: Math.max(1, getOptionalNonNegativeIntEnvVarFromKeys(["STT_TIMEOUT_SEC"], 60)) * 1000,
   },
   tts: {

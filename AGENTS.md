@@ -79,7 +79,9 @@ OpenCode Server
 
 ### Git
 
-- **Commits:** Never create commits automatically. Commit only when the user explicitly asks.
+- **Commits:** Commit every finished change automatically once it is verified (`npm run build`, `npm run lint`, `npm test` all green). Commit locally only — never push without an explicit request.
+- **Versions:** Never bump `package.json` versions in change commits. Version bumps happen only at release time (manual or release workflow).
+- **Push/restart/publish:** Only on explicit user request. This includes `git push`, service restarts, and npm/GitHub releases.
 
 ### Windows / PowerShell
 

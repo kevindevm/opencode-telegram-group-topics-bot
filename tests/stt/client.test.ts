@@ -6,6 +6,7 @@ const mocked = vi.hoisted(() => ({
     apiKey: "",
     protocol: "openai",
     audioField: "",
+    ffmpegPath: "",
     model: "whisper-large-v3-turbo",
     language: "",
     notePrompt: "",
@@ -49,6 +50,7 @@ describe("stt/client", () => {
     mocked.stt.apiKey = "";
     mocked.stt.protocol = "openai";
     mocked.stt.audioField = "";
+    mocked.stt.ffmpegPath = "";
     mocked.stt.model = "whisper-large-v3-turbo";
     mocked.stt.language = "";
     vi.stubGlobal("fetch", mocked.fetchMock);
@@ -128,6 +130,26 @@ describe("stt/client", () => {
     expect(args).toContain("pcm_s16le");
     const form = (mocked.fetchMock.mock.calls[0] as [string, RequestInit])[1].body as FormData;
     expect((form.get("audio") as File).name).toBe("note.wav");
+  });
+
+  it("uses STT_FFMPEG_PATH when set", async () => {
+    mocked.stt.protocol = "plain";
+    mocked.stt.apiUrl = "http://127.0.0.1:8000/transcribe";
+    mocked.stt.ffmpegPath = "C:\\tools\\ffmpeg.exe";
+    const child = fakeChild();
+    mocked.execFileMock.mockImplementation(
+      (_bin: string, _args: string[], _opts: unknown, callback: (...args: unknown[]) => void) => {
+        callback(null, Buffer.from("RIFFconverted"));
+        return child;
+      },
+    );
+    const { transcribeAudio } = await loadClient();
+
+    await transcribeAudio(Buffer.from("oggdata"), "note.oga");
+
+    expect(mocked.execFileMock).toHaveBeenCalledTimes(1);
+    expect((mocked.execFileMock.mock.calls[0] as [string])[0]).toBe("C:\\tools\\ffmpeg.exe");
+    mocked.stt.ffmpegPath = "";
   });
 
   it("serializes concurrent transcriptions", async () => {
