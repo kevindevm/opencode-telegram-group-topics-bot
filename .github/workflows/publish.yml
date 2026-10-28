@@ -132,14 +132,12 @@ jobs:
 
       - name: Publish to npm
         if: steps.determine.outputs.should_release == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [ "${{ github.event.repository.private }}" = "true" ]; then
-            echo "Private repository detected: publishing without provenance"
-            npm publish --access public --tag ${{ steps.determine.outputs.dist_tag }}
-          else
-            echo "Public repository detected: publishing with provenance"
-            npm publish --access public --tag ${{ steps.determine.outputs.dist_tag }} --provenance
-          fi
+          # Token auth (NPM_TOKEN secret): no --provenance, attestation
+          # requires OIDC trusted publishing instead of a static token.
+          npm publish --access public --tag ${{ steps.determine.outputs.dist_tag }}
 
       - name: Create and push git tag
         if: steps.determine.outputs.should_release == 'true'
