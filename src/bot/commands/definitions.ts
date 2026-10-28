@@ -40,6 +40,7 @@ const COMMAND_DEFINITIONS: BotCommandI18nDefinition[] = [
   { command: BOT_COMMAND.COMMIT, descriptionKey: "cmd.description.commit" },
   { command: BOT_COMMAND.COST, descriptionKey: "cmd.description.cost" },
   { command: BOT_COMMAND.CLOSE, descriptionKey: "cmd.description.close" },
+  { command: BOT_COMMAND.CLEANUP, descriptionKey: "cmd.description.cleanup" },
   { command: BOT_COMMAND.FORK, descriptionKey: "cmd.description.fork" },
   { command: BOT_COMMAND.SHARE, descriptionKey: "cmd.description.share" },
   { command: BOT_COMMAND.SAVED, descriptionKey: "cmd.description.saved" },

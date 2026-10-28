@@ -14,6 +14,7 @@ vi.mock("../../src/opencode/client.js", () => ({
 }));
 
 import {
+  getReconnectDelayMs,
   stopEventListening,
   subscribeToEvents,
   unsubscribeFromEvents,
@@ -233,6 +234,30 @@ describe("opencode/events", () => {
     );
   });
 
+  it("watchdog forces a reconnect when the stream goes silent", async () => {
+    vi.useFakeTimers();
+    try {
+      subscribeMock.mockImplementation(
+        async (_params: unknown, options: { signal: AbortSignal }) => ({
+          stream: createAbortableStream(options.signal),
+        }),
+      );
+
+      await subscribeToEvents("/repo/a", vi.fn());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(subscribeMock).toHaveBeenCalledTimes(1);
+
+      // No event (not even a heartbeat) for over a minute: the watchdog
+      // aborts the stalled subscribe and the loop reconnects (the extra
+      // advance covers the reconnect backoff delay).
+      await vi.advanceTimersByTimeAsync(75_000);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(subscribeMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reconnects after non-fatal stream error", async () => {
     subscribeMock
       .mockRejectedValueOnce(new Error("transient error"))
@@ -248,5 +273,17 @@ describe("opencode/events", () => {
       },
       { timeout: 3000 },
     );
+  });
+
+  it("bounds reconnect backoff with downward jitter", () => {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const first = getReconnectDelayMs(1);
+      expect(first).toBeGreaterThanOrEqual(500);
+      expect(first).toBeLessThanOrEqual(1000);
+    }
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      expect(getReconnectDelayMs(100)).toBeLessThanOrEqual(15000);
+    }
   });
 });

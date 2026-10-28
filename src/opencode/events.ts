@@ -7,11 +7,24 @@ type EventCallback = (event: Event) => void | Promise<void>;
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 15000;
 const FATAL_NO_STREAM_ERROR = "No stream returned from event subscription";
+/**
+ * Idle watchdog: the V2 adapter synthesizes a `server.heartbeat` from SDK
+ * keepalives at least every 10s, so a healthy stream is never silent for a
+ * full minute. Past the threshold the TCP is half-open (for-await never
+ * returns) and the only recovery is forcing a reconnect. The threshold backs
+ * off while reconnects keep delivering nothing (a server with no keepalives
+ * would otherwise churn forever) and resets on the first real event.
+ */
+const WATCHDOG_BASE_IDLE_MS = 60_000;
+const WATCHDOG_MAX_IDLE_MS = 600_000;
+const WATCHDOG_CHECK_MS = 15_000;
 
 interface SharedStreamState {
   abortController: AbortController;
   loopPromise: Promise<void> | null;
   directory: string;
+  lastEventAt: number;
+  watchdogIdleMs: number;
 }
 
 /**
@@ -24,9 +37,12 @@ interface SharedStreamState {
 const callbacksByDirectory = new Map<string, Set<EventCallback>>();
 let sharedStream: SharedStreamState | null = null;
 
-function getReconnectDelayMs(attempt: number): number {
+export function getReconnectDelayMs(attempt: number): number {
   const exponentialDelay = RECONNECT_BASE_DELAY_MS * Math.pow(2, Math.max(0, attempt - 1));
-  return Math.min(exponentialDelay, RECONNECT_MAX_DELAY_MS);
+  const capped = Math.min(exponentialDelay, RECONNECT_MAX_DELAY_MS);
+  // Jitter downwards so clients that dropped together do not reconnect in
+  // lockstep and hammer the server.
+  return Math.floor(capped * (0.5 + Math.random() * 0.5));
 }
 
 function waitWithAbort(ms: number, signal: AbortSignal): Promise<boolean> {
@@ -95,10 +111,44 @@ async function runSharedLoop(state: SharedStreamState): Promise<void> {
   const isCurrent = (): boolean => sharedStream === state;
 
   while (!abortController.signal.aborted && hasCallbacks() && isCurrent()) {
+    // Per-iteration controller: the watchdog aborts only this subscribe, so
+    // the for-await below throws and the loop continues into the normal
+    // reconnect path. The parent abort still stops the loop for good.
+    const iterController = new AbortController();
+    const onParentAbort = (): void => iterController.abort();
+    if (abortController.signal.aborted) {
+      break;
+    }
+    abortController.signal.addEventListener("abort", onParentAbort, { once: true });
+
+    let watchdogFired = false;
+    const watchdog = setInterval(() => {
+      if (
+        abortController.signal.aborted ||
+        iterController.signal.aborted ||
+        !hasCallbacks() ||
+        !isCurrent()
+      ) {
+        return;
+      }
+
+      if (Date.now() - state.lastEventAt <= state.watchdogIdleMs) {
+        return;
+      }
+
+      watchdogFired = true;
+      logger.warn("[Events] Stream idle past watchdog, forcing reconnect", {
+        directory: state.directory,
+        idleMs: Date.now() - state.lastEventAt,
+        watchdogIdleMs: state.watchdogIdleMs,
+      });
+      iterController.abort();
+    }, WATCHDOG_CHECK_MS);
+
     try {
       const result = await opencodeClient.event.subscribe(
         { directory: state.directory },
-        { signal: abortController.signal },
+        { signal: iterController.signal },
       );
 
       if (!result.stream) {
@@ -106,10 +156,18 @@ async function runSharedLoop(state: SharedStreamState): Promise<void> {
       }
 
       reconnectAttempt = 0;
+      state.lastEventAt = Date.now();
 
       for await (const event of result.stream) {
         if (abortController.signal.aborted || !hasCallbacks() || !isCurrent()) {
           break;
+        }
+
+        state.lastEventAt = Date.now();
+        // Heartbeats only prove the TCP is alive; only real events reset the
+        // backoff (the union type lacks the synthetic heartbeat, hence the cast).
+        if ((event as { type?: string }).type !== "server.heartbeat") {
+          state.watchdogIdleMs = WATCHDOG_BASE_IDLE_MS;
         }
 
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -121,6 +179,13 @@ async function runSharedLoop(state: SharedStreamState): Promise<void> {
 
       if (abortController.signal.aborted || !hasCallbacks() || !isCurrent()) {
         break;
+      }
+
+      if (watchdogFired) {
+        // The stream stalled with no events at all: back the watchdog off so
+        // a server without keepalives does not churn reconnects forever. The
+        // next real event resets it to the base threshold.
+        state.watchdogIdleMs = Math.min(state.watchdogIdleMs * 2, WATCHDOG_MAX_IDLE_MS);
       }
 
       reconnectAttempt++;
@@ -147,16 +212,29 @@ async function runSharedLoop(state: SharedStreamState): Promise<void> {
 
       reconnectAttempt++;
       const reconnectDelay = getReconnectDelayMs(reconnectAttempt);
-      logger.error(
-        `[Events] Stream failed, reconnecting`,
-        { directory: state.directory, reconnectAttempt, reconnectDelay },
-        error,
-      );
+      // A watchdog abort is our own doing (idle stream, see above): warn,
+      // do not file it as a stream failure.
+      if (watchdogFired) {
+        logger.warn(`[Events] Watchdog reconnected an idle stream`, {
+          directory: state.directory,
+          reconnectAttempt,
+          reconnectDelay,
+        });
+      } else {
+        logger.error(
+          `[Events] Stream failed, reconnecting`,
+          { directory: state.directory, reconnectAttempt, reconnectDelay },
+          error,
+        );
+      }
 
       const shouldContinue = await waitWithAbort(reconnectDelay, abortController.signal);
       if (!shouldContinue) {
         break;
       }
+    } finally {
+      clearInterval(watchdog);
+      abortController.signal.removeEventListener("abort", onParentAbort);
     }
   }
 }
@@ -170,6 +248,8 @@ function ensureSharedLoop(directory: string): void {
     abortController: new AbortController(),
     loopPromise: null,
     directory,
+    lastEventAt: Date.now(),
+    watchdogIdleMs: WATCHDOG_BASE_IDLE_MS,
   };
   sharedStream = state;
   state.loopPromise = runSharedLoop(state)

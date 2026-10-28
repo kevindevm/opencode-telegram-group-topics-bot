@@ -1,6 +1,6 @@
 import { getTopicBindingBySessionId } from "../topic/manager.js";
 import { TOPIC_SESSION_STATUS } from "../settings/manager.js";
-import { consumeForwardedPrompt } from "../session/forwarded-prompts.js";
+import { claimPcTextMirror, consumeForwardedPrompt } from "../session/forwarded-prompts.js";
 
 export interface PcUserMirrorTarget {
   chatId: number;
@@ -75,6 +75,11 @@ export function takePcUserText(
   }
 
   if (consumeForwardedPrompt(sessionId, normalized)) {
+    // The prompt came from Telegram, so there is nothing to mirror. Claim
+    // the text anyway: the run-start fallback peeks (not consumes) the
+    // forwarded mark and would otherwise echo this same prompt ~3s later,
+    // after the thinking indicator.
+    claimPcTextMirror(sessionId, normalized);
     return null;
   }
 

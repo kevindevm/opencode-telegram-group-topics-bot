@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { InputFile } from "grammy";
 import { sendTtsResponseForSession } from "../../../src/bot/utils/send-tts-response.js";
+import { MAX_429_ATTEMPTS } from "../../../src/bot/telegram-rate-limiter.js";
 import { t } from "../../../src/i18n/index.js";
 
 vi.mock("../../../src/utils/logger.js", () => ({
@@ -146,6 +147,42 @@ describe("bot/utils/send-tts-response", () => {
     await expect(resultPromise).resolves.toBe(true);
     expect(sendAudioMock).toHaveBeenCalledTimes(2);
     expect(sendMessageMock).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it("gives up after repeated Telegram rate limits instead of retrying forever", async () => {
+    vi.useFakeTimers();
+
+    const sendMessageMock = vi.fn().mockResolvedValue(undefined);
+    const sendAudioMock = vi
+      .fn()
+      .mockRejectedValue({ parameters: { retry_after: 1 } });
+    const synthesizeSpeechMock = vi.fn().mockResolvedValue({
+      buffer: Buffer.from("mp3"),
+      filename: "assistant-reply.mp3",
+      mimeType: "audio/mpeg",
+    });
+
+    const resultPromise = sendTtsResponseForSession({
+      api: { sendAudio: sendAudioMock, sendMessage: sendMessageMock },
+      sessionId: "session-1",
+      chatId: 123,
+      threadId: 55,
+      text: "Hello from audio",
+      consumeResponseMode: () => "text_and_tts",
+      isTtsConfigured: () => true,
+      synthesizeSpeech: synthesizeSpeechMock,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(resultPromise).resolves.toBe(false);
+
+    // Bounded budget: one initial attempt plus the shared give-up budget.
+    expect(sendAudioMock).toHaveBeenCalledTimes(MAX_429_ATTEMPTS + 1);
+    expect(sendMessageMock).toHaveBeenCalledWith(123, t("tts.failed"), {
+      message_thread_id: 55,
+    });
 
     vi.useRealTimers();
   });

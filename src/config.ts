@@ -41,7 +41,9 @@ function getOptionalNonNegativeIntEnvVarFromKeys(keys: string[], defaultValue: n
 
     const parsedValue = Number.parseInt(value, 10);
     if (Number.isNaN(parsedValue) || parsedValue < 0) {
-      return defaultValue;
+      // Ignore the invalid value and keep looking: a legacy alias further
+      // down the list may still hold a valid setting.
+      continue;
     }
 
     return parsedValue;
@@ -125,6 +127,13 @@ function getOptionalMessageFormatModeEnvVar(
   return defaultValue;
 }
 
+// Read once: apiUrl must follow the same version decision as serverVersion,
+// even if the environment changed between two reads.
+const opencodeServerVersion = getOptionalOpencodeServerVersionEnvVar(
+  "OPENCODE_SERVER_VERSION",
+  "v1",
+);
+
 export const config = {
   telegram: {
     token: getEnvVar("TELEGRAM_BOT_TOKEN"),
@@ -132,12 +141,9 @@ export const config = {
     proxyUrl: getEnvVar("TELEGRAM_PROXY_URL", false),
   },
   opencode: {
-    serverVersion: getOptionalOpencodeServerVersionEnvVar("OPENCODE_SERVER_VERSION", "v1"),
+    serverVersion: opencodeServerVersion,
     apiUrl:
-      getEnvVar("OPENCODE_API_URL", false) ||
-      DEFAULT_OPENCODE_API_URLS[
-        getOptionalOpencodeServerVersionEnvVar("OPENCODE_SERVER_VERSION", "v1")
-      ],
+      getEnvVar("OPENCODE_API_URL", false) || DEFAULT_OPENCODE_API_URLS[opencodeServerVersion],
     username: getEnvVar("OPENCODE_SERVER_USERNAME", false) || "opencode",
     password: getEnvVar("OPENCODE_SERVER_PASSWORD", false),
     autoStart: getOptionalBooleanEnvVar("OPENCODE_AUTO_START", true),
@@ -182,7 +188,7 @@ export const config = {
     showLinkPreviews: getOptionalBooleanEnvVar("SHOW_LINK_PREVIEWS", true),
     messageFormatMode: getOptionalMessageFormatModeEnvVar("MESSAGE_FORMAT_MODE", "markdown"),
     trackBackgroundSessions: getOptionalBooleanEnvVar("TRACK_BACKGROUND_SESSIONS", true),
-    backgroundOfferAfterSec: getOptionalPositiveIntEnvVar("BACKGROUND_OFFER_AFTER_SEC", 30),
+    backgroundOfferAfterSec: getOptionalPositiveIntEnvVar("BACKGROUND_OFFER_AFTER_SEC", 3),
   },
   files: {
     maxFileSizeKb: getOptionalNonNegativeIntEnvVarFromKeys(["CODE_FILE_MAX_SIZE_KB"], 100),
@@ -190,9 +196,14 @@ export const config = {
   stt: {
     apiUrl: getEnvVar("STT_API_URL", false),
     apiKey: getEnvVar("STT_API_KEY", false),
+    protocol: getEnvVar("STT_PROTOCOL", false) === "plain" ? "plain" : "openai",
+    // Multipart field carrying the audio. Defaults to the spec of each
+    // protocol ("file" for OpenAI-compatible, "audio" for plain workers).
+    audioField: getEnvVar("STT_AUDIO_FIELD", false),
     model: getEnvVar("STT_MODEL", false) || "whisper-large-v3-turbo",
     language: getEnvVar("STT_LANGUAGE", false),
     notePrompt: getEnvVar("STT_NOTE_PROMPT", false),
+    timeoutMs: Math.max(1, getOptionalNonNegativeIntEnvVarFromKeys(["STT_TIMEOUT_SEC"], 60)) * 1000,
   },
   tts: {
     apiUrl: getEnvVar("TTS_API_URL", false),
@@ -201,6 +212,9 @@ export const config = {
     voice: getEnvVar("TTS_VOICE", false) || "alloy",
   },
   cost: {
-    budgetAlertUsd: Number.parseFloat(getEnvVar("BUDGET_ALERT_USD", false) || "0") || 0,
+    budgetAlertUsd: Math.max(
+      0,
+      Number.parseFloat(getEnvVar("BUDGET_ALERT_USD", false) || "0") || 0,
+    ),
   },
 };

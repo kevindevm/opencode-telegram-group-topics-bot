@@ -110,6 +110,32 @@ class InteractionManager {
     return referenceTimeMs >= state.expiresAt;
   }
 
+  /**
+   * Deletes every interaction whose TTL already elapsed (dead topics/menus
+   * that never received another message would otherwise linger forever).
+   * The currently handled scope can be excluded so the guard still reports
+   * its own expiry with the dedicated "expired" reason.
+   */
+  purgeExpired(referenceTimeMs: number = Date.now(), excludeScopeKey?: string): string[] {
+    const cleared: string[] = [];
+
+    for (const [scopeKey, state] of this.stateByScope) {
+      if (scopeKey === excludeScopeKey || state.expiresAt === null) {
+        continue;
+      }
+
+      if (referenceTimeMs >= state.expiresAt) {
+        this.stateByScope.delete(scopeKey);
+        logger.info(
+          `[InteractionManager] Purged expired interaction: reason=expired, kind=${state.kind}, expectedInput=${state.expectedInput}`,
+        );
+        cleared.push(scopeKey);
+      }
+    }
+
+    return cleared;
+  }
+
   transition(
     options: TransitionInteractionOptions,
     scopeKey: string = "global",

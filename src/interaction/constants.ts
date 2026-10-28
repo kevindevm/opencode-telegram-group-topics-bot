@@ -18,6 +18,7 @@ export const INTERACTION_CLEAR_REASON = {
   MODEL_SEARCH_CANCELLED: "model_search_cancelled",
   MODEL_SEARCH_COMPLETED: "model_search_completed",
   MODEL_SEARCH_FAILED: "model_search_failed",
+  STALE_FLOW: "stale_flow",
   PROJECT_SWITCHED: "project_switched",
   PROJECT_SELECT_ERROR: "project_select_error",
   SESSION_SELECT_ERROR: "session_select_error",
@@ -25,6 +26,7 @@ export const INTERACTION_CLEAR_REASON = {
   PERMISSION_INACTIVE_CALLBACK: "permission_inactive_callback",
   PERMISSION_INVALID_RUNTIME_CONTEXT: "permission_invalid_runtime_context",
   PERMISSION_REPLIED: "permission_replied",
+  CLEANUP_SUBAGENT_TOPICS: "cleanup_subagent_topics",
 } as const;
 
 export type InteractionClearReasonValue =

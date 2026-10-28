@@ -13,7 +13,7 @@ export const en = {
   "cmd.description.skills": "Skills catalog",
   "cmd.description.model": "Select model",
   "cmd.description.agent": "Select agent",
-  "cmd.description.cleanup": "Close stale topic threads",
+  "cmd.description.cleanup": "Delete subagent transcript topics",
   "cmd.description.opencode_start": "Start OpenCode server",
   "cmd.description.opencode_stop": "Stop OpenCode server",
   "cmd.description.recent": "Browse recent sessions across projects",
@@ -77,6 +77,8 @@ export const en = {
     "⏳ Your last request is still running, so this new one was not started.\n\nWhy this happened: OpenCode accepts one active run per session.\nWhat to do: wait for the current reply, or use /abort if it seems stuck, then send your message again.",
   "bot.session_queued":
     "📝 Your message was queued for this session.\n\nQueue position: {position}\nWhat happens next: it will start automatically after the current run finishes.",
+  "bot.session_queued_duplicate":
+    "⏳ That message is already queued at position {position}; not adding it twice.",
   "bot.session_queued_cancel": "❌ Cancel queued message",
   "bot.session_queue_steer": "⚡ Interrupt & run now",
   "bot.session_queue_front": "⏫ Move to front",
@@ -318,6 +320,9 @@ export const en = {
   "cleanup.no_topics": "✅ No topic sessions to clean up.",
   "cleanup.result":
     "🧹 Cleanup complete. Checked: {inspected}, closed: {closed}, skipped: {skipped}, failed: {failed}.",
+  "cleanup.subagents_none": "✅ No subagent transcript topics to delete.",
+  "cleanup.subagents_result":
+    "🧹 Deleted {deleted} subagent transcript topics. Failed: {failed}.",
 
   "stop.no_active_session":
     "🛑 Agent was not started\n\nCreate a session with /new or select one via /sessions.",
@@ -364,9 +369,9 @@ export const en = {
   "reload.v1_not_supported":
     "⚠️ /reload needs an OpenCode V2 server (set OPENCODE_SERVER_VERSION=v2).",
 
-  "refresh.last_message": "📋 Último mensaje: {preview}",
-  "refresh.subscribed": "✅ Suscripción activa a la sesión",
-  "refresh.no_topic": "⚠️ No hay topic vinculado",
+  "refresh.last_message": "📋 Last message: {preview}",
+  "refresh.subscribed": "✅ Subscribed to session events",
+  "refresh.no_topic": "⚠️ No topic linked",
 
   "pcuser.echo": "🧑 {text}",
 
@@ -526,6 +531,8 @@ export const en = {
   "tool.background_button": "⏪ Send to background",
   "tool.background_offer":
     "⏳ This command is running:\n{command}\n\nSend it to the background and keep doing something else?",
+  "tool.background_offer_subagent":
+    "⏳ This subagent is still working:\n{command}\n\nSend it to the background and keep doing something else?",
   "tool.background_no_command": "a long command",
   "tool.background_started": "⏪ Sent to background. It keeps running; I'll tell you when it finishes.",
   "tool.background_started_callback": "⏪ Sent to background",
@@ -643,7 +650,8 @@ export const en = {
   "share.load_error": "🔴 Could not load the transcript.",
   "share.empty": "📭 Nothing to share yet.",
   "share.caption": "📄 Transcript: {title}",
-  "share.send_error": "🔴 Could not send the transcript.",
+  "share.send_error": "🔴 Could not send the transcript.",
+
   "share.too_large": "Transcript too large to send (over 50MB).",
   "cmd.description.saved": "Saved prompt shortcuts",
   "saved.title": "🔖 Saved prompts (use /saved run <name>):",
@@ -691,6 +699,7 @@ export const en = {
   "cli.args.invalid_mode": "Invalid mode value: {value}. Expected sources|installed",
   "cli.args.unknown_option": "Unknown option: {value}",
   "cli.args.mode_only_start": "Option --mode is supported only for the start and config commands",
+  "cli.args.daemon_only_start": "Option --daemon is supported only for the start command",
 
   "legacy.models.fetch_error": "🔴 Failed to get models list. Check server status with /status.",
   "legacy.models.empty": "📋 No available models. Configure providers in OpenCode.",

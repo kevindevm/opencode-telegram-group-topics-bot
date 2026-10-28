@@ -37,7 +37,7 @@ function isControlScope(scopeKey: string): boolean {
 class PinnedMessageManager {
   private contexts = new Map<string, ScopeContext>();
   /** In-flight dashboard creations per scope (dedupes concurrent recreations). */
-  private createInFlight = new Map<string, Promise<void>>();
+  private createInFlight = new Map<string, { run: Promise<void>; generation: number }>();
   /** Bumped on clear()/session rotation so stale creates delete their orphan. */
   private generations = new Map<string, number>();
   private createDefaultState(scopeKey: string): PinnedMessageState {
@@ -59,9 +59,10 @@ class PinnedMessageManager {
   }
 
   private async retryTelegramCall<T>(label: string, run: () => Promise<T>): Promise<T> {
-    // Same give-up budget as the queued paths: a persistent 429 storm must
-    // fail the dashboard update, not wedge the caller forever.
-    return runWithRateLimitRetries(`pinned:${label}`, run);
+    // Dashboard repaints are supersedeable: the next throttled update carries
+    // fresher state. Cap retries low so a 429 storm fails fast instead of
+    // multiplying edits (each retry is another edit attempt).
+    return runWithRateLimitRetries(`pinned:${label}`, run, 3);
   }
 
   private getContext(scopeKey: string): ScopeContext {
@@ -176,7 +177,7 @@ class PinnedMessageManager {
     const state = this.getContext(scopeKey).state;
     if (state.sessionTitle !== newTitle && newTitle) {
       state.sessionTitle = newTitle;
-      await this.updatePinnedMessage(scopeKey);
+      this.scheduleThrottledUpdate(scopeKey);
     }
   }
 
@@ -263,7 +264,7 @@ class PinnedMessageManager {
       context.state.assistantCost = totalAssistantCost;
       context.state.sessionId = sessionId;
       this.syncSharedContext(scopeKey);
-      await this.updatePinnedMessage(scopeKey);
+      this.scheduleThrottledUpdate(scopeKey);
     } catch (err) {
       logger.error("[PinnedManager] Error loading context from history:", err);
     }
@@ -285,7 +286,13 @@ class PinnedMessageManager {
     }
 
     const context = this.getContext(scopeKey);
-    context.state.tokensUsed = tokens.input + tokens.cacheRead;
+    // Preserve the history baseline: the live window must never move the
+    // dashboard backwards (history load races message events on reopen).
+    // Compaction re-baselines explicitly via loadContextFromHistory.
+    const rawUsed = tokens.input + tokens.cacheRead;
+    const limit = context.state.tokensLimit > 0 ? context.state.tokensLimit : 0;
+    const highWater = Math.max(context.state.tokensUsed, rawUsed);
+    context.state.tokensUsed = limit > 0 ? Math.min(highWater, limit) : highWater;
     context.state.assistantCost += tokens.cost;
     await this.refreshSessionTitle(scopeKey);
     this.syncSharedContext(scopeKey);
@@ -317,7 +324,14 @@ class PinnedMessageManager {
 
   async onSessionDiff(diffs: FileChange[], scopeKey: string = "global"): Promise<void> {
     const context = this.getContext(scopeKey);
-    if (diffs.length === 0 && context.state.changedFiles.length > 0) {
+    if (diffs.length === 0) {
+      // An empty diff means the working tree is clean: clear the file list
+      // instead of freezing the previous entries on the dashboard.
+      if (context.state.changedFiles.length === 0) {
+        return;
+      }
+      context.state.changedFiles = [];
+      this.scheduleThrottledUpdate(scopeKey);
       return;
     }
 
@@ -355,7 +369,13 @@ class PinnedMessageManager {
       return;
     }
 
-    contextStateManager.update(contextInfo.tokensUsed, contextInfo.tokensLimit, scopeKey);
+    // Never publish used > limit to the keyboard: at saturation the button
+    // must read 100%, not 104% or a frozen older value.
+    const tokensUsed =
+      contextInfo.tokensLimit > 0
+        ? Math.min(contextInfo.tokensUsed, contextInfo.tokensLimit)
+        : contextInfo.tokensUsed;
+    contextStateManager.update(tokensUsed, contextInfo.tokensLimit, scopeKey);
   }
 
   private scheduleThrottledUpdate(scopeKey: string, delayMs: number = 1500): void {
@@ -398,7 +418,7 @@ class PinnedMessageManager {
           additions: d.additions,
           deletions: d.deletions,
         }));
-        await this.updatePinnedMessage(scopeKey);
+        this.scheduleThrottledUpdate(scopeKey);
       }
     } catch (err) {
       logger.debug("[PinnedManager] Could not load diffs from API:", err);
@@ -708,19 +728,31 @@ class PinnedMessageManager {
       return;
     }
 
+    const currentGeneration = this.generations.get(scopeKey) ?? 0;
     const pending = this.createInFlight.get(scopeKey);
     if (pending) {
-      await pending;
-      return;
+      if (pending.generation === currentGeneration) {
+        await pending.run;
+        return;
+      }
+      // Stale generation (rotation happened mid-create): the pending run
+      // deletes its orphan. Wait for it to settle, then fall through and
+      // build the current generation below.
+      await pending.run.catch(() => {});
     }
 
-    const run = this.createPinnedMessage(scopeKey).finally(() => {
-      if (this.createInFlight.get(scopeKey) === run) {
+    const generation = this.generations.get(scopeKey) ?? 0;
+    const entry: { run: Promise<void>; generation: number } = {
+      run: this.createPinnedMessage(scopeKey),
+      generation,
+    };
+    entry.run = entry.run.finally(() => {
+      if (this.createInFlight.get(scopeKey) === entry) {
         this.createInFlight.delete(scopeKey);
       }
     });
-    this.createInFlight.set(scopeKey, run);
-    await run;
+    this.createInFlight.set(scopeKey, entry);
+    await entry.run;
   }
 
   private async updatePinnedMessage(scopeKey: string): Promise<void> {

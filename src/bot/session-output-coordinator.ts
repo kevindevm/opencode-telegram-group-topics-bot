@@ -99,7 +99,6 @@ interface SessionOutputCoordinatorOptions {
 
 interface PendingAssistantCompletion {
   text: string;
-  version: number;
 }
 
 export class SessionOutputCoordinator {
@@ -113,7 +112,13 @@ export class SessionOutputCoordinator {
   private readonly sessionTasks = new Map<string, Promise<void>>();
   private readonly finalDeliveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly pendingFinalDeliveries = new Set<string>();
-  private readonly pendingAssistantCompletions = new Map<string, PendingAssistantCompletion>();
+  /**
+   * Completions waiting for the next final delivery, in arrival order. A
+   * queue (not a single slot): when an SSE gap swallows `session.idle`, the
+   * next idle must deliver every pending turn text, not just the latest —
+   * overwriting the slot silently dropped turns and scrambled message order.
+   */
+  private readonly pendingAssistantCompletions = new Map<string, PendingAssistantCompletion[]>();
   private readonly activityVersions = new Map<string, number>();
 
   constructor(options: SessionOutputCoordinatorOptions) {
@@ -192,10 +197,16 @@ export class SessionOutputCoordinator {
   }
 
   async flushPendingFinalDelivery(sessionId: string): Promise<boolean> {
-    if (!this.pendingFinalDeliveries.has(sessionId)) {
+    const hasScheduledDelivery = this.pendingFinalDeliveries.has(sessionId);
+    const hasQueuedCompletions = (this.pendingAssistantCompletions.get(sessionId)?.length ?? 0) > 0;
+    if (!hasScheduledDelivery && !hasQueuedCompletions) {
       return false;
     }
 
+    // A swallowed `session.idle` leaves queued completions with no scheduled
+    // delivery behind; flushing for the next prompt must still deliver them
+    // instead of waiting for an idle that already happened.
+    this.pendingFinalDeliveries.add(sessionId);
     this.clearFinalDeliveryTimer(sessionId);
     return await this.enqueueTask(sessionId, async () => await this.runFinalDelivery(sessionId));
   }
@@ -311,42 +322,74 @@ export class SessionOutputCoordinator {
       return;
     }
 
-    const nextVersion = (this.pendingAssistantCompletions.get(sessionId)?.version ?? 0) + 1;
-    this.pendingAssistantCompletions.set(sessionId, {
-      text: normalizedText,
-      version: nextVersion,
-    });
+    const queue = this.pendingAssistantCompletions.get(sessionId) ?? [];
+    queue.push({ text: normalizedText });
+    // Bound the queue so a session that never idles cannot grow it without
+    // end; oldest-first is dropped loudly, newest work is preserved.
+    while (queue.length > SessionOutputCoordinator.MAX_QUEUED_COMPLETIONS) {
+      queue.shift();
+      logger.error(
+        `[Bot] Session completion queue overflow; dropping oldest completion for ${sessionId}`,
+      );
+    }
+    this.pendingAssistantCompletions.set(sessionId, queue);
     // Fresh content deserves a fresh retry budget.
     this.finalDeliveryAttempts.delete(sessionId);
   }
+
+  private static readonly MAX_QUEUED_COMPLETIONS = 20;
 
   private readonly finalDeliveryAttempts = new Map<string, number>();
   private static readonly MAX_FINAL_DELIVERY_ATTEMPTS = 50;
 
   private async runFinalDelivery(sessionId: string): Promise<boolean> {
-    const completionSnapshot = this.pendingAssistantCompletions.get(sessionId) ?? null;
-    let finalized: boolean;
-    try {
-      finalized = await this.onFinalizeSession(sessionId, completionSnapshot?.text ?? null);
-    } catch (error) {
-      if (!this.noteFinalDeliveryAttempt(sessionId, error)) {
+    const snapshot = this.pendingAssistantCompletions.get(sessionId) ?? [];
+    // Take the snapshot out of the queue: arrivals during delivery append a
+    // fresh queue and trigger another round instead of being committed early.
+    this.pendingAssistantCompletions.delete(sessionId);
+
+    const deliverNext = async (text: string | null): Promise<boolean> => {
+      let finalized: boolean;
+      try {
+        finalized = await this.onFinalizeSession(sessionId, text);
+      } catch (error) {
+        if (!this.noteFinalDeliveryAttempt(sessionId, error)) {
+          return false;
+        }
+        logger.error("[Bot] Session final delivery failed; will retry", { sessionId }, error);
+        this.scheduleFinalDelivery(sessionId);
         return false;
       }
-      logger.error("[Bot] Session final delivery failed; will retry", { sessionId }, error);
-      this.scheduleFinalDelivery(sessionId);
-      return false;
-    }
-    if (!finalized) {
-      if (!this.noteFinalDeliveryAttempt(sessionId)) {
+      if (!finalized) {
+        if (!this.noteFinalDeliveryAttempt(sessionId)) {
+          return false;
+        }
+        this.scheduleFinalDelivery(sessionId);
         return false;
       }
-      this.scheduleFinalDelivery(sessionId);
-      return false;
+      return true;
+    };
+
+    if (snapshot.length === 0) {
+      // No turn text, but the flush still repaints pin/keyboard state.
+      if (!(await deliverNext(null))) {
+        return false;
+      }
+    } else {
+      for (let index = 0; index < snapshot.length; index++) {
+        if (!(await deliverNext(snapshot[index]?.text ?? null))) {
+          // Keep the undelivered tail ahead of any arrivals from the retry
+          // window so turn order is preserved.
+          const remaining = snapshot.slice(index).filter((item) => item.text.trim().length > 0);
+          const arrivals = this.pendingAssistantCompletions.get(sessionId) ?? [];
+          this.pendingAssistantCompletions.set(sessionId, [...remaining, ...arrivals]);
+          return false;
+        }
+      }
     }
 
-    const latestCompletion = this.pendingAssistantCompletions.get(sessionId) ?? null;
-    const completionChanged = completionSnapshot?.version !== latestCompletion?.version;
-    if (completionChanged) {
+    const arrivals = this.pendingAssistantCompletions.get(sessionId) ?? [];
+    if (arrivals.length > 0) {
       this.scheduleFinalDelivery(sessionId);
       return false;
     }

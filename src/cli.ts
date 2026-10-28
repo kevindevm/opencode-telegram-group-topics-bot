@@ -4,6 +4,7 @@ import type { RuntimeMode } from "./runtime/mode.js";
 import { parseCliArgs } from "./cli/args.js";
 import { resolveRuntimeMode, setRuntimeMode } from "./runtime/mode.js";
 import { getRuntimePaths } from "./runtime/paths.js";
+import { installProcessErrorHandlers } from "./runtime/process-error-handlers.js";
 import { t } from "./i18n/index.js";
 
 const EXIT_SUCCESS = 0;
@@ -70,7 +71,10 @@ function formatServiceDetails(details: {
   logFilePath: string;
   appHome: string;
 }): string {
-  const uptimeSec = Math.max(0, Math.floor((Date.now() - Date.parse(details.startedAt)) / 1000));
+  const startedAtMs = Date.parse(details.startedAt);
+  const uptimeSec = Number.isNaN(startedAtMs)
+    ? 0
+    : Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
 
   return [
     CLI_MESSAGES.linePid(details.pid),
@@ -237,6 +241,12 @@ async function runCli(argv: string[]): Promise<number> {
 
   return runStopCommand();
 }
+
+// Same crash-fast policy as src/index.ts: an unhandled rejection means an
+// unknown subset of work was silently dropped, so log and exit instead of
+// serving with corrupted in-memory state. Guards every CLI command,
+// including the foreground `start` path that runs the bot in-process.
+installProcessErrorHandlers();
 
 void runCli(process.argv.slice(2))
   .then((exitCode) => {

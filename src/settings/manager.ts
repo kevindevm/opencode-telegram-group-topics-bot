@@ -921,6 +921,38 @@ function sanitizeSettingsV2(value: unknown): Settings {
   };
 }
 
+/** Scope look-up without creating entries: reads must never materialize empty scopes. */
+function findScopeState(
+  settings: Settings,
+  scopeKey: string,
+): ScopeState | TopicScopeState | undefined {
+  const normalizedScopeKey = normalizeScopeKey(scopeKey);
+
+  if (normalizedScopeKey === GLOBAL_SCOPE_KEY) {
+    return settings.global;
+  }
+
+  const parsed = parseScopeKey(normalizedScopeKey);
+  if (!parsed) {
+    return undefined;
+  }
+
+  if (parsed.context === SCOPE_CONTEXT.DM) {
+    return settings.dmScopes?.[String(parsed.chatId)];
+  }
+
+  const group = settings.groups?.[String(parsed.chatId)];
+  if (!group) {
+    return undefined;
+  }
+
+  if (parsed.context === SCOPE_CONTEXT.GROUP_GENERAL || parsed.threadId === undefined) {
+    return group.general;
+  }
+
+  return group.topics?.[String(parsed.threadId)];
+}
+
 function getOrCreateGroup(settings: Settings, chatId: number): GroupSettings {
   settings.groups ??= {};
   settings.groups[String(chatId)] ??= {};
@@ -1228,8 +1260,25 @@ function migrateLegacySettings(legacy: LegacySettings): Settings {
 async function readSettingsFile(): Promise<unknown> {
   try {
     const fs = await import("fs/promises");
-    const content = await fs.readFile(getSettingsFilePath(), "utf-8");
-    return JSON.parse(content) as unknown;
+    const filePath = getSettingsFilePath();
+    const content = await fs.readFile(filePath, "utf-8");
+    try {
+      return JSON.parse(content) as unknown;
+    } catch (parseError) {
+      // Never silently reset to empty: back the corrupt file up so the
+      // bindings/projects can be recovered instead of starting blank.
+      const backupPath = `${filePath}.corrupt-${Date.now()}`;
+      try {
+        await fs.writeFile(backupPath, content, "utf-8");
+        logger.error(
+          `[SettingsManager] Settings file is corrupt; backed up to ${backupPath} and starting empty:`,
+          parseError,
+        );
+      } catch {
+        logger.error("[SettingsManager] Error reading settings file:", parseError);
+      }
+      return createEmptySettings();
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       logger.error("[SettingsManager] Error reading settings file:", error);
@@ -1241,6 +1290,9 @@ async function readSettingsFile(): Promise<unknown> {
 let settingsWriteQueue: Promise<void> = Promise.resolve();
 let settingsWriteBlockedReason: string | null = null;
 let consecutiveWriteFailures = 0;
+// Monotonic suffix so two processes (or a crashed writer's orphan tmp)
+// never share a tmp name: same-dir rename stays atomic either way.
+let settingsWriteTmpCounter = 0;
 const MAX_LOGGED_WRITE_FAILURES_BEFORE_ERROR = 3;
 // Depth gauge for the fire-and-forget write chain: bursts (many topics
 // settling at once) are fine, but a monotonically growing depth means
@@ -1249,6 +1301,12 @@ let pendingSettingsWrites = 0;
 const SETTINGS_WRITE_DEPTH_WARN_AT = 50;
 
 function writeSettingsFile(settings: Settings): Promise<void> {
+  // Capture the path synchronously at enqueue time: the write itself runs
+  // later on the queue, and by then the caller's environment (e.g.
+  // OPENCODE_TELEGRAM_HOME in tests) may have changed. Resolving lazily
+  // sent stray writes to the wrong home and corrupted real settings.
+  const settingsFilePath = getSettingsFilePath();
+  const tmpPath = `${settingsFilePath}.${process.pid}.${settingsWriteTmpCounter++}.tmp`;
   pendingSettingsWrites += 1;
   if (pendingSettingsWrites === SETTINGS_WRITE_DEPTH_WARN_AT + 1) {
     logger.warn(
@@ -1268,11 +1326,9 @@ function writeSettingsFile(settings: Settings): Promise<void> {
 
         try {
           const fs = await import("fs/promises");
-          const settingsFilePath = getSettingsFilePath();
           await fs.mkdir(path.dirname(settingsFilePath), { recursive: true });
           // Atomic write: a crash mid-write must never leave a truncated
           // settings.json behind (the next read would reset to empty state).
-          const tmpPath = `${settingsFilePath}.${process.pid}.tmp`;
           await fs.writeFile(tmpPath, JSON.stringify(settings, null, 2));
           await fs.rename(tmpPath, settingsFilePath);
           if (consecutiveWriteFailures > 0) {
@@ -1283,7 +1339,7 @@ function writeSettingsFile(settings: Settings): Promise<void> {
           consecutiveWriteFailures += 1;
           if (consecutiveWriteFailures >= MAX_LOGGED_WRITE_FAILURES_BEFORE_ERROR) {
             logger.error(
-              `[SettingsManager] Settings writes failing repeatedly (${consecutiveWriteFailures}x in a row); in-memory state is diverging from disk. Check disk space and permissions for ${getSettingsFilePath()}:`,
+              `[SettingsManager] Settings writes failing repeatedly (${consecutiveWriteFailures}x in a row); in-memory state is diverging from disk. Check disk space and permissions for ${settingsFilePath}:`,
               err,
             );
           } else {
@@ -1543,9 +1599,14 @@ export function updateTopicSessionBindingStatus(
     status,
     updatedAt: now,
     closedAt:
-      status === TOPIC_SESSION_STATUS.CLOSED || status === TOPIC_SESSION_STATUS.STALE
-        ? now
-        : binding.closedAt,
+      status === TOPIC_SESSION_STATUS.ACTIVE
+        ? undefined
+        : status === TOPIC_SESSION_STATUS.CLOSED ||
+            status === TOPIC_SESSION_STATUS.STALE ||
+            status === TOPIC_SESSION_STATUS.ABANDONED ||
+            status === TOPIC_SESSION_STATUS.ERROR
+          ? now
+          : binding.closedAt,
   });
 }
 
@@ -1581,7 +1642,7 @@ export function setDisplayOverride(flag: string, visible: boolean | undefined): 
 /** Scope-level display override (per topic). Falls back to global when unset. */
 export function getScopeDisplayOverride(scopeKey: string, flag: string): boolean | undefined {
   const normalized = normalizeScopeKey(scopeKey);
-  const scopeState = getOrCreateScopeState(currentSettings, normalized);
+  const scopeState = findScopeState(currentSettings, normalized);
   return scopeState?.display?.[flag];
 }
 

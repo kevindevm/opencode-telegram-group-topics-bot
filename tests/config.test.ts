@@ -339,4 +339,73 @@ describe("config OpenCode server version", () => {
 
     expect(config.opencode.apiUrl).toBe("http://example:1234");
   });
+
+  it("stays consistent when the version default is used", async () => {
+    vi.stubEnv("OPENCODE_SERVER_VERSION", "v2");
+    vi.stubEnv("OPENCODE_API_URL", "");
+
+    const config = await loadConfig();
+
+    expect(config.opencode.serverVersion).toBe("v2");
+    expect(config.opencode.apiUrl).toBe("http://127.0.0.1:49374");
+  });
+});
+
+describe("config service message interval aliases", () => {
+  beforeEach(() => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-telegram-token");
+    vi.stubEnv("TELEGRAM_ALLOWED_USER_ID", "123456789");
+    vi.stubEnv("OPENCODE_MODEL_PROVIDER", "test-provider");
+    vi.stubEnv("OPENCODE_MODEL_ID", "test-model");
+    vi.stubEnv("SERVICE_MESSAGES_INTERVAL_SEC", "");
+    vi.stubEnv("TOOL_MESSAGES_INTERVAL_SEC", "");
+  });
+
+  it("prefers the primary key over the legacy alias", async () => {
+    vi.stubEnv("SERVICE_MESSAGES_INTERVAL_SEC", "9");
+    vi.stubEnv("TOOL_MESSAGES_INTERVAL_SEC", "7");
+
+    expect((await loadConfig()).bot.serviceMessagesIntervalSec).toBe(9);
+  });
+
+  it("falls back to the legacy alias when the primary value is invalid", async () => {
+    vi.stubEnv("SERVICE_MESSAGES_INTERVAL_SEC", "banana");
+    vi.stubEnv("TOOL_MESSAGES_INTERVAL_SEC", "7");
+
+    expect((await loadConfig()).bot.serviceMessagesIntervalSec).toBe(7);
+  });
+
+  it("uses the default when both keys are invalid", async () => {
+    vi.stubEnv("SERVICE_MESSAGES_INTERVAL_SEC", "banana");
+    vi.stubEnv("TOOL_MESSAGES_INTERVAL_SEC", "-1");
+
+    expect((await loadConfig()).bot.serviceMessagesIntervalSec).toBe(5);
+  });
+});
+
+describe("config budget alert", () => {
+  beforeEach(() => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-telegram-token");
+    vi.stubEnv("TELEGRAM_ALLOWED_USER_ID", "123456789");
+    vi.stubEnv("OPENCODE_MODEL_PROVIDER", "test-provider");
+    vi.stubEnv("OPENCODE_MODEL_ID", "test-model");
+  });
+
+  it("keeps zero as off", async () => {
+    vi.stubEnv("BUDGET_ALERT_USD", "0");
+
+    expect((await loadConfig()).cost.budgetAlertUsd).toBe(0);
+  });
+
+  it("clamps negative budgets to zero", async () => {
+    vi.stubEnv("BUDGET_ALERT_USD", "-5");
+
+    expect((await loadConfig()).cost.budgetAlertUsd).toBe(0);
+  });
+
+  it("parses positive budgets", async () => {
+    vi.stubEnv("BUDGET_ALERT_USD", "12.5");
+
+    expect((await loadConfig()).cost.budgetAlertUsd).toBe(12.5);
+  });
 });

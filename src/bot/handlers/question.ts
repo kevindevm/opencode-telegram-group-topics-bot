@@ -400,6 +400,7 @@ function formatQuestionText(
     header: string;
     question: string;
     multiple?: boolean;
+    options: Array<{ label: string; description: string }>;
   },
   scopeKey: string,
 ): string {
@@ -410,7 +411,16 @@ function formatQuestionText(
   const headerTitle = [progressText, question.header].filter(Boolean).join(" ");
   const header = headerTitle ? `${headerTitle}\n\n` : "";
   const multiple = question.multiple ? t("question.multi_hint") : "";
-  return truncateTelegramText(`${header}${question.question}${multiple}`);
+  // The full option texts live here, numbered: buttons only carry short
+  // labels (60-char Telegram limit, no scrolling), so nothing is lost when
+  // a label + description does not fit the button.
+  const optionsList = question.options
+    .map((option, index) => {
+      const detail = option.description ? ` — ${option.description}` : "";
+      return `${index + 1}. ${option.label}${detail}`;
+    })
+    .join("\n");
+  return truncateTelegramText(`${header}${question.question}${multiple}\n\n${optionsList}`);
 }
 
 function buildQuestionKeyboard(
@@ -424,7 +434,7 @@ function buildQuestionKeyboard(
   question.options.forEach((option, index) => {
     const isSelected = selectedOptions.has(index);
     const icon = isSelected ? "✅ " : "";
-    const buttonText = formatButtonText(option.label, option.description, icon);
+    const buttonText = formatButtonText(option.label, option.description, icon, index);
     keyboard.text(buttonText, `question:select:${questionIndex}:${index}`).row();
   });
 
@@ -437,17 +447,26 @@ function buildQuestionKeyboard(
   return keyboard;
 }
 
-function formatButtonText(label: string, description: string, icon: string): string {
-  let text = `${icon}${label}`;
-  if (description && icon === "") {
-    text += ` - ${description}`;
+function formatButtonText(
+  label: string,
+  description: string,
+  icon: string,
+  index: number,
+): string {
+  // Numbered short label: the full text lives numbered in the message body,
+  // so a truncated button still maps 1:1 to its option.
+  const numbered = `${icon}${index + 1}. ${label}`;
+  const full = description && icon === "" ? `${numbered} - ${description}` : numbered;
+
+  if (full.length > MAX_BUTTON_LENGTH) {
+    const short = `${icon}${index + 1}. ${label}`;
+    if (short.length > MAX_BUTTON_LENGTH) {
+      return `${icon}${index + 1}`;
+    }
+    return short;
   }
 
-  if (text.length > MAX_BUTTON_LENGTH) {
-    text = text.substring(0, MAX_BUTTON_LENGTH - 3) + "...";
-  }
-
-  return text;
+  return full;
 }
 
 function formatAnswersSummary(answers: Array<{ question: string; answer: string }>): string {

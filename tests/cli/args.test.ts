@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseCliArgs } from "../../src/cli/args.js";
 
 describe("cli/args", () => {
@@ -106,5 +106,19 @@ describe("cli/args", () => {
     expect(parsed.command).toBe("status");
     expect(parsed.showHelp).toBe(true);
     expect(parsed.error).toContain("supported only for the start command");
+  });
+
+  it("reports the daemon restriction through i18n", () => {
+    const parsed = parseCliArgs(["stop", "--daemon"]);
+
+    expect(parsed.error).toBe("Option --daemon is supported only for the start command");
+  });
+
+  it("localizes the daemon restriction", () => {
+    vi.stubEnv("BOT_LOCALE", "es");
+
+    const parsed = parseCliArgs(["status", "--daemon"]);
+
+    expect(parsed.error).toBe("La opción --daemon solo se admite para el comando start");
   });
 });

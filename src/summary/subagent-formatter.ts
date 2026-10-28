@@ -25,7 +25,7 @@ function formatModelDisplayName(providerID?: string, modelID?: string): string {
   return t("pinned.unknown");
 }
 
-function formatToolStep(subagent: SubagentInfo): string {
+function formatToolStep(subagent: SubagentInfo, projectWorktree?: string): string {
   if (!subagent.currentTool) {
     return "";
   }
@@ -48,7 +48,7 @@ function formatToolStep(subagent: SubagentInfo): string {
     hasFileAttachment: false,
   };
 
-  const formatted = formatCompactToolInfo(toolInfo, 128, "").trim();
+  const formatted = formatCompactToolInfo(toolInfo, 128, "", projectWorktree).trim();
   const firstSpaceIndex = formatted.indexOf(" ");
   if (firstSpaceIndex >= 0 && formatted.slice(firstSpaceIndex + 1) === subagent.currentTool) {
     return "";
@@ -57,7 +57,7 @@ function formatToolStep(subagent: SubagentInfo): string {
   return stripCardMarkdown(formatted);
 }
 
-function formatSubagentActivity(subagent: SubagentInfo): string {
+function formatSubagentActivity(subagent: SubagentInfo, projectWorktree?: string): string {
   if (subagent.status === "completed") {
     return `✅ ${t("subagent.completed")}`;
   }
@@ -67,7 +67,7 @@ function formatSubagentActivity(subagent: SubagentInfo): string {
     return `❌ ${stripCardMarkdown(message)}`;
   }
 
-  const toolStep = formatToolStep(subagent);
+  const toolStep = formatToolStep(subagent, projectWorktree);
   if (toolStep) {
     return toolStep;
   }
@@ -75,23 +75,26 @@ function formatSubagentActivity(subagent: SubagentInfo): string {
   return `⚙️ ${t("subagent.working")}`;
 }
 
-function formatSubagentCard(subagent: SubagentInfo): string {
+function formatSubagentCard(subagent: SubagentInfo, projectWorktree?: string): string {
   const modelName = formatModelDisplayName(subagent.providerID, subagent.modelID);
   const lines = [
     `🧩 ${t("subagent.line.task", { task: stripCardMarkdown(subagent.description) })}`,
     t("subagent.line.agent", { agent: stripCardMarkdown(subagent.agent) || t("pinned.unknown") }),
     t("pinned.line.model", { model: modelName }),
     "",
-    formatSubagentActivity(subagent),
+    formatSubagentActivity(subagent, projectWorktree),
   ];
 
   return lines.join("\n");
 }
 
-export function renderSubagentCards(subagents: SubagentInfo[]): string {
+export function renderSubagentCards(
+  subagents: SubagentInfo[],
+  projectWorktree?: string,
+): string {
   if (subagents.length === 0) {
     return "";
   }
 
-  return subagents.map((subagent) => formatSubagentCard(subagent)).join("\n\n");
+  return subagents.map((subagent) => formatSubagentCard(subagent, projectWorktree)).join("\n\n");
 }

@@ -13,7 +13,7 @@ import {
   setTopicSessionBinding,
   updateTopicSessionBindingStatus,
 } from "../settings/manager.js";
-import { getScopeForSession } from "../session/manager.js";
+import { getScopeForSession, unregisterSessionScope } from "../session/manager.js";
 import { SCOPE_CONTEXT, getScopeFromKey } from "../bot/scope.js";
 import { logger } from "../utils/logger.js";
 
@@ -115,6 +115,10 @@ function ensureTopicBindingsHydrated(): void {
       `[TopicManager] Hydrated binding from scoped session: scope=${scopeKey}, session=${sessionInfo.id}`,
     );
   }
+}
+
+export function __resetTopicManagerForTests(): void {
+  hydratedFromScopedSessions = false;
 }
 
 export function registerTopicSessionBinding(input: TopicBindingInput): TopicSessionBinding {
@@ -221,7 +225,13 @@ export function updateTopicBindingNameBySessionId(sessionId: string, topicName: 
 
 export function removeTopicBinding(chatId: number, threadId: number): void {
   ensureTopicBindingsHydrated();
-  clearTopicSessionBinding(createTopicBindingKey(chatId, threadId));
+  const bindingKey = createTopicBindingKey(chatId, threadId);
+  const binding = getTopicSessionBinding(bindingKey);
+  clearTopicSessionBinding(bindingKey);
+
+  if (binding) {
+    unregisterSessionScope(binding.sessionId, binding.scopeKey);
+  }
 }
 
 export function getSessionRouteTarget(sessionId: string): SessionRouteTarget | null {

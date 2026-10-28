@@ -8,6 +8,13 @@ import { getScopeFromContext, getScopeKeyFromContext, getThreadSendOptions } fro
 const INLINE_MENU_CANCEL_PREFIX = "inline:cancel:";
 const LEGACY_CONTEXT_CANCEL_CALLBACK = "compact:cancel";
 
+/**
+ * Menus never outlive this: without an expiry a menu the user ignored
+ * blocks every later text message forever ("Elige una opción...") even
+ * though the session moved on. Expiry self-heals via the expired path.
+ */
+const INLINE_MENU_TTL_MS = 5 * 60 * 1000;
+
 const INLINE_MENU_KINDS = [
   "project",
   "session",
@@ -175,6 +182,7 @@ export async function replyWithInlineMenu(
     {
       kind: "inline",
       expectedInput: "callback",
+      expiresInMs: INLINE_MENU_TTL_MS,
       metadata: {
         menuKind: options.menuKind,
         messageId: message.message_id,

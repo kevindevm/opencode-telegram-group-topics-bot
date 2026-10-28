@@ -41,9 +41,15 @@ import {
   addFavoriteModel,
   getFavoriteModels,
   getModelSelectionLists,
+  getStoredModel,
   removeFavoriteModel,
   searchModels,
 } from "../../src/model/manager.js";
+import {
+  __resetSettingsForTests,
+  clearCurrentModel,
+  setCurrentModel,
+} from "../../src/settings/manager.js";
 
 describe("model/manager", () => {
   let tempDir = "";
@@ -522,6 +528,24 @@ describe("model/manager", () => {
 
       expect(await addFavoriteModel({ providerID: "", modelID: "x" })).toBe(false);
       expect(await addFavoriteModel({ providerID: "p", modelID: "" })).toBe(false);
+    });
+  });
+
+  describe("getStoredModel", () => {
+    it("defaults a missing variant on the returned copy", () => {
+      const scopeKey = "model-stored-variant";
+      __resetSettingsForTests();
+      setCurrentModel({ providerID: "openai", modelID: "gpt-4o" }, scopeKey);
+
+      const stored = getStoredModel(scopeKey);
+      expect(stored.variant).toBe("default");
+
+      // Mutating the copy must not leak back into the settings store.
+      stored.variant = "mutated";
+      expect(getStoredModel(scopeKey).variant).toBe("default");
+
+      clearCurrentModel(scopeKey);
+      __resetSettingsForTests();
     });
   });
 });

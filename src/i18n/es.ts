@@ -14,7 +14,7 @@ export const es: I18nDictionary = {
   "cmd.description.commands": "Comandos personalizados",
   "cmd.description.model": "Seleccionar modelo",
   "cmd.description.agent": "Seleccionar agente",
-  "cmd.description.cleanup": "Cerrar temas obsoletos",
+  "cmd.description.cleanup": "Borrar topics de subagentes",
   "cmd.description.opencode_start": "Iniciar servidor OpenCode",
   "cmd.description.opencode_stop": "Detener servidor OpenCode",
   "cmd.description.recent": "Ver sesiones recientes de todos los proyectos",
@@ -77,6 +77,8 @@ export const es: I18nDictionary = {
     "⏳ Tu solicitud anterior todavía está en ejecución, por eso esta nueva no se inició.\n\nPor qué pasó: OpenCode acepta solo una ejecución activa por sesión.\nQué hacer: espera la respuesta actual, o usa /abort si parece bloqueada, y luego envía el mensaje de nuevo.",
   "bot.session_queued":
     "📝 Tu mensaje quedó en cola para esta sesión.\n\nPosición en la cola: {position}\nQué pasará ahora: se iniciará automáticamente cuando termine la ejecución actual.",
+  "bot.session_queued_duplicate":
+    "⏳ Ese mensaje ya está en cola en la posición {position}; no lo agrego dos veces.",
   "bot.session_queued_cancel": "❌ Borrar mensaje en cola",
   "bot.session_queue_steer": "⚡ Interrumpir y ejecutar ahora",
   "bot.session_queue_front": "⏫ Pasar adelante",
@@ -280,6 +282,9 @@ export const es: I18nDictionary = {
   "cleanup.no_topics": "✅ No hay temas de sesión para limpiar.",
   "cleanup.result":
     "🧹 Limpieza completa. Revisados: {inspected}, cerrados: {closed}, omitidos: {skipped}, fallidos: {failed}.",
+  "cleanup.subagents_none": "✅ No hay topics de subagentes para borrar.",
+  "cleanup.subagents_result":
+    "🧹 Borrados {deleted} topics de subagentes. Fallidos: {failed}.",
 
   "stop.no_active_session":
     "🛑 El agente no se inició\n\nCrea una sesión con /new o selecciona una con /sessions.",
@@ -498,6 +503,8 @@ export const es: I18nDictionary = {
   "tool.background_button": "⏪ Mandar al fondo",
   "tool.background_offer":
     "⏳ Este comando está en ejecución:\n{command}\n\n¿Lo mando al fondo y seguís con otra cosa?",
+  "tool.background_offer_subagent":
+    "🧩 Este subagente sigue trabajando:\n{command}\n\n¿Lo mando al fondo y seguís con otra cosa?",
   "tool.background_no_command": "un comando largo",
   "tool.background_started": "⏪ Al fondo. Sigue corriendo; te aviso al terminar.",
   "tool.background_started_callback": "⏪ Mandado al fondo",
@@ -619,7 +626,8 @@ export const es: I18nDictionary = {
   "share.load_error": "🔴 No se pudo cargar el transcript.",
   "share.empty": "📭 Nada para compartir todavía.",
   "share.caption": "📄 Transcript: {title}",
-  "share.send_error": "🔴 No se pudo enviar el transcript.",
+  "share.send_error": "🔴 No se pudo enviar el transcript.",
+
   "share.too_large": "Transcript demasiado grande para enviar (más de 50MB).",
   "cmd.description.saved": "Atajos de prompts guardados",
   "saved.title": "🔖 Prompts guardados (usá /saved run <nombre>):",
@@ -666,6 +674,7 @@ export const es: I18nDictionary = {
   "cli.args.invalid_mode": "Valor de --mode inválido: {value}. Se espera sources|installed",
   "cli.args.unknown_option": "Opción desconocida: {value}",
   "cli.args.mode_only_start": "La opción --mode solo se admite para los comandos start y config",
+  "cli.args.daemon_only_start": "La opción --daemon solo se admite para el comando start",
 
   "legacy.models.fetch_error":
     "🔴 No se pudo obtener la lista de modelos. Revisa el estado del servidor con /status.",

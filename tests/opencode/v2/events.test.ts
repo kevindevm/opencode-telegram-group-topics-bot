@@ -420,11 +420,11 @@ describe("opencode/v2/events", () => {
     expect(result).toEqual([]);
   });
 
-  it("forgets the calls it knew once the stream connects again", () => {
+  it("forgets the calls it knew only when the server restarted", () => {
     const translate = createV2EventTranslator();
     const base = { sessionID: SESSION, assistantMessageID: MESSAGE, id: "call-1" };
     translate(event("session.tool.input.started", { ...base, name: "shell" }));
-    translate(event("server.connected", {}));
+    translate(event("server.connected", {}), true);
 
     const result = payloads(translate, [
       event("session.tool.failed", {
@@ -435,6 +435,24 @@ describe("opencode/v2/events", () => {
     ]);
 
     expect(result).toEqual([]);
+  });
+
+  it("keeps in-flight calls across a plain reconnect so completions still resolve", () => {
+    const translate = createV2EventTranslator();
+    const base = { sessionID: SESSION, assistantMessageID: MESSAGE, id: "call-1" };
+    translate(event("session.tool.input.started", { ...base, name: "shell" }));
+    translate(event("server.connected", {}), false);
+
+    const result = payloads(translate, [
+      event("session.tool.failed", {
+        ...base,
+        error: { type: "unknown", message: "interrupted" },
+        executed: false,
+      }),
+    ]);
+
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0]?.type).toBe("message.part.updated");
   });
 
   it("marks the connect event with whether the server restarted, when told", () => {
@@ -517,7 +535,54 @@ describe("opencode/v2/events", () => {
       });
     });
 
-    it("leaves a command that finished before its success as an ordinary completion", () => {
+    it("completes the background command when its session shell ends", () => {
+    const translate = createV2EventTranslator();
+    launchShell(translate);
+
+    const result = payloads(translate, [
+      event("session.shell.ended", {
+        shell: { id: "sh-1", status: "exited", exit: 0 },
+        output: { output: "", cursor: 0, size: 0, truncated: false },
+        sessionID: SESSION,
+      }),
+    ]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      properties: {
+        part: {
+          callID: "call-bg",
+          tool: "bash",
+          sessionID: SESSION,
+          state: {
+            status: "completed",
+            output: "Command moved to the background",
+            metadata: { shellID: "sh-1", status: "exited", exit: 0 },
+          },
+        },
+      },
+    });
+  });
+
+  it("treats shell.exited and session.shell.ended for the same shell as one completion", () => {
+    const translate = createV2EventTranslator();
+    launchShell(translate);
+
+    const ended = event("session.shell.ended", {
+      shell: { id: "sh-1", status: "exited", exit: 0 },
+      output: { output: "", cursor: 0, size: 0, truncated: false },
+      sessionID: SESSION,
+    });
+    const first = payloads(translate, [ended]);
+    const second = payloads(translate, [
+      event("shell.exited", { id: "sh-1", exit: 0, status: "exited" }),
+    ]);
+
+    expect(first).toHaveLength(1);
+    expect(second).toEqual([]);
+  });
+
+  it("leaves a command that finished before its success as an ordinary completion", () => {
       const translate = createV2EventTranslator();
 
       const result = payloads(translate, [
@@ -598,6 +663,52 @@ describe("opencode/v2/events", () => {
       expect(result.at(-1)).toMatchObject({
         properties: { part: { callID: "call-bg", state: { status: "error", error: "boom" } } },
       });
+    });
+
+    it("forgets background operations when the server restarted", () => {
+      const translate = createV2EventTranslator();
+      launchShell(translate);
+      translate(event("server.connected", {}), true);
+
+      const result = payloads(translate, [
+        event("shell.exited", { id: "sh-1", exit: 0, status: "exited" }),
+        event("session.shell.ended", {
+          shell: { id: "sh-1", status: "exited", exit: 0 },
+          output: { output: "", cursor: 0, size: 0, truncated: false },
+          sessionID: SESSION,
+        }),
+      ]);
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  it("forgets in-flight assistant text when the server restarted", () => {
+    const translate = createV2EventTranslator();
+    translate(
+      event("session.step.started", {
+        sessionID: SESSION,
+        assistantMessageID: MESSAGE,
+        agent: "build",
+        model: { id: "m", providerID: "p" },
+        started: 900,
+      }),
+    );
+    translate(event("server.connected", {}), true);
+
+    const result = payloads(translate, [
+      event("session.step.ended", {
+        sessionID: SESSION,
+        assistantMessageID: MESSAGE,
+        finish: "stop",
+        cost: 0.1,
+        tokens: { input: 5, output: 1, reasoning: 0, cache: { read: 2, write: 0 } },
+      }),
+    ]);
+
+    const completion = result.find((item) => item.type === "message.updated");
+    expect(completion).toMatchObject({
+      properties: { sessionID: SESSION, info: { id: MESSAGE, sessionID: SESSION, agent: "" } },
     });
   });
 

@@ -1,5 +1,7 @@
 import type { Context } from "grammy";
 import { interactionManager } from "./manager.js";
+import { questionManager } from "../question/manager.js";
+import { permissionManager } from "../permission/manager.js";
 import { getScopeKeyFromContext } from "../bot/scope.js";
 import { MODEL_SEARCH_CANCEL_CALLBACK } from "../bot/handlers/model.js";
 import type {
@@ -116,11 +118,28 @@ function isAllowedSearchCancelCallback(ctx: Context, state: InteractionState): b
 
 export function resolveInteractionGuardDecision(ctx: Context): GuardDecision {
   const scopeKey = getScopeKeyFromContext(ctx);
+  // Opportunistically drop TTL-elapsed interactions of other scopes (deleted
+  // topics, ignored menus) so they cannot accumulate between messages.
+  interactionManager.purgeExpired(Date.now(), scopeKey);
   const state = interactionManager.getSnapshot(scopeKey);
   const { inputType, command } = classifyIncomingInput(ctx);
 
   if (!state) {
     return createAllowDecision(inputType, null, command);
+  }
+
+  // The prompt/answer already settled outside Telegram (answered on PC,
+  // error path, topic finalized) but the interaction snapshot lingered:
+  // there is no active question/permission, so holding the block makes no
+  // sense. Release the scope instead of blocking the user's next message.
+  if (state.kind === "question" && !questionManager.isActive(scopeKey)) {
+    interactionManager.clear(INTERACTION_CLEAR_REASON.STALE_FLOW, scopeKey);
+    return createAllowDecision(inputType, state, command);
+  }
+
+  if (state.kind === "permission" && !permissionManager.isActive(scopeKey)) {
+    interactionManager.clear(INTERACTION_CLEAR_REASON.STALE_FLOW, scopeKey);
+    return createAllowDecision(inputType, state, command);
   }
 
   if (interactionManager.isExpired(scopeKey)) {

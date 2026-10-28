@@ -274,7 +274,7 @@ describe("bot/streaming/live-stream", () => {
     expect(editText).toHaveBeenLastCalledWith("s1", 62, "BCCCC", "raw", false);
   });
 
-  it("removes duplicate assistant text after final delivery while keeping service history", async () => {
+  it("deletes a thinking-only leftover instead of leaving a hung thinking message", async () => {
     vi.useFakeTimers();
 
     const sendText = vi.fn().mockResolvedValue(71);
@@ -288,7 +288,35 @@ describe("bot/streaming/live-stream", () => {
 
     await stream.cleanupAfterFinalDelivery("s1");
 
-    expect(editText).toHaveBeenLastCalledWith("s1", 71, "Thinking", "raw", false);
+    // No turn left to replace the thinking line: it must go, not linger.
+    expect(deleteText).toHaveBeenCalledWith("s1", 71);
+    expect(editText).not.toHaveBeenCalledWith("s1", 71, "Thinking", "raw", false);
+  });
+
+  it("keeps service history with tool lines during final cleanup", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(72);
+    const editText = vi.fn().mockResolvedValue(undefined);
+    const deleteText = vi.fn().mockResolvedValue(undefined);
+    const stream = new LiveStream({ sendText, editText, deleteText, throttleMs: 50 });
+
+    // Assistant first so no service boundary seal splits the lane.
+    await stream.updateAssistant("s1", "m1", "Final answer");
+    stream.showThinking("s1", "Thinking");
+    stream.pushServiceUpdate("s1", "✅ bash npm test");
+    await vi.advanceTimersByTimeAsync(50);
+
+    await stream.cleanupAfterFinalDelivery("s1");
+
+    // Tool lines are real history: trim to them instead of deleting.
+    expect(editText).toHaveBeenLastCalledWith(
+      "s1",
+      72,
+      "Thinking\n\n✅ bash npm test",
+      "raw",
+      false,
+    );
     expect(deleteText).not.toHaveBeenCalled();
   });
 
@@ -496,8 +524,7 @@ describe("bot/streaming/live-stream", () => {
     vi.useRealTimers();
   });
 
-  it("abandons an uneditable message so the next flush sends a fresh one", async () => {
-    vi.useFakeTimers();
+  it("abandons an uneditable message so the next flush sends a fresh one", async () => {    vi.useFakeTimers();
 
     const sendText = vi.fn().mockResolvedValue(152);
     const fatalEditError = Object.assign(new Error("message can't be edited"), {
@@ -524,5 +551,100 @@ describe("bot/streaming/live-stream", () => {
     expect(sendText).toHaveBeenCalledTimes(2);
 
     vi.useRealTimers();
+  });
+
+  it("clears delivered entries on deleteLiveMessage so the next turn starts clean", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(201);
+    const editText = vi.fn().mockResolvedValue(undefined);
+    const deleteText = vi.fn().mockResolvedValue(undefined);
+    const stream = new LiveStream({ sendText, editText, deleteText, throttleMs: 50 });
+
+    stream.showThinking("s1", "Thinking");
+    await stream.updateAssistant("s1", "m1", "Delivered answer");
+    await vi.advanceTimersByTimeAsync(50);
+
+    // The answer went out as fresh messages: the live copy is deleted.
+    await stream.deleteLiveMessage("s1");
+    expect(deleteText).toHaveBeenCalledWith("s1", 201);
+
+    // A new turn must not flush the stale thinking line or replay the
+    // delivered text into the next live message.
+    await stream.updateAssistant("s1", "m2", "Next turn");
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(sendText).toHaveBeenNthCalledWith(2, "s1", "Next turn", "raw", false);
+    const internalState = (
+      stream as unknown as {
+        states: Map<string, { entries: unknown[]; service: { thinkingText: string | null } }>;
+      }
+    ).states.get("s1");
+    expect(internalState?.entries).toHaveLength(1);
+    expect(internalState?.service.thinkingText).toBeNull();
+
+    vi.useRealTimers();
+  });
+
+  it("clears the per-session task chain once work settles", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(301);
+    const editText = vi.fn().mockResolvedValue(undefined);
+    const stream = new LiveStream({ sendText, editText, throttleMs: 50 });
+    const tasksOf = (target: LiveStream): Map<string, Promise<void>> =>
+      (target as unknown as { sessionTasks: Map<string, Promise<void>> }).sessionTasks;
+
+    await stream.updateAssistant("s1", "m1", "Some text");
+    await vi.advanceTimersByTimeAsync(50);
+    await stream.flushSession("s1");
+
+    expect(tasksOf(stream).size).toBe(0);
+    expect(tasksOf(stream).has("s1")).toBe(false);
+
+    vi.useRealTimers();
+  });
+
+  it("keeps the chain usable and silent after a failed stream task", async () => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      vi.useFakeTimers();
+
+      const sendText = vi.fn().mockResolvedValue(302);
+      const editText = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("message can't be edited"))
+        .mockResolvedValue(undefined);
+      const stream = new LiveStream({ sendText, editText, throttleMs: 50 });
+      const tasksOf = (target: LiveStream): Map<string, Promise<void>> =>
+        (target as unknown as { sessionTasks: Map<string, Promise<void>> }).sessionTasks;
+
+      await stream.updateAssistant("s1", "m1", "Some text");
+      await vi.advanceTimersByTimeAsync(50);
+
+      // The edit fails: the caller observes the rejection...
+      await expect(
+        stream.finalizeCurrentMessage("s1", { format: "raw", includeKeyboard: false }),
+      ).rejects.toThrow("message can't be edited");
+
+      // ...no unhandled rejection escapes from the stored chain wrapper...
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      expect(rejections).toHaveLength(0);
+
+      // ...and the chain is cleaned so the next turn still streams.
+      expect(tasksOf(stream).size).toBe(0);
+      await stream.updateAssistant("s1", "m1", "Recovery text");
+      await vi.advanceTimersByTimeAsync(50);
+      expect(editText).toHaveBeenLastCalledWith("s1", 302, "Recovery text", "raw", false);
+    } finally {
+      process.removeListener("unhandledRejection", onUnhandled);
+      vi.useRealTimers();
+    }
   });
 });

@@ -28,6 +28,8 @@ vi.mock("../../../src/bot/scope.js", () => ({
 }));
 
 import { costCommand } from "../../../src/bot/commands/cost.js";
+import { summaryAggregator } from "../../../src/summary/aggregator.js";
+import type { Event } from "@opencode-ai/sdk/v2";
 import { t } from "../../../src/i18n/index.js";
 
 describe("session/cost-tracker", () => {
@@ -96,5 +98,24 @@ describe("bot/commands/cost", () => {
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("$0.0200"), {
       message_thread_id: 9,
     });
+  });
+
+  it("includes subagent family cost in the session total", async () => {
+    summaryAggregator.clear();
+    summaryAggregator.setSession("session-1");
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: { info: { id: "child-1", parentID: "session-1", title: "sub" } },
+    } as unknown as Event);
+    recordSessionCost("session-1", 0.01);
+    recordSessionCost("child-1", 4.51);
+    const ctx = createCommandContext();
+
+    await costCommand(ctx as never);
+
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("$4.52"), {
+      message_thread_id: 9,
+    });
+    summaryAggregator.clear();
   });
 });

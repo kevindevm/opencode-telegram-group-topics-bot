@@ -71,10 +71,12 @@ export interface V2EventTranslatorOptions {
 }
 
 /**
- * Translates the V2 event stream into the V1 events the bot consumes. One translator
- * belongs to one subscription, so partial state never leaks across reconnects. Inbox
- * items are the exception when the caller passes them in: a message queued before a
- * reconnect is delivered on the next subscription, and its pickup needs the item.
+ * Translates the V2 event stream into the V1 events the bot consumes. The
+ * adapter shares one translator across (re)connections so in-flight
+ * tools/messages survive a plain reconnect; only a server restart clears the
+ * tool state. Inbox items are shared the same way: a message queued before a
+ * reconnect is delivered on the next subscription, and its pickup needs the
+ * item.
  */
 export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) {
   const sessions = new Map<string, SessionState>();
@@ -84,6 +86,20 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
   const backgroundCalls = new Map<string, BackgroundCallState>();
   const inbox = options.inbox ?? new Map<string, SessionInboxItem>();
 
+  // The translator now survives reconnects (shared by the adapter), so cap
+  // the per-run maps: entries whose closing event was lost in an SSE gap
+  // would otherwise accumulate for the life of the process.
+  const TRANSLATOR_MAP_LIMIT = 2000;
+  function capTranslatorMap<K, V>(registry: Map<K, V>): void {
+    while (registry.size > TRANSLATOR_MAP_LIMIT) {
+      const oldest = registry.keys().next();
+      if (oldest.done) {
+        break;
+      }
+      registry.delete(oldest.value);
+    }
+  }
+
   const rememberDirectory = (sessionID: string, directory: string | undefined) => {
     if (!directory) {
       return;
@@ -91,6 +107,7 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
     const state = sessions.get(sessionID) ?? {};
     state.directory = directory;
     sessions.set(sessionID, state);
+    capTranslatorMap(sessions);
   };
 
   const toSession = (sessionID: string, now: number): Session => {
@@ -243,9 +260,18 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
 
     switch (event.type) {
       case "server.connected": {
-        // Calls started before this connection never get a start here: their later events
-        // are dropped rather than shown under a made-up name.
-        tools.clear();
+        // Calls started before this connection never get a start here when
+        // the server itself restarted — only then is the in-flight tool
+        // state unrecoverable. A plain reconnect keeps it so completions
+        // arriving on the new stream still resolve instead of being dropped.
+        // Assistant text and background operations share the same fate: after
+        // a restart their endings never arrive, so drop them too instead of
+        // leaving phantom running cards behind.
+        if (restarted) {
+          tools.clear();
+          messages.clear();
+          backgroundCalls.clear();
+        }
         const properties: ConnectedEventProperties = restarted === undefined ? {} : { restarted };
         return [{ id: event.id, type: "server.connected", properties } as Event];
       }
@@ -259,6 +285,7 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
           ...(data.title ? { title: data.title } : {}),
           created,
         });
+        capTranslatorMap(sessions);
         return [
           {
             id: event.id,
@@ -354,6 +381,18 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
           },
         });
 
+      // Session-scoped shells end here instead of `shell.exited`; without
+      // this the parent task card stays running forever after its shell ends.
+      // Idempotent with the `shell.exited` path: whichever arrives second
+      // finds no pending call and emits nothing.
+      case "session.shell.ended":
+        return endBackgroundCall(`shell:${event.data.shell.id}`, created, {
+          metadata: {
+            status: event.data.shell.status,
+            ...(event.data.shell.exit !== undefined ? { exit: event.data.shell.exit } : {}),
+          },
+        });
+
       case "session.retry.scheduled":
         return [
           {
@@ -425,6 +464,7 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
           modelID: data.model.id,
           ...(data.model.variant ? { variant: data.model.variant } : {}),
         });
+        capTranslatorMap(messages);
         return [
           assistantInfo(data.assistantMessageID),
           partUpdated(
@@ -551,6 +591,7 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
           metadata: {},
           start: created,
         });
+        capTranslatorMap(tools);
         const part = toolPart(data.id, { status: "pending", input: {}, raw: "" });
         return part ? [partUpdated(part, created)] : [];
       }
@@ -609,6 +650,7 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
             metadata.sessionId = metadata.sessionID;
           }
           backgroundCalls.set(key, { ...call, metadata, callID: data.id, output });
+          capTranslatorMap(backgroundCalls);
           const part = toolPart(
             data.id,
             { status: "running", input: call.input, metadata, time: { start: call.start } },

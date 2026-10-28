@@ -52,4 +52,33 @@ describe("summary/subagent-formatter", () => {
     expect(rendered).toContain("Descubierto y verificado");
     expect(rendered).toContain("src/index.ts");
   });
+
+  it("renders paths relative to the session worktree when provided", () => {
+    const rendered = renderSubagentCards(
+      [
+        {
+          cardId: "card-1",
+          sessionId: "child-1",
+          parentSessionId: "root-1",
+          agent: "build",
+          description: "Fix the offer retry",
+          prompt: "Fix the offer retry",
+          status: "running",
+          providerID: "openai",
+          modelID: "gpt-5",
+          currentTool: "edit",
+          currentToolInput: {
+            filePath: "E:/Repos/opencode-telegram-group-topics-bot/src/tool/background-offer.ts",
+          },
+          currentToolTitle: undefined,
+          terminalMessage: undefined,
+          updatedAt: Date.now(),
+        },
+      ],
+      "E:/Repos/opencode-telegram-group-topics-bot",
+    );
+
+    expect(rendered).toContain("edit src/tool/background-offer.ts");
+    expect(rendered).not.toContain("E:/Repos");
+  });
 });

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Context } from "grammy";
-import { sessionsCommand, handleSessionSelect } from "../../../src/bot/commands/sessions.js";
+import { sessionsCommand, handleSessionSelect, handleBackgroundSessionOpen } from "../../../src/bot/commands/sessions.js";
 import { interactionManager } from "../../../src/interaction/manager.js";
 import { t } from "../../../src/i18n/index.js";
 
@@ -637,6 +637,69 @@ describe("bot/commands/sessions", () => {
     expect(ctx.api.createForumTopic).toHaveBeenCalled();
     const linkReply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls.find(
       ([text]) => typeof text === "string" && text.includes("https://t.me/c/111/888"),
+    );
+    expect(linkReply).toBeDefined();
+  });
+
+  it("ignores callbacks that are not background-session opens", async () => {
+    const ctx = createCallbackContext("session:session-9", 456);
+    expect(await handleBackgroundSessionOpen(ctx)).toBe(false);
+    expect(ctx.answerCallbackQuery).not.toHaveBeenCalled();
+  });
+
+  it("toasts an error when the background session has no topic binding", async () => {
+    mocked.topicGetBindingBySessionIdMock.mockReturnValue(undefined);
+    const ctx = createCallbackContext("background-session:a:session-9", 456);
+
+    const handled = await handleBackgroundSessionOpen(ctx);
+
+    expect(handled).toBe(true);
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+      text: t("sessions.select_error"),
+      show_alert: true,
+    });
+    expect(ctx.api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("acks silently when the tap already happens inside the session topic", async () => {
+    mocked.topicGetBindingBySessionIdMock.mockReturnValue({
+      scopeKey: "111:777",
+      chatId: 111,
+      threadId: 777,
+      sessionId: "session-9",
+      topicName: "Session 9",
+    });
+    const ctx = createCallbackContext("background-session:q:session-9", 456);
+
+    const handled = await handleBackgroundSessionOpen(ctx);
+
+    expect(handled).toBe(true);
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith();
+    expect(ctx.api.sendMessage).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+  });
+
+  it("replies with a topic link when the tap comes from outside the session topic", async () => {
+    mocked.topicGetBindingBySessionIdMock.mockReturnValue({
+      scopeKey: "-100777:555",
+      chatId: -100777,
+      threadId: 555,
+      sessionId: "session-9",
+      topicName: "Session 9",
+    });
+    const ctx = createCallbackContext("background-session:p:session-9", 456);
+    (ctx as { chat?: unknown }).chat = { id: -100777, type: "supergroup", is_forum: true };
+
+    const handled = await handleBackgroundSessionOpen(ctx);
+
+    expect(handled).toBe(true);
+    expect(ctx.api.sendMessage).toHaveBeenCalledWith(
+      -100777,
+      expect.any(String),
+      expect.objectContaining({ message_thread_id: 555 }),
+    );
+    const linkReply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([text]) => typeof text === "string" && text.includes("https://t.me/c/"),
     );
     expect(linkReply).toBeDefined();
   });

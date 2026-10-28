@@ -134,6 +134,7 @@ vi.mock("../../../src/bot/utils/keyboard.js", () => ({
 
 vi.mock("../../../src/i18n/index.js", () => ({
   t: mocked.tMock,
+  normalizeLocale: (locale: unknown, fallback: unknown) => locale ?? fallback,
 }));
 
 vi.mock("../../../src/utils/safe-background-task.js", () => ({

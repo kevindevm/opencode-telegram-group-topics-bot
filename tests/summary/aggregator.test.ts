@@ -277,8 +277,34 @@ describe("summary/aggregator", () => {
     ]);
   });
 
-  it("marks child session subagents as failed on session.error", () => {
-    const onSubagent = vi.fn();
+  it("lists descendant sessions transitively for family cost totals", () => {
+    summaryAggregator.setSession("root-session");
+
+    for (const [id, parentID] of [
+      ["child-1", "root-session"],
+      ["grand-1", "child-1"],
+      ["sibling", "root-session"],
+    ] as Array<[string, string]>) {
+      summaryAggregator.processEvent({
+        type: "session.created",
+        properties: { info: { id, parentID, title: "sub" } },
+      } as unknown as Event);
+    }
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: { info: { id: "other", title: "unrelated" } },
+    } as unknown as Event);
+
+    expect(summaryAggregator.getDescendantSessionIds("root-session").sort()).toEqual([
+      "child-1",
+      "grand-1",
+      "sibling",
+    ]);
+    expect(summaryAggregator.getDescendantSessionIds("child-1")).toEqual(["grand-1"]);
+    expect(summaryAggregator.getDescendantSessionIds("other")).toEqual([]);
+  });
+
+  it("marks child session subagents as failed on session.error", () => {    const onSubagent = vi.fn();
     summaryAggregator.setOnSubagent(onSubagent);
     summaryAggregator.setSession("root-session");
 
@@ -1711,7 +1737,7 @@ describe("summary/aggregator", () => {
     expect(onQuestionSettled).not.toHaveBeenCalled();
   });
 
-  it("ignores session.usage.updated without a step baseline", () => {
+  it("reports first-sight cumulative usage as live context instead of freezing at zero", () => {
     const onTokens = vi.fn();
     summaryAggregator.setOnTokens(onTokens);
     summaryAggregator.setSession("session-1");
@@ -1726,7 +1752,10 @@ describe("summary/aggregator", () => {
       },
     } as unknown as Event);
 
-    expect(onTokens).not.toHaveBeenCalled();
+    expect(onTokens).toHaveBeenCalledWith(
+      "session-1",
+      expect.objectContaining({ input: 1000, cacheRead: 200, cost: 0 }),
+    );
   });
 
   it("reports live usage growth over the last completed step", () => {
@@ -1742,7 +1771,9 @@ describe("summary/aggregator", () => {
         },
       }) as unknown as Event;
 
-    // Step 1 starts before any cumulative totals are known.
+    // Step 1 starts before any cumulative totals are known: the first
+    // sighting anchors the baseline and reports the cumulative totals so the
+    // context display moves on the very first turn.
     summaryAggregator.processEvent(stepStart("message-live-1"));
     summaryAggregator.processEvent({
       type: "session.usage.updated",
@@ -1751,7 +1782,10 @@ describe("summary/aggregator", () => {
         tokens: { input: 5000, output: 100, reasoning: 0, cache: { read: 1000, write: 0 } },
       },
     } as unknown as Event);
-    expect(onTokens).not.toHaveBeenCalled();
+    expect(onTokens).toHaveBeenLastCalledWith(
+      "session-1",
+      expect.objectContaining({ input: 5000, cacheRead: 1000, cost: 0 }),
+    );
 
     // Step 1 completes with exact per-step tokens.
     summaryAggregator.processEvent({
@@ -2181,5 +2215,312 @@ describe("summary/aggregator", () => {
     } as unknown as Event);
     summaryAggregator.processEvent(runningEvent);
     expect(onTool).toHaveBeenCalledTimes(2);
+  });
+
+  it("delivers streamed text as final when idle arrives without a completion", () => {
+    const onComplete = vi.fn();
+    summaryAggregator.setOnComplete(onComplete);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-gap",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-gap-1",
+          sessionID: "session-1",
+          messageID: "message-gap",
+          type: "text",
+          text: "streamed before the gap",
+          time: { start: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    // The `completed` announcement was lost in an SSE gap: only idle arrives.
+    summaryAggregator.processEvent({
+      type: "session.idle",
+      properties: { sessionID: "session-1" },
+    } as unknown as Event);
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete).toHaveBeenCalledWith(
+      "session-1",
+      "message-gap",
+      "streamed before the gap",
+    );
+  });
+
+  it("drops a replayed completion instead of emitting the final message twice", async () => {
+    vi.useFakeTimers();
+    const onComplete = vi.fn();
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnComplete(onComplete);
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("session-1");
+
+    const completedEvent = {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-replay",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now(), completed: Date.now() },
+        },
+      },
+    } as unknown as Event;
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-replay",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-replay-1",
+          sessionID: "session-1",
+          messageID: "message-replay",
+          type: "text",
+          text: "once",
+          time: { start: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent(completedEvent);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+
+    // Reconnect replay of the same completion: must not schedule a second delivery.
+    summaryAggregator.processEvent(completedEvent);
+    summaryAggregator.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "session-1",
+        messageID: "message-replay",
+        partID: "part-replay-1",
+        field: "text",
+        delta: "once",
+      },
+    } as unknown as Event);
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-replay-1",
+          sessionID: "session-1",
+          messageID: "message-replay",
+          type: "text",
+          text: "once",
+          time: { start: Date.now() },
+        },
+      },
+    } as unknown as Event);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+
+    vi.useRealTimers();
+  });
+
+  it("purges child session state on clearSession so no stale completion fires", async () => {
+    vi.useFakeTimers();
+    const onComplete = vi.fn();
+    const onTyping = vi.fn();
+    summaryAggregator.setOnComplete(onComplete);
+    summaryAggregator.setOnTypingIndicator(onTyping);
+    summaryAggregator.setSession("root-session");
+
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: {
+        info: { id: "child-session", parentID: "root-session", title: "Explore (@explore subagent)" },
+      },
+    } as unknown as Event);
+
+    const childMessage = (time: Record<string, number>) => ({
+      type: "message.updated",
+      properties: {
+        info: { id: "child-message-1", sessionID: "child-session", role: "assistant", time },
+      },
+    }) as unknown as Event;
+
+    summaryAggregator.processEvent(childMessage({ created: Date.now() }));
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "child-text-1",
+          sessionID: "child-session",
+          messageID: "child-message-1",
+          type: "text",
+          text: "child streaming",
+          time: { start: Date.now() },
+        },
+      },
+    } as unknown as Event);
+    // Completion timer (100ms) is now pending for the child message.
+    summaryAggregator.processEvent(childMessage({ created: Date.now(), completed: Date.now() }));
+
+    summaryAggregator.clearSession("root-session");
+
+    // The child transcript is gone: its events are buffered as unknown
+    // instead of dispatched, and nothing pending fires afterwards.
+    summaryAggregator.processEvent(childMessage({ created: Date.now() }));
+
+    onTyping.mockClear();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(onTyping).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it("purges grandchild state transitively on clearSession", () => {
+    const onMessageUpdated = vi.fn();
+    summaryAggregator.setOnMessageUpdated(onMessageUpdated);
+    summaryAggregator.setSession("root-session");
+
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: {
+        info: { id: "child-session", parentID: "root-session", title: "Mid (@explore subagent)" },
+      },
+    } as unknown as Event);
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: {
+        info: {
+          id: "grandchild-session",
+          parentID: "child-session",
+          title: "Leaf (@plan subagent)",
+        },
+      },
+    } as unknown as Event);
+
+    const grandchildMessage = {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "grandchild-message-1",
+          sessionID: "grandchild-session",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event;
+    const grandchildPart = {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "grandchild-text-1",
+          sessionID: "grandchild-session",
+          messageID: "grandchild-message-1",
+          type: "text",
+          text: "deep hello",
+          time: { start: Date.now() },
+        },
+      },
+    } as unknown as Event;
+
+    summaryAggregator.processEvent(grandchildMessage);
+    summaryAggregator.processEvent(grandchildPart);
+    expect(onMessageUpdated).toHaveBeenCalledWith(
+      "grandchild-session",
+      "grandchild-message-1",
+      "deep hello",
+    );
+
+    onMessageUpdated.mockClear();
+    summaryAggregator.clearSession("root-session");
+
+    // The whole descendant chain is untracked now: same events buffer
+    // instead of dispatching.
+    summaryAggregator.processEvent(grandchildMessage);
+    summaryAggregator.processEvent(grandchildPart);
+    expect(onMessageUpdated).not.toHaveBeenCalled();
+  });
+
+  it("stops child typing and flushes its transcript when the child goes idle", async () => {
+    vi.useFakeTimers();
+    const onTyping = vi.fn();
+    const onComplete = vi.fn();
+    summaryAggregator.setOnTypingIndicator(onTyping);
+    summaryAggregator.setOnComplete(onComplete);
+    summaryAggregator.setSession("root-session");
+
+    summaryAggregator.processEvent({
+      type: "session.created",
+      properties: {
+        info: { id: "child-session", parentID: "root-session", title: "Explore (@explore subagent)" },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "child-message-1",
+          sessionID: "child-session",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "child-text-1",
+          sessionID: "child-session",
+          messageID: "child-message-1",
+          type: "text",
+          text: "child streaming",
+          time: { start: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    onTyping.mockClear();
+    summaryAggregator.processEvent({
+      type: "session.idle",
+      properties: { sessionID: "child-session" },
+    } as unknown as Event);
+
+    // Transcript finalizes on the child idle ...
+    expect(onComplete).toHaveBeenCalledWith(
+      "child-session",
+      "child-message-1",
+      "child streaming",
+    );
+
+    // ... and the dead child stops pinging the typing indicator.
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(onTyping).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
   });
 });

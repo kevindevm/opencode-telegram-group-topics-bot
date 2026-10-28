@@ -23,7 +23,7 @@ import { getRuntimeMode } from "../runtime/mode.js";
 import { getRuntimePaths } from "../runtime/paths.js";
 import { clearServiceStateFile } from "../service/manager.js";
 import { getServiceStateFilePathFromEnv, isServiceChildProcess } from "../service/runtime.js";
-import { logger } from "../utils/logger.js";
+import { flushLogs, logger } from "../utils/logger.js";
 
 const SHUTDOWN_TIMEOUT_MS = 5000;
 
@@ -124,7 +124,13 @@ export async function startBotApp(): Promise<void> {
     shutdownTimeout.unref?.();
 
     try {
-      bot.stop();
+      // Bot.stop() is async: a rejection must be observed explicitly,
+      // otherwise the try/catch below cannot see it and the process gets
+      // an unhandled rejection during shutdown.
+      const stopped = bot.stop();
+      void Promise.resolve(stopped).catch((error) => {
+        logger.warn("[App] Failed to stop Telegram bot cleanly", error);
+      });
     } catch (error) {
       logger.warn("[App] Failed to stop Telegram bot cleanly", error);
     }
@@ -136,7 +142,10 @@ export async function startBotApp(): Promise<void> {
     void (async () => {
       await healthServer.stop();
       await Promise.race([
-        flushSettingsWrites(),
+        (async () => {
+          await flushSettingsWrites();
+          await flushLogs();
+        })(),
         new Promise<void>((resolve) => {
           setTimeout(resolve, Math.max(0, SHUTDOWN_TIMEOUT_MS - 1500)).unref?.();
         }),
@@ -188,6 +197,23 @@ export async function startBotApp(): Promise<void> {
     cleanupBotRuntime("app_shutdown_complete");
     scheduledTaskRuntime.stop();
     await healthServer.stop();
+    // The signal path drains settings with a timeout; the normal exit path
+    // (bot.start() resolved or threw, e.g. a 409 conflict) must not lose
+    // queued prompt/session/cost writes either. Bounded so a hung write
+    // cannot block process exit forever.
+    try {
+      await Promise.race([
+        (async () => {
+          await flushSettingsWrites();
+          await flushLogs();
+        })(),
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, Math.max(0, SHUTDOWN_TIMEOUT_MS - 1500)).unref?.();
+        }),
+      ]);
+    } catch (error) {
+      logger.warn("[App] Shutdown drain failed", error);
+    }
     await clearManagedServiceState().catch((error) => {
       logger.warn("[App] Failed to clear managed service state", error);
     });

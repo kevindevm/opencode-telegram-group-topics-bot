@@ -263,8 +263,43 @@ describe("bot/handlers/question", () => {
     );
   });
 
-  it("sends poll completion summary back into the originating topic", async () => {
-    const api = createApi([500, 501]);
+  it("lists full option texts numbered in the body and short numbered buttons", async () => {
+    const api = createApi([600]);
+    const longLabel = "Use the distributed background worker with retries";
+    const longDescription =
+      "spawns a durable worker per queue with exponential backoff and dead-letter routing";
+
+    questionManager.startQuestions(
+      [
+        {
+          header: "Q1",
+          question: "Pick one",
+          options: [{ label: longLabel, description: longDescription }],
+        },
+      ],
+      "req-long",
+    );
+    await showCurrentQuestion(api, 123, "global", null);
+
+    const sendMessage = api.sendMessage as ReturnType<typeof vi.fn>;
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const [chatId, text, options] = sendMessage.mock.calls[0] as unknown as [
+      number,
+      string,
+      { reply_markup: { inline_keyboard: Array<Array<{ text: string }>> } },
+    ];
+    expect(chatId).toBe(123);
+    // Full text is in the scrollable body, numbered...
+    expect(text).toContain(`1. ${longLabel} — ${longDescription}`);
+    // ...while buttons stay short and numbered for the 1:1 mapping.
+    const buttons = options.reply_markup.inline_keyboard.flat();
+    const optionButton = buttons.find((button) => button.text.startsWith("1."));
+    expect(optionButton).toBeDefined();
+    expect(optionButton!.text.length).toBeLessThanOrEqual(60);
+    expect(optionButton!.text).toContain("1.");
+  });
+
+  it("sends poll completion summary back into the originating topic", async () => {    const api = createApi([500, 501]);
     const topicScope = "123:777";
 
     questionManager.startQuestions([QUESTION_ONE], "req-6", topicScope);

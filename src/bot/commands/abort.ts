@@ -11,6 +11,8 @@ import { t } from "../../i18n/index.js";
 import { logger } from "../../utils/logger.js";
 import { getScopeFromContext, getScopeKeyFromContext, getThreadSendOptions } from "../scope.js";
 import { clearPromptResponseMode } from "../handlers/prompt.js";
+import { cancelAllScheduledPermissionPolls } from "../handlers/permission.js";
+import { assistantRunState } from "../assistant-run-state.js";
 
 type SessionState = "idle" | "busy" | "not-found";
 
@@ -22,11 +24,16 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 function stopLocalStreaming(scopeKey: string, sessionId?: string): void {
   clearAllInteractionState(INTERACTION_CLEAR_REASON.STOP_COMMAND, scopeKey);
+  // A permission poll scheduled during the grace window belongs to the
+  // aborted turn: letting it pop afterwards invites a reply for a request
+  // that died with the abort.
+  cancelAllScheduledPermissionPolls(scopeKey);
 
   if (!sessionId) {
     return;
   }
 
+  assistantRunState.clearRun(sessionId, "abort");
   summaryAggregator.clearSession(sessionId);
   updateTopicBindingStatusBySessionId(sessionId, TOPIC_SESSION_STATUS.ABANDONED);
 }

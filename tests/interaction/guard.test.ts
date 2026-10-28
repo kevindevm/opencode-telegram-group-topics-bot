@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Context } from "grammy";
 import { resolveInteractionGuardDecision } from "../../src/interaction/guard.js";
 import { interactionManager } from "../../src/interaction/manager.js";
+import { questionManager } from "../../src/question/manager.js";
+import { permissionManager } from "../../src/permission/manager.js";
 
 function createContext({
   text,
@@ -47,7 +49,30 @@ function createContext({
 describe("interaction guard", () => {
   beforeEach(() => {
     interactionManager.clear("test_setup");
+    questionManager.clear();
+    permissionManager.__resetForTests();
   });
+
+  function seedActivePoll(): void {
+    questionManager.startQuestions(
+      [{ question: "Pick one", header: "Q1", options: [{ label: "A", description: "" }] }],
+      "req-1",
+    );
+  }
+
+  function seedActivePermission(): void {
+    permissionManager.startPermission(
+      {
+        id: "perm-1",
+        sessionID: "session-1",
+        permission: "bash",
+        patterns: ["npm test"],
+        metadata: {},
+        always: [],
+      },
+      42,
+    );
+  }
 
   it("allows input when there is no active interaction", () => {
     const decision = resolveInteractionGuardDecision(createContext({ text: "hello" }));
@@ -81,6 +106,56 @@ describe("interaction guard", () => {
 
     expect(decision.allow).toBe(true);
     expect(decision.inputType).toBe("callback");
+  });
+
+  it("releases a stale question block when the poll is already gone", () => {
+    interactionManager.start({
+      kind: "question",
+      expectedInput: "callback",
+    });
+
+    const decision = resolveInteractionGuardDecision(createContext({ text: "hola" }));
+
+    expect(decision.allow).toBe(true);
+    expect(interactionManager.isActive()).toBe(false);
+  });
+
+  it("releases a stale permission block when no request is pending", () => {
+    interactionManager.start({
+      kind: "permission",
+      expectedInput: "callback",
+    });
+
+    const decision = resolveInteractionGuardDecision(createContext({ text: "hola" }));
+
+    expect(decision.allow).toBe(true);
+    expect(interactionManager.isActive()).toBe(false);
+  });
+
+  it("still blocks text while the poll is active", () => {
+    seedActivePoll();
+    interactionManager.start({
+      kind: "question",
+      expectedInput: "callback",
+    });
+
+    const decision = resolveInteractionGuardDecision(createContext({ text: "hola" }));
+
+    expect(decision.allow).toBe(false);
+    expect(decision.reason).toBe("expected_callback");
+  });
+
+  it("still blocks text while a permission request is pending", () => {
+    seedActivePermission();
+    interactionManager.start({
+      kind: "permission",
+      expectedInput: "callback",
+    });
+
+    const decision = resolveInteractionGuardDecision(createContext({ text: "hola" }));
+
+    expect(decision.allow).toBe(false);
+    expect(decision.reason).toBe("expected_callback");
   });
 
   it("allows command from allowed commands list", () => {
@@ -127,6 +202,7 @@ describe("interaction guard", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
 
+    seedActivePermission();
     interactionManager.start({
       kind: "permission",
       expectedInput: "callback",
@@ -191,6 +267,7 @@ describe("interaction guard", () => {
   });
 
   it("blocks text while permission interaction is active", () => {
+    seedActivePermission();
     interactionManager.start({
       kind: "permission",
       expectedInput: "callback",
@@ -204,6 +281,7 @@ describe("interaction guard", () => {
   });
 
   it("allows default status command while permission interaction is active", () => {
+    seedActivePermission();
     interactionManager.start({
       kind: "permission",
       expectedInput: "callback",
@@ -217,6 +295,7 @@ describe("interaction guard", () => {
   });
 
   it("blocks disallowed command while question mixed interaction is active", () => {
+    seedActivePoll();
     interactionManager.start({
       kind: "question",
       expectedInput: "mixed",
@@ -275,6 +354,7 @@ describe("interaction guard", () => {
   });
 
   it("blocks photo input when mixed input is expected (question)", () => {
+    seedActivePoll();
     interactionManager.start({
       kind: "question",
       expectedInput: "mixed",

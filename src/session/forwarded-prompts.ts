@@ -6,10 +6,22 @@
  * Matches expire quickly; a same-text prompt arriving much later is treated
  * as a new, mirrorable message.
  */
-const forwardedBySession = new Map<string, { text: string; at: number }>();
+interface ForwardedEntry {
+  text: string;
+  at: number;
+}
+
+/**
+ * One entry per queued prompt: rapid consecutive prompts must each keep
+ * their own mark, otherwise a later mark overwrites the earlier one and the
+ * earlier prompt mirrors back as if it came from another client.
+ */
+const forwardedBySession = new Map<string, ForwardedEntry[]>();
 
 const FORWARDED_TTL_MS = 10 * 60 * 1000;
 const MAX_ENTRIES = 500;
+/** Bound on tracked sessions so dead sessions never accumulate without a final prompt. */
+const MAX_SESSIONS = 1000;
 
 /** Recently mirrored (session, text) pairs to avoid double-mirroring the same prompt. */
 const mirroredPcTexts = new Map<string, number>();
@@ -65,57 +77,96 @@ export function markForwardedPrompt(sessionId: string, text: string): void {
     return;
   }
 
-  if (forwardedBySession.size >= MAX_ENTRIES) {
-    const oldest = forwardedBySession.keys().next();
-    if (!oldest.done) {
+  if (!forwardedBySession.has(sessionId)) {
+    while (forwardedBySession.size >= MAX_SESSIONS) {
+      const oldest = forwardedBySession.keys().next();
+      if (oldest.done) {
+        break;
+      }
+
       forwardedBySession.delete(oldest.value);
     }
   }
 
-  forwardedBySession.set(sessionId, { text: normalized, at: Date.now() });
+  const entries = forwardedBySession.get(sessionId) ?? [];
+  entries.push({ text: normalized, at: Date.now() });
+  while (entries.length > MAX_ENTRIES) {
+    entries.shift();
+  }
+
+  forwardedBySession.set(sessionId, entries);
 }
 
-export function consumeForwardedPrompt(sessionId: string, text: string): boolean {
-  const entry = forwardedBySession.get(sessionId);
-  if (!entry) {
-    return false;
-  }
-
-  if (Date.now() - entry.at >= FORWARDED_TTL_MS) {
-    forwardedBySession.delete(sessionId);
-    return false;
-  }
-
-  if (entry.text !== text.trim()) {
-    return false;
+/** Drops every mark of a finished session so its entry cannot linger. */
+export function clearForwardedPromptsForSession(sessionId: string): void {
+  if (!sessionId) {
+    return;
   }
 
   forwardedBySession.delete(sessionId);
+
+  const prefix = `${sessionId}:`;
+  for (const key of mirroredPcTexts.keys()) {
+    if (key.startsWith(prefix)) {
+      mirroredPcTexts.delete(key);
+    }
+  }
+}
+
+function findForwardedEntry(sessionId: string, text: string): number {
+  const entries = forwardedBySession.get(sessionId);
+  if (!entries) {
+    return -1;
+  }
+
+  const normalized = text.trim();
+  const now = Date.now();
+  let found = -1;
+
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (now - entries[index].at >= FORWARDED_TTL_MS) {
+      entries.splice(index, 1);
+      continue;
+    }
+
+    if (found === -1 && entries[index].text === normalized) {
+      found = index;
+    }
+  }
+
+  if (entries.length === 0) {
+    forwardedBySession.delete(sessionId);
+  }
+
+  return found;
+}
+
+export function consumeForwardedPrompt(sessionId: string, text: string): boolean {
+  const index = findForwardedEntry(sessionId, text);
+  if (index === -1) {
+    return false;
+  }
+
+  forwardedBySession.get(sessionId)?.splice(index, 1);
+  if (forwardedBySession.get(sessionId)?.length === 0) {
+    forwardedBySession.delete(sessionId);
+  }
   return true;
 }
 
 /** Peeks without consuming: is this text a prompt the bot itself forwarded? */
 export function isForwardedPrompt(sessionId: string, text: string): boolean {
-  const entry = forwardedBySession.get(sessionId);
-  if (!entry) {
-    return false;
-  }
-
-  if (Date.now() - entry.at >= FORWARDED_TTL_MS) {
-    forwardedBySession.delete(sessionId);
-    return false;
-  }
-
-  return entry.text === text.trim();
+  return findForwardedEntry(sessionId, text) !== -1;
 }
 
 export function unmarkForwardedPrompt(sessionId: string, text: string): void {
-  const entry = forwardedBySession.get(sessionId);
-  if (!entry) {
+  const index = findForwardedEntry(sessionId, text);
+  if (index === -1) {
     return;
   }
 
-  if (entry.text === text.trim()) {
+  forwardedBySession.get(sessionId)?.splice(index, 1);
+  if (forwardedBySession.get(sessionId)?.length === 0) {
     forwardedBySession.delete(sessionId);
   }
 }

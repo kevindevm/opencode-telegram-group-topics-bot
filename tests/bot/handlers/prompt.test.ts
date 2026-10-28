@@ -353,6 +353,47 @@ describe("bot/handlers/prompt", () => {
     expect(consumePromptResponseMode("session-1")).toBe("text_and_tts");
   });
 
+  it("drops a duplicate prompt when the same text is already queued", async () => {
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.sessionStatusMock.mockResolvedValue({
+      data: { "session-1": { type: "busy" } },
+      error: null,
+    });
+
+    const bot = {
+      api: {
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+      },
+    } as unknown as Bot<Context>;
+    const deps = { bot, ensureEventSubscription: vi.fn() };
+
+    const first = createContext();
+    expect(await processUserPrompt(first, "Test", deps, [], { responseMode: "text_only" })).toBe(
+      true,
+    );
+    expect(first.reply).toHaveBeenCalledWith(
+      t("bot.session_queued", { position: "1" }),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+
+    const duplicate = createContext();
+    expect(await processUserPrompt(duplicate, "Test", deps, [], { responseMode: "text_only" })).toBe(
+      true,
+    );
+    expect(duplicate.reply).toHaveBeenCalledWith(
+      t("bot.session_queued_duplicate", { position: "1" }),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(getQueuedPromptCountForTests("session-1")).toBe(1);
+
+    // Different text still queues behind the first one.
+    const other = createContext();
+    expect(
+      await processUserPrompt(other, "Something else", deps, [], { responseMode: "text_only" }),
+    ).toBe(true);
+    expect(getQueuedPromptCountForTests("session-1")).toBe(2);
+  });
+
   it("uses TTS response mode by default when the scope setting is enabled", async () => {
     mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
     mocked.isTtsEnabledMock.mockReturnValue(true);
@@ -893,5 +934,37 @@ describe("bot/handlers/prompt", () => {
     expect(listQueuedPrompts("session-1")).toHaveLength(1);
 
     __resetQueuedPromptsForTests();
+  });
+
+  it("clears the response mode when an accepted submit races a busy session", async () => {
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.sessionPromptAsyncMock.mockResolvedValueOnce({
+      error: new Error("session is busy, already running"),
+    });
+
+    const ctx = createContext();
+    const bot = {
+      api: {
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+      },
+    } as unknown as Bot<Context>;
+
+    const result = await processUserPrompt(
+      ctx,
+      "Test",
+      {
+        bot,
+        ensureEventSubscription: vi.fn(),
+      },
+      [],
+      { responseMode: "text_and_tts" },
+    );
+
+    expect(result).toBe(true);
+    // Re-queued for later: the mode must not leak into an unrelated turn,
+    // mirroring the background-error branch of the same submit.
+    expect(getPromptResponseMode("session-1")).toBeNull();
+    expect(getQueuedPromptCountForTests("session-1")).toBe(1);
+    expect(consumePromptResponseMode("session-1")).toBeNull();
   });
 });

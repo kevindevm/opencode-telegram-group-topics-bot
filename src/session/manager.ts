@@ -106,14 +106,43 @@ export function getScopeForSession(sessionId: string): string | null {
 
 export function registerSessionScope(sessionId: string, scopeKey: string): void {
   ensureSessionsLoaded();
-  scopeBySessionId.set(sessionId, scopeKey);
 
   const sessionInfo = sessionsByScope.get(scopeKey);
   if (!sessionInfo || sessionInfo.id !== sessionId) {
+    // Never leave a dangling reverse mapping: without a matching forward
+    // entry getSessionById()/getScopeForSession() would disagree.
     return;
   }
 
+  scopeBySessionId.set(sessionId, scopeKey);
   setSettingsSession(sessionInfo, scopeKey);
+}
+
+/**
+ * Drops the routing records of a finished session (topic deleted, session
+ * closed): without this, getSessionRouteTarget() keeps pointing SSE output
+ * at a scope that no longer exists.
+ */
+export function unregisterSessionScope(sessionId: string, scopeKey?: string): void {
+  ensureSessionsLoaded();
+
+  if (!sessionId) {
+    return;
+  }
+
+  const mappedScope = scopeBySessionId.get(sessionId);
+  if (mappedScope !== undefined && (scopeKey === undefined || mappedScope === scopeKey)) {
+    scopeBySessionId.delete(sessionId);
+  }
+
+  const targetScope = scopeKey ?? mappedScope;
+  if (targetScope !== undefined) {
+    const session = sessionsByScope.get(targetScope);
+    if (session && session.id === sessionId) {
+      sessionsByScope.delete(targetScope);
+      clearSettingsSession(targetScope);
+    }
+  }
 }
 
 export function getSessionById(sessionId: string): SessionInfo | null {
@@ -124,4 +153,10 @@ export function getSessionById(sessionId: string): SessionInfo | null {
   }
 
   return sessionsByScope.get(scopeKey) ?? null;
+}
+
+export function __resetSessionManagerForTests(): void {
+  sessionsByScope.clear();
+  scopeBySessionId.clear();
+  hydrated = false;
 }

@@ -4,7 +4,7 @@ import {
   registerPcUserMessage,
   takePcUserText,
 } from "../../src/bot/pc-user-mirror.js";
-import { __resetForwardedPromptsForTests, markForwardedPrompt } from "../../src/session/forwarded-prompts.js";
+import { __resetForwardedPromptsForTests, claimPcTextMirror, markForwardedPrompt } from "../../src/session/forwarded-prompts.js";
 
 const mocked = vi.hoisted(() => ({
   getTopicBindingBySessionIdMock: vi.fn(),
@@ -57,6 +57,16 @@ describe("bot/pc-user-mirror", () => {
     registerPcUserMessage("ses-1", "msg-2");
 
     expect(takePcUserText("ses-1", "msg-2", "hola desde telegram")).toBeNull();
+  });
+
+  it("reserves suppressed prompts so the run-start fallback stays silent", () => {
+    mocked.getTopicBindingBySessionIdMock.mockReturnValue(ACTIVE_BINDING);
+    markForwardedPrompt("ses-1", "hola desde telegram");
+    registerPcUserMessage("ses-1", "msg-2");
+
+    expect(takePcUserText("ses-1", "msg-2", "hola desde telegram")).toBeNull();
+    // The fallback path claims before mirroring: this must now fail.
+    expect(claimPcTextMirror("ses-1", "hola desde telegram")).toBe(false);
   });
 
   it("does not mirror twice for the same message", () => {

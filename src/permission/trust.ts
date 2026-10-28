@@ -45,21 +45,27 @@ export function setTrustLevel(sessionId: string, level: TrustLevel): void {
 
 const MAX_TRUST_ENTRIES = 1000;
 
-/** Opportunistic purge so abandoned sessions never accumulate forever. */
+/** Evicts expired entries (and oldest-first beyond the cap) so abandoned sessions never accumulate. */
 function pruneExpiredTrustLevels(): void {
-  if (trustBySession.size < MAX_TRUST_ENTRIES) {
-    return;
-  }
-
   const now = Date.now();
   for (const [sessionId, entry] of trustBySession) {
     if (now - entry.at >= TRUST_TTL_MS) {
       trustBySession.delete(sessionId);
     }
   }
+
+  while (trustBySession.size > MAX_TRUST_ENTRIES) {
+    const oldest = trustBySession.keys().next();
+    if (oldest.done) {
+      return;
+    }
+
+    trustBySession.delete(oldest.value);
+  }
 }
 
 export function getTrustLevel(sessionId: string): TrustLevel {
+  pruneExpiredTrustLevels();
   const entry = trustBySession.get(sessionId);
   if (!entry) {
     return TRUST_LEVEL.ASK;

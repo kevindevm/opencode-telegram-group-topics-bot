@@ -510,11 +510,10 @@ export function getStoredModel(scopeKey: string = "global"): ModelInfo {
   const storedModel = getCurrentModel(scopeKey);
 
   if (storedModel) {
-    // Ensure variant is set (default to "default")
-    if (!storedModel.variant) {
-      storedModel.variant = "default";
-    }
-    return storedModel;
+    // Default the variant on the returned copy only: persisting here would
+    // turn every read (keyboard builds, dashboard renders) into a settings
+    // disk write.
+    return { ...storedModel, variant: storedModel.variant || "default" };
   }
 
   // Fallback to model from config (environment variables)

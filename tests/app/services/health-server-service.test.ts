@@ -188,6 +188,34 @@ describe("app/services/health-server-service", () => {
     expect(stoppedLogs).toHaveLength(1);
   });
 
+  it("contains handler failures instead of crashing the process", async () => {
+    await healthServer.start(port, "test-1.0.0");
+
+    const handler = healthServer as unknown as {
+      handleRequest: (req: unknown, res: unknown) => Promise<void>;
+    };
+    const destroyMock = vi.fn();
+    const failingRes = {
+      writeHead: () => {
+        throw new Error("socket closed");
+      },
+      end: vi.fn(),
+      destroy: destroyMock,
+    };
+
+    await expect(
+      handler.handleRequest({ method: "GET", url: "/health/live" }, failingRes),
+    ).resolves.toBeUndefined();
+    expect(mocked.loggerErrorMock).toHaveBeenCalledWith(
+      "[Health] Request handler failed",
+      expect.anything(),
+    );
+    expect(destroyMock).toHaveBeenCalled();
+
+    const res = await request(port, "/health/live");
+    expect(res.status).toBe(200);
+  });
+
   it("keeps running without the endpoint when the port is busy, and a later start retries", async () => {
     const blocker = http.createServer();
     await new Promise<void>((resolve) => blocker.listen(port, "127.0.0.1", resolve));

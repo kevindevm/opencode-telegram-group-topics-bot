@@ -14,7 +14,7 @@ export const de: I18nDictionary = {
   "cmd.description.commands": "Benutzerdefinierte Befehle",
   "cmd.description.model": "Modell auswählen",
   "cmd.description.agent": "Agent auswählen",
-  "cmd.description.cleanup": "Veraltete Themen schließen",
+  "cmd.description.cleanup": "Subagenten-Themen löschen",
   "cmd.description.opencode_start": "OpenCode-Server starten",
   "cmd.description.opencode_stop": "OpenCode-Server stoppen",
   "cmd.description.recent": "Browse recent sessions across projects",
@@ -93,6 +93,8 @@ export const de: I18nDictionary = {
     "⏳ Deine letzte Anfrage wird noch verarbeitet, deshalb wurde diese neue nicht gestartet.\n\nWarum das passiert ist: OpenCode erlaubt pro Sitzung nur einen aktiven Lauf gleichzeitig.\nWas du tun kannst: warte auf die aktuelle Antwort oder nutze /abort, wenn es festhängt, und sende die Nachricht dann erneut.",
   "bot.session_queued":
     "📝 Deine Nachricht wurde für diese Sitzung in die Warteschlange gestellt.\n\nPosition in der Warteschlange: {position}\nWas als Nächstes passiert: Sie startet automatisch, sobald der aktuelle Lauf fertig ist.",
+  "bot.session_queued_duplicate":
+    "⏳ Diese Nachricht steht bereits an Position {position} in der Warteschlange; sie wird nicht doppelt hinzugefügt.",
     "bot.session_queued_cancel": "❌ Cancel queued message",
   "bot.session_queue_cancelled": "❌ Queued message cancelled, it will not run.\n\nCancelled message:\n{preview}",
   "bot.session_queue_cancelled_callback": "❌ Queued message cancelled",
@@ -288,6 +290,9 @@ export const de: I18nDictionary = {
   "cleanup.no_topics": "✅ Keine Themen-Sitzungen zum Aufräumen.",
   "cleanup.result":
     "🧹 Aufräumen abgeschlossen. Geprüft: {inspected}, geschlossen: {closed}, übersprungen: {skipped}, fehlgeschlagen: {failed}.",
+  "cleanup.subagents_none": "✅ Keine Subagenten-Themen zum Löschen.",
+  "cleanup.subagents_result":
+    "🧹 {deleted} Subagenten-Themen gelöscht. Fehlgeschlagen: {failed}.",
 
   "stop.no_active_session":
     "🛑 Agent wurde nicht gestartet\n\nErstelle eine Sitzung mit /new oder wähle eine über /sessions aus.",
@@ -487,6 +492,8 @@ export const de: I18nDictionary = {
   "tool.background_button": "⏪ In den Hintergrund",
   "tool.background_offer":
     "⏳ Dieser Befehl läuft noch:\n{command}\n\nIn den Hintergrund schicken, damit du etwas anderes tun kannst?",
+  "tool.background_offer_subagent":
+    "🧩 Dieser Subagent arbeitet noch:\n{command}\n\nIn den Hintergrund schicken, damit du etwas anderes tun kannst?",
   "tool.background_no_command": "einen langen Befehl",
   "tool.background_started":
     "⏪ Im Hintergrund. Läuft weiter; ich melde mich, wenn er fertig ist.",
@@ -662,6 +669,7 @@ export const de: I18nDictionary = {
   "cli.args.invalid_mode": "Ungültiger Wert für --mode: {value}. Erwartet sources|installed",
   "cli.args.unknown_option": "Unbekannte Option: {value}",
   "cli.args.mode_only_start": "Option --mode wird nur für die Befehle start und config unterstützt",
+  "cli.args.daemon_only_start": "Option --daemon wird nur für den Befehl start unterstützt",
 
   "legacy.models.fetch_error":
     "🔴 Modellliste konnte nicht geladen werden. Prüfe den Serverstatus mit /status.",

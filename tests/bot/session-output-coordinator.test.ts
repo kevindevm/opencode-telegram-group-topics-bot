@@ -204,7 +204,7 @@ describe("bot/session-output-coordinator", () => {
     expect(onFinalizeSession).toHaveBeenCalledTimes(1);
   });
 
-  it("passes the latest assistant completion text into finalization", async () => {
+  it("delivers every queued completion in order instead of only the latest", async () => {
     const onFinalizeSession = vi.fn().mockResolvedValue(true);
     const coordinator = createCoordinator({ onFinalizeSession });
 
@@ -224,8 +224,9 @@ describe("bot/session-output-coordinator", () => {
 
     await vi.runAllTimersAsync();
 
-    expect(onFinalizeSession).toHaveBeenCalledTimes(1);
-    expect(onFinalizeSession).toHaveBeenCalledWith("s1", "Second");
+    expect(onFinalizeSession).toHaveBeenCalledTimes(2);
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "First");
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "Second");
   });
 
   it("keeps the pending completion when finalization reports failure", async () => {
@@ -266,6 +267,65 @@ describe("bot/session-output-coordinator", () => {
     expect(onFinalizeSession).toHaveBeenCalledTimes(1);
     expect(onFinalizeSession).toHaveBeenCalledWith("s1", "Reply");
     expect(onFinalDeliveryCommitted).toHaveBeenCalledWith("s1");
+  });
+
+  it("flushes queued completions for the next prompt even when idle was lost", async () => {
+    const onFinalizeSession = vi.fn().mockResolvedValue(true);
+    const onFinalDeliveryCommitted = vi.fn().mockResolvedValue(undefined);
+    const coordinator = createCoordinator({ onFinalizeSession, onFinalDeliveryCommitted });
+
+    // A swallowed session.idle: completion tracked, but no delivery scheduled.
+    coordinator.dispatch({
+      kind: "assistant_complete",
+      sessionId: "s1",
+      messageId: "m1",
+      text: "Lost idle turn",
+    });
+
+    const flushed = await coordinator.flushPendingFinalDelivery("s1");
+
+    expect(flushed).toBe(true);
+    expect(onFinalizeSession).toHaveBeenCalledWith("s1", "Lost idle turn");
+    expect(onFinalDeliveryCommitted).toHaveBeenCalledWith("s1");
+  });
+
+  it("requeues the undelivered tail ahead of retry arrivals to preserve order", async () => {
+    const onFinalizeSession = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    const coordinator = createCoordinator({ onFinalizeSession });
+
+    coordinator.dispatch({
+      kind: "assistant_complete",
+      sessionId: "s1",
+      messageId: "m1",
+      text: "One",
+    });
+    coordinator.dispatch({
+      kind: "assistant_complete",
+      sessionId: "s1",
+      messageId: "m2",
+      text: "Two",
+    });
+    coordinator.dispatch({
+      kind: "assistant_complete",
+      sessionId: "s1",
+      messageId: "m3",
+      text: "Three",
+    });
+    coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "One");
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "Two");
+
+    // "Two" failed: retried before "Three", order preserved.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(3, "s1", "Two");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(onFinalizeSession).toHaveBeenNthCalledWith(4, "s1", "Three");
   });
 
   it("does not commit an older finalization when a newer completion arrives during delivery", async () => {

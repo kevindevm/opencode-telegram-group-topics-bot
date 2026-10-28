@@ -3,6 +3,7 @@ import type { BackgroundSessionNotification } from "../../app/managers/backgroun
 import { buildBackgroundSessionOpenKeyboard } from "../menus/session-selection-menu.js";
 import type { SessionTargetPolicy, TelegramEventDelivery } from "./telegram-event-delivery.js";
 import { DISPLAY_FLAG, isDisplayVisible } from "../../display/manager.js";
+import { getThreadSendOptions } from "../scope.js";
 
 function formatShortSessionId(sessionId: string): string {
   return sessionId.length <= 8 ? sessionId : sessionId.slice(0, 8);
@@ -49,6 +50,7 @@ export function createBackgroundNoticeDelivery(
 
     await delivery.sendText(destination, formatBackgroundSessionNotification(notification), {
       reply_markup: buildBackgroundSessionOpenKeyboard(notification.sessionId, notification.kind),
+      ...getThreadSendOptions(destination.threadId ?? null),
     });
   };
 }

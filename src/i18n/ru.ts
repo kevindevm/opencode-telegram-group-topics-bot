@@ -14,7 +14,7 @@ export const ru: I18nDictionary = {
   "cmd.description.commands": "Пользовательские команды",
   "cmd.description.model": "Выбрать модель",
   "cmd.description.agent": "Выбрать режим агента",
-  "cmd.description.cleanup": "Закрыть устаревшие темы",
+  "cmd.description.cleanup": "Удалить темы-транскрипты субагентов",
   "cmd.description.opencode_start": "Запустить OpenCode сервер",
   "cmd.description.opencode_stop": "Остановить OpenCode сервер",
   "cmd.description.recent": "Browse recent sessions across projects",
@@ -90,6 +90,8 @@ export const ru: I18nDictionary = {
     "⏳ Предыдущий запрос все еще выполняется, поэтому новый не был запущен.\n\nПочему так: в одной сессии OpenCode обрабатывает только один активный запуск одновременно.\nЧто делать: дождитесь ответа, либо используйте /abort, если процесс завис, и отправьте сообщение снова.",
   "bot.session_queued":
     "📝 Ваше сообщение поставлено в очередь для этой сессии.\n\nПозиция в очереди: {position}\nЧто будет дальше: оно запустится автоматически после завершения текущего запуска.",
+  "bot.session_queued_duplicate":
+    "⏳ Это сообщение уже стоит в очереди на позиции {position}; дважды не добавляю.",
     "bot.session_queued_cancel": "❌ Cancel queued message",
   "bot.session_queue_cancelled": "❌ Queued message cancelled, it will not run.\n\nCancelled message:\n{preview}",
   "bot.session_queue_cancelled_callback": "❌ Queued message cancelled",
@@ -280,6 +282,8 @@ export const ru: I18nDictionary = {
   "cleanup.no_topics": "✅ Нет тем сессий для очистки.",
   "cleanup.result":
     "🧹 Очистка завершена. Проверено: {inspected}, закрыто: {closed}, пропущено: {skipped}, ошибок: {failed}.",
+  "cleanup.subagents_none": "✅ Нет тем субагентов для удаления.",
+  "cleanup.subagents_result": "🧹 Удалено тем субагентов: {deleted}. Не удалось: {failed}.",
 
   "stop.no_active_session":
     "🛑 Агент не был запущен\n\nСначала создайте сессию командой /new или выберите существующую через /sessions.",
@@ -476,6 +480,8 @@ export const ru: I18nDictionary = {
   "tool.background_button": "⏪ В фон",
   "tool.background_offer":
     "⏳ Эта команда всё ещё выполняется:\n{command}\n\nОтправить в фон и заняться другим?",
+  "tool.background_offer_subagent":
+    "🧩 Этот субагент всё ещё работает:\n{command}\n\nОтправить в фон и заняться другим?",
   "tool.background_no_command": "длинную команду",
   "tool.background_started": "⏪ В фоне. Продолжает выполняться; сообщу, когда завершится.",
   "tool.background_started_callback": "⏪ Отправлено в фон",
@@ -649,6 +655,7 @@ export const ru: I18nDictionary = {
   "cli.args.invalid_mode": "Некорректное значение --mode: {value}. Ожидается sources|installed",
   "cli.args.unknown_option": "Неизвестная опция: {value}",
   "cli.args.mode_only_start": "Опция --mode поддерживается только для команд start и config",
+  "cli.args.daemon_only_start": "Опция --daemon поддерживается только для команды start",
 
   "legacy.models.fetch_error":
     "🔴 Не удалось получить список моделей. Проверьте статус сервера /status.",

@@ -5,6 +5,7 @@ import {
   consumeForwardedPrompt,
   isForwardedPrompt,
   markForwardedPrompt,
+  unmarkForwardedPrompt,
 } from "../../src/session/forwarded-prompts.js";
 
 describe("session/forwarded-prompts", () => {
@@ -91,5 +92,24 @@ describe("session/forwarded-prompts", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps one mark per queued prompt instead of overwriting", () => {
+    markForwardedPrompt("ses-1", "first prompt");
+    markForwardedPrompt("ses-1", "second prompt");
+
+    expect(consumeForwardedPrompt("ses-1", "first prompt")).toBe(true);
+    expect(consumeForwardedPrompt("ses-1", "second prompt")).toBe(true);
+    expect(consumeForwardedPrompt("ses-1", "second prompt")).toBe(false);
+  });
+
+  it("unmarks a single entry without dropping the rest", () => {
+    markForwardedPrompt("ses-1", "first prompt");
+    markForwardedPrompt("ses-1", "second prompt");
+
+    unmarkForwardedPrompt("ses-1", "first prompt");
+
+    expect(isForwardedPrompt("ses-1", "first prompt")).toBe(false);
+    expect(isForwardedPrompt("ses-1", "second prompt")).toBe(true);
   });
 });

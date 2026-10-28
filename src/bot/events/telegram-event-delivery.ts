@@ -16,6 +16,8 @@ type SendDocumentOptions = Parameters<TelegramApi["sendDocument"]>[2];
 export interface TelegramDestination {
   api: TelegramApi;
   chatId: number;
+  /** Topic thread for forum groups; omitted for DMs/General. */
+  threadId?: number | null;
 }
 
 export interface SessionTargetPolicy {

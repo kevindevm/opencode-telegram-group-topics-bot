@@ -49,6 +49,7 @@ import {
   TELEGRAM_ERROR_MARKER,
 } from "../constants.js";
 import { getTopicBindingBySessionId, registerTopicSessionBinding } from "../../topic/manager.js";
+import { parseBackgroundSessionCallback } from "../menus/session-selection-menu.js";
 import { TOPIC_COLORS } from "../../topic/colors.js";
 import { formatTopicTitle } from "../../topic/title-format.js";
 import { buildTopicMessageLink } from "../utils/topic-link.js";
@@ -490,6 +491,61 @@ export async function openSessionInNewTopic(
     getThreadSendOptions(scope?.threadId ?? null),
   );
   await ctx.deleteMessage().catch(() => {});
+  return true;
+}
+
+export async function handleBackgroundSessionOpen(ctx: Context): Promise<boolean> {
+  const data = ctx.callbackQuery?.data;
+  const parsed = data ? parseBackgroundSessionCallback(data) : null;
+  if (!parsed) {
+    return false;
+  }
+
+  const binding = getTopicBindingBySessionId(parsed.sessionId);
+  if (!binding || !ctx.chat || binding.chatId !== ctx.chat.id) {
+    await ctx
+      .answerCallbackQuery({ text: t("sessions.select_error"), show_alert: true })
+      .catch(() => {});
+    return true;
+  }
+
+  const scope = getScopeFromContext(ctx);
+  if (scope && scope.threadId === binding.threadId) {
+    // Already inside the session topic: the notice is visible right here,
+    // so acknowledge silently instead of posting a self-link.
+    await ctx.answerCallbackQuery().catch(() => {});
+    return true;
+  }
+
+  try {
+    const topicMessage = await ctx.api.sendMessage(
+      binding.chatId,
+      t("sessions.selected", { title: binding.topicName ?? parsed.sessionId }),
+      getThreadSendOptions(binding.threadId),
+    );
+    const topicLink = buildTopicMessageLink(ctx.chat, topicMessage.message_id);
+    await ctx.answerCallbackQuery().catch(() => {});
+    if (topicLink) {
+      await ctx
+        .reply(
+          t(BOT_I18N_KEY.SESSIONS_BOUND_TOPIC_LINK, {
+            title: binding.topicName ?? parsed.sessionId,
+            topic: binding.topicName ?? String(binding.threadId),
+            url: topicLink,
+          }),
+        )
+        .catch(() => {});
+    }
+  } catch (error) {
+    logger.warn("[Sessions] Failed to open background session topic:", {
+      sessionId: parsed.sessionId,
+      error,
+    });
+    await ctx
+      .answerCallbackQuery({ text: t("sessions.select_error"), show_alert: true })
+      .catch(() => {});
+  }
+
   return true;
 }
 

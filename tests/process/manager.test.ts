@@ -147,12 +147,14 @@ describe("process/manager", () => {
 
   it("stops running process on Windows and clears state", async () => {
     const restorePlatform = setPlatform("win32");
-    spawnMock.mockReturnValue(createMockChildProcess(789));
+    const child = createMockChildProcess(789);
+    spawnMock.mockReturnValue(child);
     vi.spyOn(process, "kill").mockImplementation(() => true);
 
     try {
       await processManager.start();
-      const result = await processManager.stop(100);
+      setTimeout(() => child.emit("exit", 0, null), 10);
+      const result = await processManager.stop(1000);
 
       expect(result).toEqual({ success: true });
       expect(execMock).toHaveBeenCalledTimes(1);
@@ -160,6 +162,36 @@ describe("process/manager", () => {
       expect(processManager.getPID()).toBeNull();
       expect(processManager.isRunning()).toBe(false);
       expect(clearServerProcessMock).toHaveBeenCalled();
+    } finally {
+      restorePlatform();
+    }
+  });
+
+  it("reports failure when the Windows process survives taskkill", async () => {
+    const restorePlatform = setPlatform("win32");
+    const child = createMockChildProcess(789);
+    spawnMock.mockReturnValue(child);
+    // process.kill(pid, 0) succeeds: the process is still alive.
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    try {
+      await processManager.start();
+      // No `exit` from the child: taskkill claims success but the tree lives on.
+      const result = await processManager.stop(50);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("did not exit");
+      // State stays truthful instead of cleaning up a live process.
+      expect(processManager.getPID()).toBe(789);
+      expect(clearServerProcessMock).not.toHaveBeenCalled();
+
+      // Once it really dies, stopping succeeds and cleans up.
+      killSpy.mockImplementation(() => {
+        throw new Error("ESRCH");
+      });
+      const retry = await processManager.stop(50);
+      expect(retry).toEqual({ success: true });
+      expect(processManager.getPID()).toBeNull();
     } finally {
       restorePlatform();
     }

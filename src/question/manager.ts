@@ -18,6 +18,10 @@ class QuestionManager {
     };
   }
 
+  private peekState(scopeKey: string): QuestionState | undefined {
+    return this.stateByScope.get(scopeKey);
+  }
+
   private getState(scopeKey: string): QuestionState {
     const state = this.stateByScope.get(scopeKey);
     if (state) {
@@ -59,12 +63,12 @@ class QuestionManager {
   }
 
   getRequestID(scopeKey: string = "global"): string | null {
-    return this.getState(scopeKey).requestID;
+    return this.peekState(scopeKey)?.requestID ?? null;
   }
 
   getCurrentQuestion(scopeKey: string = "global"): Question | null {
-    const state = this.getState(scopeKey);
-    if (state.currentIndex >= state.questions.length) {
+    const state = this.peekState(scopeKey);
+    if (!state || state.currentIndex >= state.questions.length) {
       return null;
     }
 
@@ -72,8 +76,8 @@ class QuestionManager {
   }
 
   selectOption(questionIndex: number, optionIndex: number, scopeKey: string = "global"): void {
-    const state = this.getState(scopeKey);
-    if (!state.isActive) {
+    const state = this.peekState(scopeKey);
+    if (!state || !state.isActive) {
       return;
     }
 
@@ -103,11 +107,14 @@ class QuestionManager {
   }
 
   getSelectedOptions(questionIndex: number, scopeKey: string = "global"): Set<number> {
-    return this.getState(scopeKey).selectedOptions.get(questionIndex) || new Set();
+    return this.peekState(scopeKey)?.selectedOptions.get(questionIndex) || new Set();
   }
 
   getSelectedAnswer(questionIndex: number, scopeKey: string = "global"): string {
-    const state = this.getState(scopeKey);
+    const state = this.peekState(scopeKey);
+    if (!state) {
+      return "";
+    }
     const question = state.questions[questionIndex];
     if (!question) {
       return "";
@@ -126,19 +133,22 @@ class QuestionManager {
     logger.debug(
       `[QuestionManager] Custom answer received for question ${questionIndex}: ${answer}`,
     );
-    this.getState(scopeKey).customAnswers.set(questionIndex, answer);
+    this.peekState(scopeKey)?.customAnswers.set(questionIndex, answer);
   }
 
   getCustomAnswer(questionIndex: number, scopeKey: string = "global"): string | undefined {
-    return this.getState(scopeKey).customAnswers.get(questionIndex);
+    return this.peekState(scopeKey)?.customAnswers.get(questionIndex);
   }
 
   hasCustomAnswer(questionIndex: number, scopeKey: string = "global"): boolean {
-    return this.getState(scopeKey).customAnswers.has(questionIndex);
+    return this.peekState(scopeKey)?.customAnswers.has(questionIndex) ?? false;
   }
 
   nextQuestion(scopeKey: string = "global"): void {
-    const state = this.getState(scopeKey);
+    const state = this.peekState(scopeKey);
+    if (!state) {
+      return;
+    }
     state.currentIndex++;
     state.customInputQuestionIndex = null;
     state.activeMessageId = null;
@@ -149,42 +159,50 @@ class QuestionManager {
   }
 
   hasNextQuestion(scopeKey: string = "global"): boolean {
-    const state = this.getState(scopeKey);
-    return state.currentIndex < state.questions.length;
+    const state = this.peekState(scopeKey);
+    return state ? state.currentIndex < state.questions.length : false;
   }
 
   getCurrentIndex(scopeKey: string = "global"): number {
-    return this.getState(scopeKey).currentIndex;
+    return this.peekState(scopeKey)?.currentIndex ?? 0;
   }
 
   getTotalQuestions(scopeKey: string = "global"): number {
-    return this.getState(scopeKey).questions.length;
+    return this.peekState(scopeKey)?.questions.length ?? 0;
   }
 
   addMessageId(messageId: number, scopeKey: string = "global"): void {
-    this.getState(scopeKey).messageIds.push(messageId);
+    this.peekState(scopeKey)?.messageIds.push(messageId);
   }
 
   setActiveMessageId(messageId: number, scopeKey: string = "global"): void {
-    this.getState(scopeKey).activeMessageId = messageId;
+    const state = this.peekState(scopeKey);
+    if (state) {
+      state.activeMessageId = messageId;
+    }
   }
 
   clearActiveMessage(scopeKey: string = "global"): void {
-    this.getState(scopeKey).activeMessageId = null;
+    const state = this.peekState(scopeKey);
+    if (state) {
+      state.activeMessageId = null;
+    }
   }
 
   getActiveMessageId(scopeKey: string = "global"): number | null {
-    return this.getState(scopeKey).activeMessageId;
+    return this.peekState(scopeKey)?.activeMessageId ?? null;
   }
 
   isActiveMessage(messageId: number | null, scopeKey: string = "global"): boolean {
-    const state = this.getState(scopeKey);
-    return state.isActive && state.activeMessageId !== null && messageId === state.activeMessageId;
+    const state = this.peekState(scopeKey);
+    return (
+      Boolean(state?.isActive) && state?.activeMessageId !== null && messageId === state?.activeMessageId
+    );
   }
 
   startCustomInput(questionIndex: number, scopeKey: string = "global"): void {
-    const state = this.getState(scopeKey);
-    if (!state.isActive || !state.questions[questionIndex]) {
+    const state = this.peekState(scopeKey);
+    if (!state || !state.isActive || !state.questions[questionIndex]) {
       return;
     }
 
@@ -192,27 +210,33 @@ class QuestionManager {
   }
 
   clearCustomInput(scopeKey: string = "global"): void {
-    this.getState(scopeKey).customInputQuestionIndex = null;
+    const state = this.peekState(scopeKey);
+    if (state) {
+      state.customInputQuestionIndex = null;
+    }
   }
 
   isWaitingForCustomInput(questionIndex: number, scopeKey: string = "global"): boolean {
-    return this.getState(scopeKey).customInputQuestionIndex === questionIndex;
+    return this.peekState(scopeKey)?.customInputQuestionIndex === questionIndex;
   }
 
   getMessageIds(scopeKey: string = "global"): number[] {
-    return [...this.getState(scopeKey).messageIds];
+    return [...(this.peekState(scopeKey)?.messageIds ?? [])];
   }
 
   isActive(scopeKey: string = "global"): boolean {
-    const state = this.getState(scopeKey);
+    const state = this.peekState(scopeKey);
     logger.debug(
-      `[QuestionManager] isActive check: ${state.isActive}, questions=${state.questions.length}, currentIndex=${state.currentIndex}`,
+      `[QuestionManager] isActive check: ${state?.isActive ?? false}, questions=${state?.questions.length ?? 0}, currentIndex=${state?.currentIndex ?? 0}`,
     );
-    return state.isActive;
+    return state?.isActive ?? false;
   }
 
   cancel(scopeKey: string = "global"): void {
-    const state = this.getState(scopeKey);
+    const state = this.peekState(scopeKey);
+    if (!state) {
+      return;
+    }
     logger.info("[QuestionManager] Poll cancelled");
     state.isActive = false;
     state.customInputQuestionIndex = null;
@@ -220,11 +244,14 @@ class QuestionManager {
   }
 
   clear(scopeKey: string = "global"): void {
-    this.stateByScope.set(scopeKey, this.createDefaultState());
+    this.stateByScope.delete(scopeKey);
   }
 
   getAllAnswers(scopeKey: string = "global"): QuestionAnswer[] {
-    const state = this.getState(scopeKey);
+    const state = this.peekState(scopeKey);
+    if (!state) {
+      return [];
+    }
     const answers: QuestionAnswer[] = [];
 
     for (let i = 0; i < state.questions.length; i++) {

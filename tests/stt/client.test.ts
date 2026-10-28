@@ -1,180 +1,200 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../src/utils/logger.js", () => ({
-  logger: {
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
+const mocked = vi.hoisted(() => ({
+  stt: {
+    apiUrl: "",
+    apiKey: "",
+    protocol: "openai",
+    audioField: "",
+    model: "whisper-large-v3-turbo",
+    language: "",
+    notePrompt: "",
   },
+  execFileMock: vi.fn(),
+  fetchMock: vi.fn(),
 }));
 
-// vi.hoisted() ensures the variable is declared before vi.mock factories run.
-const mockStt = vi.hoisted(() => ({
-  apiUrl: "",
-  apiKey: "",
-  model: "whisper-large-v3-turbo",
-  language: "",
-}));
-
-vi.mock("../../src/config.js", () => ({
-  config: {
-    stt: mockStt,
-    // Provide minimal stubs for properties that other modules read at import time
-    // (e.g., opencode/client.ts reads config.opencode during module initialization
-    // and may get loaded via the test setup's resetSingletonState).
-    telegram: { token: "test", allowedUserId: 0, proxyUrl: "" },
-    opencode: {
-      apiUrl: "http://localhost:4096",
-      username: "opencode",
-      password: "",
-      model: { provider: "test", modelId: "test" },
-    },
-    server: { logLevel: "error" },
-    bot: {
-      sessionsListLimit: 10,
-      projectsListLimit: 10,
-      locale: "en",
-      serviceMessagesIntervalSec: 5,
-      hideThinkingMessages: false,
-      hideToolCallMessages: false,
-    },
-    files: { maxFileSizeKb: 100 },
-  },
-}));
-
-import { isSttConfigured, transcribeAudio } from "../../src/stt/client.js";
-
-describe("isSttConfigured", () => {
-  beforeEach(() => {
-    mockStt.apiUrl = "";
-    mockStt.apiKey = "";
-    mockStt.model = "whisper-large-v3-turbo";
-    mockStt.language = "";
-  });
-
-  it("returns false when both apiUrl and apiKey are empty", () => {
-    expect(isSttConfigured()).toBe(false);
-  });
-
-  it("returns false when only apiUrl is set", () => {
-    mockStt.apiUrl = "https://api.groq.com/openai/v1";
-    expect(isSttConfigured()).toBe(false);
-  });
-
-  it("returns false when only apiKey is set", () => {
-    mockStt.apiKey = "sk-test-key";
-    expect(isSttConfigured()).toBe(false);
-  });
-
-  it("returns true when both apiUrl and apiKey are set", () => {
-    mockStt.apiUrl = "https://api.groq.com/openai/v1";
-    mockStt.apiKey = "sk-test-key";
-    expect(isSttConfigured()).toBe(true);
-  });
+vi.mock("../../src/config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/config.js")>();
+  return { ...actual, config: { ...actual.config, stt: mocked.stt } };
 });
 
-describe("transcribeAudio", () => {
+vi.mock("../../src/utils/logger.js", () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, execFile: mocked.execFileMock };
+});
+
+async function loadClient() {
+  vi.resetModules();
+  return import("../../src/stt/client.js");
+}
+
+function fakeChild() {
+  return {
+    stdin: { write: vi.fn(), end: vi.fn() },
+    on: vi.fn(),
+    kill: vi.fn(),
+  };
+}
+
+describe("stt/client", () => {
   beforeEach(() => {
-    mockStt.apiUrl = "https://api.groq.com/openai/v1";
-    mockStt.apiKey = "sk-test-key";
-    mockStt.model = "whisper-large-v3-turbo";
-    mockStt.language = "";
-    vi.restoreAllMocks();
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+    mocked.stt.apiUrl = "";
+    mocked.stt.apiKey = "";
+    mocked.stt.protocol = "openai";
+    mocked.stt.audioField = "";
+    mocked.stt.model = "whisper-large-v3-turbo";
+    mocked.stt.language = "";
+    vi.stubGlobal("fetch", mocked.fetchMock);
+    mocked.fetchMock.mockReset().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ text: "hola mundo" }),
+    });
   });
 
-  it("throws when STT is not configured", async () => {
-    mockStt.apiUrl = "";
-    mockStt.apiKey = "";
+  it("requires url and key for openai, url only for plain", async () => {
+    const { isSttConfigured } = await loadClient();
 
-    const audioBuffer = Buffer.from("fake-audio-data");
-    await expect(transcribeAudio(audioBuffer, "test.ogg")).rejects.toThrow("STT is not configured");
+    expect(isSttConfigured()).toBe(false);
+    mocked.stt.apiUrl = "https://api.example.com/v1";
+    expect(isSttConfigured()).toBe(false);
+    mocked.stt.apiKey = "k";
+    expect(isSttConfigured()).toBe(true);
+
+    mocked.stt.protocol = "plain";
+    mocked.stt.apiKey = "";
+    expect(isSttConfigured()).toBe(true);
+    mocked.stt.apiUrl = "";
+    expect(isSttConfigured()).toBe(false);
   });
 
-  it("sends correct request and returns transcription text", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ text: "Hello world" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+  it("posts openai fields with bearer auth", async () => {
+    mocked.stt.apiUrl = "https://api.example.com/v1";
+    mocked.stt.apiKey = "secret";
+    const { transcribeAudio } = await loadClient();
 
-    const audioBuffer = Buffer.from("fake-audio-data");
-    const result = await transcribeAudio(audioBuffer, "voice.oga");
+    const result = await transcribeAudio(Buffer.from("audio"), "note.ogg");
 
-    expect(result).toEqual({ text: "Hello world" });
-
-    expect(fetchSpy).toHaveBeenCalledOnce();
-    const [url, options] = fetchSpy.mock.calls[0];
-    expect(url).toBe("https://api.groq.com/openai/v1/audio/transcriptions");
-    expect(options?.method).toBe("POST");
-    expect((options?.headers as Record<string, string>)["Authorization"]).toBe(
-      "Bearer sk-test-key",
-    );
-    expect(options?.body).toBeInstanceOf(FormData);
+    expect(result).toEqual({ text: "hola mundo" });
+    expect(mocked.fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = mocked.fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://api.example.com/v1/audio/transcriptions");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer secret");
+    const form = init.body as FormData;
+    expect(form.get("model")).toBe("whisper-large-v3-turbo");
+    expect((form.get("file") as File).name).toBe("note.ogg");
   });
 
-  it("includes language in form data when configured", async () => {
-    mockStt.language = "en";
+  it("posts plain requests to the url as-is with an audio field and no auth", async () => {
+    mocked.stt.protocol = "plain";
+    mocked.stt.apiUrl = "http://127.0.0.1:8000/transcribe";
+    const { transcribeAudio } = await loadClient();
 
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ text: "Hello" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+    const result = await transcribeAudio(Buffer.from("RIFFwav"), "note.wav");
 
-    const audioBuffer = Buffer.from("fake-audio-data");
-    await transcribeAudio(audioBuffer, "voice.oga");
-
-    const formData = fetchSpy.mock.calls[0][1]?.body as FormData;
-    expect(formData.get("language")).toBe("en");
-    expect(formData.get("model")).toBe("whisper-large-v3-turbo");
-    expect(formData.get("response_format")).toBe("json");
+    expect(result).toEqual({ text: "hola mundo" });
+    const [url, init] = mocked.fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:8000/transcribe");
+    expect(init.headers).toBeUndefined();
+    const form = init.body as FormData;
+    expect(form.get("model")).toBeNull();
+    expect((form.get("audio") as File).name).toBe("note.wav");
+    expect(mocked.execFileMock).not.toHaveBeenCalled();
   });
 
-  it("does not include language when not configured", async () => {
-    mockStt.language = "";
-
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ text: "Bonjour" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
+  it("converts non-wav input to wav for plain workers", async () => {
+    mocked.stt.protocol = "plain";
+    mocked.stt.apiUrl = "http://127.0.0.1:8000/transcribe";
+    const child = fakeChild();
+    mocked.execFileMock.mockImplementation(
+      (_bin: string, _args: string[], _opts: unknown, callback: (...args: unknown[]) => void) => {
+        callback(null, Buffer.from("RIFFconverted"));
+        return child;
+      },
     );
+    const { transcribeAudio } = await loadClient();
 
-    const audioBuffer = Buffer.from("fake-audio-data");
-    await transcribeAudio(audioBuffer, "voice.oga");
+    await transcribeAudio(Buffer.from("oggdata"), "note.oga");
 
-    const formData = fetchSpy.mock.calls[0][1]?.body as FormData;
-    expect(formData.get("language")).toBeNull();
+    expect(mocked.execFileMock).toHaveBeenCalledTimes(1);
+    const [bin, args] = mocked.execFileMock.mock.calls[0] as [string, string[]];
+    expect(bin).toBe("ffmpeg");
+    expect(args).toContain("pcm_s16le");
+    const form = (mocked.fetchMock.mock.calls[0] as [string, RequestInit])[1].body as FormData;
+    expect((form.get("audio") as File).name).toBe("note.wav");
   });
 
-  it("throws on non-OK HTTP response", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("Rate limit exceeded", {
-        status: 429,
-        statusText: "Too Many Requests",
-      }),
+  it("serializes concurrent transcriptions", async () => {
+    mocked.stt.protocol = "plain";
+    mocked.stt.apiUrl = "http://127.0.0.1:8000/transcribe";
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocked.fetchMock.mockImplementationOnce(() => gate.then(() => ({ ok: true, json: () => Promise.resolve({ text: "one" }) })));
+    mocked.fetchMock.mockImplementationOnce(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve({ text: "two" }) }),
     );
+    const { transcribeAudio } = await loadClient();
 
-    const audioBuffer = Buffer.from("fake-audio-data");
-    await expect(transcribeAudio(audioBuffer, "voice.oga")).rejects.toThrow(
-      "STT API returned HTTP 429: Rate limit exceeded",
-    );
+    const first = transcribeAudio(Buffer.from("RIFFa"), "a.wav");
+    const second = transcribeAudio(Buffer.from("RIFFb"), "b.wav");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The second request waits for the first one.
+    expect(mocked.fetchMock).toHaveBeenCalledTimes(1);
+    release();
+    await expect(first).resolves.toEqual({ text: "one" });
+    await expect(second).resolves.toEqual({ text: "two" });
+    expect(mocked.fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("throws when response has no text field", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ duration: 3.5 }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+  it("honors a custom audio field name", async () => {
+    mocked.stt.protocol = "plain";
+    mocked.stt.apiUrl = "http://127.0.0.1:8000/transcribe";
+    mocked.stt.audioField = "file";
+    const { transcribeAudio } = await loadClient();
 
-    const audioBuffer = Buffer.from("fake-audio-data");
-    await expect(transcribeAudio(audioBuffer, "voice.oga")).rejects.toThrow(
-      "STT API response does not contain a text field",
-    );
+    await transcribeAudio(Buffer.from("RIFFwav"), "note.wav");
+
+    const form = (mocked.fetchMock.mock.calls[0] as [string, RequestInit])[1].body as FormData;
+    expect((form.get("file") as File).name).toBe("note.wav");
+    expect(form.get("audio")).toBeNull();
+  });
+
+  it("joins segments when the response has no text field", async () => {
+    mocked.stt.apiUrl = "https://api.example.com/v1";
+    mocked.stt.apiKey = "secret";
+    mocked.fetchMock.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => "application/json" },
+      json: () =>
+        Promise.resolve({ segments: [{ text: "hola" }, { text: "mundo" }] }),
+    });
+    const { transcribeAudio } = await loadClient();
+
+    await expect(transcribeAudio(Buffer.from("audio"), "note.ogg")).resolves.toEqual({
+      text: "hola mundo",
+    });
+  });
+
+  it("accepts a bare text/plain transcription body", async () => {
+    mocked.stt.protocol = "plain";
+    mocked.stt.apiUrl = "http://127.0.0.1:8000/transcribe";
+    mocked.fetchMock.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => "text/plain" },
+      text: () => Promise.resolve("  hola mundo\n"),
+    });
+    const { transcribeAudio } = await loadClient();
+
+    await expect(transcribeAudio(Buffer.from("RIFFwav"), "note.wav")).resolves.toEqual({
+      text: "hola mundo",
+    });
   });
 });

@@ -148,6 +148,19 @@ export class HealthServer {
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    try {
+      await this.routeRequest(req, res);
+    } catch (error) {
+      logger.error("[Health] Request handler failed", error);
+      try {
+        res.destroy();
+      } catch {
+        // Socket is already gone; nothing left to clean up.
+      }
+    }
+  }
+
+  private async routeRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     if (req.method !== "GET") {
       sendJson(res, 405, { error: "Method not allowed" });
       return;

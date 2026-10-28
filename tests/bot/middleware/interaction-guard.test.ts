@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Context, NextFunction } from "grammy";
 import { interactionGuardMiddleware } from "../../../src/bot/middleware/interaction-guard.js";
 import { interactionManager } from "../../../src/interaction/manager.js";
+import { questionManager } from "../../../src/question/manager.js";
+import { permissionManager } from "../../../src/permission/manager.js";
 import { t } from "../../../src/i18n/index.js";
 
 function createTextContext(text: string): Context {
@@ -33,7 +35,30 @@ function createVoiceContext(): Context {
 describe("interactionGuardMiddleware", () => {
   beforeEach(() => {
     interactionManager.clear("test_setup");
+    questionManager.clear();
+    permissionManager.__resetForTests();
   });
+
+  function seedActivePoll(): void {
+    questionManager.startQuestions(
+      [{ question: "Pick one", header: "Q1", options: [{ label: "A", description: "" }] }],
+      "req-1",
+    );
+  }
+
+  function seedActivePermission(): void {
+    permissionManager.startPermission(
+      {
+        id: "perm-1",
+        sessionID: "session-1",
+        permission: "bash",
+        patterns: ["npm test"],
+        metadata: {},
+        always: [],
+      },
+      42,
+    );
+  }
 
   it("passes through when there is no active interaction", async () => {
     const ctx = createTextContext("hello");
@@ -111,6 +136,7 @@ describe("interactionGuardMiddleware", () => {
   });
 
   it("shows permission-specific message for blocked text", async () => {
+    seedActivePermission();
     interactionManager.start({
       kind: "permission",
       expectedInput: "callback",
@@ -126,6 +152,7 @@ describe("interactionGuardMiddleware", () => {
   });
 
   it("shows permission-specific message for disallowed command", async () => {
+    seedActivePermission();
     interactionManager.start({
       kind: "permission",
       expectedInput: "callback",
@@ -173,6 +200,7 @@ describe("interactionGuardMiddleware", () => {
   });
 
   it("shows question-specific message for blocked text", async () => {
+    seedActivePoll();
     interactionManager.start({
       kind: "question",
       expectedInput: "callback",
@@ -188,6 +216,7 @@ describe("interactionGuardMiddleware", () => {
   });
 
   it("shows question-specific message for disallowed command", async () => {
+    seedActivePoll();
     interactionManager.start({
       kind: "question",
       expectedInput: "callback",
@@ -201,5 +230,35 @@ describe("interactionGuardMiddleware", () => {
 
     expect(next).not.toHaveBeenCalled();
     expect(ctx.reply).toHaveBeenCalledWith(t("question.blocked.command_not_allowed"));
+  });
+
+  it("releases text when the question poll is already gone", async () => {
+    interactionManager.start({
+      kind: "question",
+      expectedInput: "callback",
+    });
+
+    const ctx = createTextContext("Tarda mucho?");
+    const next: NextFunction = vi.fn().mockResolvedValue(undefined);
+
+    await interactionGuardMiddleware(ctx, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(ctx.reply).not.toHaveBeenCalled();
+  });
+
+  it("releases text when no permission request is pending", async () => {
+    interactionManager.start({
+      kind: "permission",
+      expectedInput: "callback",
+    });
+
+    const ctx = createTextContext("Tarda mucho?");
+    const next: NextFunction = vi.fn().mockResolvedValue(undefined);
+
+    await interactionGuardMiddleware(ctx, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(ctx.reply).not.toHaveBeenCalled();
   });
 });

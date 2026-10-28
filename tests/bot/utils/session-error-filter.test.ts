@@ -31,4 +31,18 @@ describe("bot/utils/session-error-filter", () => {
     expect(throttle.shouldSuppress("session-1", "Different failure", 2200)).toBe(false);
     expect(throttle.shouldSuppress("session-1", "Different failure", 6001)).toBe(false);
   });
+
+  it("evicts the oldest sessions past the cap instead of growing forever", () => {
+    const throttle = new SessionErrorThrottle(60_000);
+
+    expect(throttle.shouldSuppress("session-old", "boom", 1000)).toBe(false);
+    for (let index = 1; index <= 500; index += 1) {
+      expect(throttle.shouldSuppress(`session-${index}`, `failure-${index}`, 1000)).toBe(false);
+    }
+
+    // The first entry was evicted: the same message is treated as new again.
+    expect(throttle.shouldSuppress("session-old", "boom", 2000)).toBe(false);
+    // A still-tracked session keeps suppressing duplicates.
+    expect(throttle.shouldSuppress("session-500", "failure-500", 2000)).toBe(true);
+  });
 });

@@ -97,6 +97,22 @@ describe("bot/handlers/inline-menu", () => {
     expect(state?.metadata.messageId).toBe(42);
   });
 
+  it("expires inline menus so stale ones stop blocking text", async () => {
+    const ctx = createReplyContext(42, 99);
+    const keyboard = new InlineKeyboard().text("Model A", "model:openai:gpt-4o");
+
+    const before = Date.now();
+    await replyWithInlineMenu(ctx, {
+      menuKind: "model",
+      text: "Select model",
+      keyboard,
+    });
+
+    const state = interactionManager.getSnapshot("100:99");
+    expect(state?.expiresAt).toBeGreaterThan(before);
+    expect(state?.expiresAt).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1000);
+  });
+
   it("accepts callback from active inline menu", async () => {
     interactionManager.start({
       kind: "inline",

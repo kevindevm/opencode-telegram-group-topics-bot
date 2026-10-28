@@ -6,6 +6,7 @@ import {
   setDisplayOverride,
   setScopeDisplayOverride,
 } from "../settings/manager.js";
+import { getScopeFromKey, GLOBAL_SCOPE_KEY, SCOPE_CONTEXT } from "../bot/scope.js";
 import { t } from "../i18n/index.js";
 import { logger } from "../utils/logger.js";
 
@@ -98,6 +99,21 @@ export function isDisplayVisible(flag: DisplayFlag, scopeKey?: string): boolean 
   return definition.defaultVisible();
 }
 
+/**
+ * Copies the parent topic's explicit display overrides onto a fresh child
+ * scope (e.g. a subagent transcript topic), so the child renders like its
+ * parent instead of falling back to globals. Later parent changes do not
+ * propagate: each topic stays independently tunable via /display.
+ */
+export function inheritDisplayOverrides(parentScopeKey: string, childScopeKey: string): void {
+  for (const definition of DISPLAY_FLAG_DEFINITIONS) {
+    const value = getScopeDisplayOverride(parentScopeKey, definition.key);
+    if (value !== undefined) {
+      setScopeDisplayOverride(childScopeKey, definition.key, value);
+    }
+  }
+}
+
 /** Returns true when the flag was toggled, false for unknown flags. */
 export function toggleDisplayFlag(flag: string, scopeKey?: string): boolean {
   const definition = findFlagDefinition(flag);
@@ -146,5 +162,9 @@ export function buildDisplayKeyboard(scopeKey?: string, currentAgent?: string): 
 }
 
 export function formatDisplayMenu(scopeKey?: string): string {
-  return scopeKey ? t("display.title_topic") : t("display.title");
+  // Only real topic scopes get the topic title: "global" (and DM/general
+  // keys) keep the chat-level title.
+  const scope = scopeKey && scopeKey !== GLOBAL_SCOPE_KEY ? getScopeFromKey(scopeKey) : null;
+  const isTopic = scope?.context === SCOPE_CONTEXT.GROUP_TOPIC;
+  return isTopic ? t("display.title_topic") : t("display.title");
 }

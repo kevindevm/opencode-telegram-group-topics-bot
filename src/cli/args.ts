@@ -11,8 +11,6 @@ export interface ParsedCliArgs {
   error?: string;
 }
 
-const DAEMON_ONLY_START_ERROR = "Option --daemon is supported only for the start command";
-
 const SUPPORTED_COMMANDS: readonly CliCommand[] = ["start", "status", "stop", "config"];
 
 function isCliCommand(value: string): value is CliCommand {
@@ -140,7 +138,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       daemon,
       mode,
       showHelp: true,
-      error: DAEMON_ONLY_START_ERROR,
+      error: t("cli.args.daemon_only_start"),
     };
   }
 

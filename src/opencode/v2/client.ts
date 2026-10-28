@@ -179,6 +179,15 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
     rememberBounded(forms, form.id, form);
   };
 
+  // One translator for the whole adapter lifetime: every (re)connection
+  // shares it, so in-flight tools/messages/directories survive a reconnect
+  // instead of being dropped as "unknown call" on the fresh stream. The
+  // inbox map is shared the same way so queued prompts deliver post-reconnect.
+  const translate = createV2EventTranslator({
+    onForm: rememberForm,
+    inbox: inboxItems,
+  });
+
   // The process behind the last stream connection: a different one on the next connection
   // means the server restarted in between.
   let lastServerPid: number | null = null;
@@ -343,10 +352,6 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
   }
 
   function translatedStream(signal?: AbortSignal): AsyncGenerator<V1GlobalEvent> {
-    const translate = createV2EventTranslator({
-      onForm: rememberForm,
-      inbox: inboxItems,
-    });
     const queue: V1GlobalEvent[] = [];
     let wake: (() => void) | null = null;
     let finished = false;

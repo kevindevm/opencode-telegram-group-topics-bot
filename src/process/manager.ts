@@ -202,8 +202,22 @@ class ProcessManager implements ProcessManagerInterface {
           }
         }
 
-        // Wait a bit for cleanup
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        // taskkill succeeding does not mean the tree is gone: verify before
+        // reporting success, or a surviving server keeps its port while the
+        // state claims it is stopped (zombie that breaks the next start).
+        let stopped: boolean;
+        if (this.state.process) {
+          stopped = await this.waitForProcessExit(this.state.process, timeoutMs);
+        } else {
+          // No ChildProcess reference (recovered from settings)
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          stopped = !this.isProcessAlive(pid);
+        }
+
+        if (!stopped && this.isProcessAlive(pid)) {
+          logger.error(`[ProcessManager] Process PID=${pid} survived taskkill, still running`);
+          return { success: false, error: `Process PID=${pid} did not exit` };
+        }
       } else {
         // Unix-like systems: use SIGINT/SIGKILL
         if (this.state.process) {

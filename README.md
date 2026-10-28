@@ -259,7 +259,7 @@ Any plain text message in a session topic is treated as a prompt when no blockin
 
 ## Background Button
 
-When a `bash`/`execute` tool keeps running longer than `BACKGROUND_OFFER_AFTER_SEC` (default 30s), the bot posts a ⏪ **Send to background** button in the session topic. Tapping it calls OpenCode's `session.background`: the command keeps running on the server while you keep chatting, and the normal completion flow delivers the result when it finishes.
+When a shell (`bash`/`execute`) or subagent (`task`) tool keeps running longer than `BACKGROUND_OFFER_AFTER_SEC` (default 3s, like the TUI hint), the bot posts a ⏪ **Send to background** button in the session topic. Tapping it calls OpenCode's `session.background`: the command keeps running on the server while you keep chatting, and the normal completion flow delivers the result when it finishes.
 
 - One offer per running session; it disappears if the command finishes first.
 - Tune the delay with `BACKGROUND_OFFER_AFTER_SEC`.
@@ -315,7 +315,7 @@ Installed-mode config paths:
 | `SCHEDULED_TASK_POLL_INTERVAL_SEC` | Scheduled task poll interval, in seconds | No | `30` |
 | `BUDGET_ALERT_USD` | Daily spend alert in USD (`0` = off) | No | `0` |
 | `SERVICE_MESSAGES_INTERVAL_SEC` | Service message interval; keep `>= 2`, `0` = immediate (`TOOL_MESSAGES_INTERVAL_SEC` still works as a legacy alias) | No | `5` |
-| `BACKGROUND_OFFER_AFTER_SEC` | Seconds of shell runtime before offering ⏪ send-to-background | No | `30` |
+| `BACKGROUND_OFFER_AFTER_SEC` | Seconds of shell/subagent runtime before offering ⏪ send-to-background | No | `3` |
 | `HIDE_THINKING_MESSAGES` | Hide `Thinking...` service messages | No | `false` |
 | `HIDE_TOOL_CALL_MESSAGES` | Hide tool-call service messages | No | `false` |
 | `HIDE_TOOL_FILE_MESSAGES` | Hide tool file messages sent as documents | No | `false` |
@@ -328,8 +328,11 @@ Installed-mode config paths:
 | `RESPONSE_STREAM_THROTTLE_MS` | Delay between streamed assistant updates, in ms | No | `1000` |
 | `BASH_TOOL_DISPLAY_MAX_LENGTH` | Max displayed length for `bash`/`execute` code in summaries | No | `128` |
 | `CODE_FILE_MAX_SIZE_KB` | Max file size (KB) to send as a document | No | `100` |
-| `STT_API_URL` | Whisper-compatible API base URL | No | - |
-| `STT_API_KEY` | API key for your STT provider | No | - |
+| `STT_API_URL` | Whisper-compatible API base URL (or full endpoint for `plain`) | No | - |
+| `STT_API_KEY` | API key for your STT provider (not needed for `plain`) | No | - |
+| `STT_PROTOCOL` | `openai` (POST `{URL}/audio/transcriptions` with key) or `plain` (POST the URL as-is with an `audio` wav field, no auth; converted with ffmpeg) | No | `openai` |
+| `STT_AUDIO_FIELD` | Multipart field carrying the audio (defaults: `file` for openai, `audio` for plain) | No | - |
+| `STT_TIMEOUT_SEC` | Per-transcription timeout in seconds | No | `60` |
 | `STT_MODEL` | STT model name passed to `/audio/transcriptions` | No | `whisper-large-v3-turbo` |
 | `STT_LANGUAGE` | Optional language hint | No | - |
 | `STT_NOTE_PROMPT` | Optional extra prompt/note sent with transcription requests | No | - |
@@ -345,6 +348,8 @@ Keep your `.env` private — it contains your bot token. All `/display` flags ap
 ### Optional: Voice and Audio Transcription
 
 If `STT_API_URL` and `STT_API_KEY` are set, the bot transcribes Telegram voice/audio messages before sending them to OpenCode.
+
+Minimal custom workers are supported via `STT_PROTOCOL=plain`: the bot POSTs the URL as-is with an `audio` wav field and no auth (non-wav input is converted with ffmpeg, so it must be on PATH). Requests are serialized because reference workers are single CPU instances.
 
 If TTS credentials are configured, `/tts` toggles spoken replies globally. The preference is stored in `settings.json` and persists across restarts.
 
@@ -444,7 +449,7 @@ npm run build && npm run lint && npm test
 
 **The ⏪ button never appears**
 
-- It only shows for `bash`/`execute` tools still running after `BACKGROUND_OFFER_AFTER_SEC` (default 30s).
+- It only shows for `bash`/`execute`/`task` tools still running after `BACKGROUND_OFFER_AFTER_SEC` (default 3s).
 - Lower the threshold, and check the session topic — the offer is posted there.
 
 ## Credits

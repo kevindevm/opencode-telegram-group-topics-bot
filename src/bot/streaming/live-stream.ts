@@ -584,6 +584,21 @@ export class LiveStream {
       const remainingEntries = latestState.entries.filter((entry) => entry.kind !== "assistant");
       const remainingText = renderEntries(remainingEntries);
 
+      // A thinking-only leftover must not survive as a hung "thinking"
+      // message next to the delivered answer: there is no turn left to
+      // replace it, so remove it instead of trimming the stream down to it.
+      if (
+        remainingText &&
+        hasOnlyThinkingLine(latestState.service.thinkingText, latestState.service.updates)
+      ) {
+        await deleteMessage(latestState.messageId);
+        latestState.messageId = null;
+        latestState.lastSentText = "";
+        latestState.entries = [];
+        latestState.service = { thinkingText: null, updates: [] };
+        return;
+      }
+
       if (!remainingText) {
         await deleteMessage(latestState.messageId);
         latestState.messageId = null;
@@ -618,7 +633,9 @@ export class LiveStream {
   /**
    * Deletes the live stream message outright. Used when the final answer was
    * delivered as fresh messages: keeping the stream (service lines included)
-   * next to them reads as duplication.
+   * next to them reads as duplication. Also drops the delivered entries so a
+   * turn starting before the commit seal cannot flush stale service lines or
+   * replay the delivered assistant text into the next live message.
    */
   async deleteLiveMessage(sessionId: string): Promise<void> {
     const state = this.states.get(sessionId);
@@ -645,6 +662,12 @@ export class LiveStream {
 
       latestState.messageId = null;
       latestState.lastSentText = "";
+      // The assistant text went out as fresh messages; keep the committed
+      // length so a replayed snapshot of the same text is suppressed instead
+      // of duplicated, and drop everything visible so far.
+      latestState.assistant.committedLength = latestState.assistant.fullText.length;
+      latestState.entries = [];
+      latestState.service = { thinkingText: null, updates: [] };
     });
   }
 
@@ -835,19 +858,25 @@ export class LiveStream {
 
   private enqueueTask<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
     const previousTask = this.sessionTasks.get(sessionId) ?? Promise.resolve();
-    const nextTask = previousTask
+    // The tracked wrapper (not the task promise itself) is what the map
+    // holds: comparing against nextTask here could never match, so entries
+    // lingered forever and the stored `nextTask.then(...)` rejection went
+    // unobserved. Mirror SessionOutputCoordinator: the wrapper always
+    // settles, and cleanup compares against the exact stored reference.
+    const nextTask: Promise<T> = previousTask
       .catch(() => undefined)
       .then(task)
       .finally(() => {
-        if (this.sessionTasks.get(sessionId) === nextTask) {
+        if (this.sessionTasks.get(sessionId) === trackedTask) {
           this.sessionTasks.delete(sessionId);
         }
       });
 
-    this.sessionTasks.set(
-      sessionId,
-      nextTask.then(() => undefined),
+    const trackedTask: Promise<void> = nextTask.then(
+      () => undefined,
+      () => undefined,
     );
+    this.sessionTasks.set(sessionId, trackedTask);
     return nextTask;
   }
 

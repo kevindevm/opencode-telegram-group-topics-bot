@@ -153,6 +153,9 @@ describe("pinned manager scoped state", () => {
     pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
     await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
 
+    // History load only schedules the repaint; flush paints it.
+    await pinnedMessageManager.flush("chat:-1:10");
+
     expect(api.sendMessage).toHaveBeenCalledWith(
       -1,
       expect.stringContaining("Cost: $0.00"),
@@ -253,8 +256,37 @@ describe("pinned manager scoped state", () => {
     }
   });
 
-  it("recreates the dashboard message when the tracked id is gone", async () => {
-    const api = createApi();
+  it("schedules title, history and diff updates instead of editing immediately", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
+
+      setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+      setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+
+      pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+      await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+      api.editMessageText.mockClear();
+
+      // None of these may hit the Telegram API synchronously: bursts from
+      // title updates, history loads and diffs collapse into one trailing
+      // edit instead of a 429 storm.
+      await pinnedMessageManager.onSessionTitleUpdate("new title", "chat:-1:10");
+      await pinnedMessageManager.loadContextFromHistory("s1", "/repo/a", "chat:-1:10");
+      await pinnedMessageManager.onSessionDiff(
+        [{ file: "a.ts", additions: 1, deletions: 0 }],
+        "chat:-1:10",
+      );
+      expect(api.editMessageText).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(api.editMessageText).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recreates the dashboard message when the tracked id is gone", async () => {    const api = createApi();
 
     setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
     setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
@@ -506,5 +538,97 @@ describe("pinned manager scoped state", () => {
     expect(pinnedMessageManager.getState("chat:-1:10")).toEqual(
       expect.objectContaining({ projectBranch: "feature/sync-test" }),
     );
+  });
+
+  it("clamps over-limit usage to the model limit instead of freezing the dashboard", async () => {
+    const api = createApi();
+
+    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+
+    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+    await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+
+    // 500k window against a 400k limit: the dashboard must show 100%, not 125%.
+    await pinnedMessageManager.onMessageComplete(
+      { input: 450000, output: 10, reasoning: 0, cacheRead: 50000, cacheWrite: 0, cost: 0.01 },
+      "chat:-1:10",
+    );
+
+    expect(pinnedMessageManager.getState("chat:-1:10")).toEqual(
+      expect.objectContaining({ tokensUsed: 400000, tokensLimit: 400000 }),
+    );
+    const info = pinnedMessageManager.getContextInfo("chat:-1:10");
+    expect(info).toEqual({ tokensUsed: 400000, tokensLimit: 400000 });
+  });
+
+  it("clears the file list when the session diff becomes empty", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
+
+      setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+      setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+
+      pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+      await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+      pinnedMessageManager.addFileChange(
+        { file: "/repo/a/stale.ts", additions: 3, deletions: 1 },
+        "chat:-1:10",
+      );
+      // Paint the file entry first so clearing it is a visible change.
+      await pinnedMessageManager.flush("chat:-1:10");
+      expect(api.editMessageText).toHaveBeenLastCalledWith(
+        -1,
+        expect.any(Number),
+        expect.stringContaining("stale.ts"),
+      );
+      api.editMessageText.mockClear();
+
+      await pinnedMessageManager.onSessionDiff([], "chat:-1:10");
+      expect(pinnedMessageManager.getState("chat:-1:10").changedFiles).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(api.editMessageText).toHaveBeenCalled();
+      expect(api.editMessageText).toHaveBeenLastCalledWith(
+        -1,
+        expect.any(Number),
+        expect.not.stringContaining("stale.ts"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the history baseline when a live update reports a smaller window", async () => {
+    const api = createApi();
+
+    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+    opencodeMocks.messages.mockResolvedValueOnce({
+      data: [
+        {
+          info: {
+            role: "assistant",
+            cost: 0.02,
+            tokens: { input: 4800, cache: { read: 200 } },
+          },
+        },
+      ],
+      error: null,
+    });
+
+    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+    await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(5000);
+
+    // A later small live window must not move the dashboard backwards.
+    await pinnedMessageManager.onMessageComplete(
+      { input: 100, output: 5, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.005 },
+      "chat:-1:10",
+    );
+
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(5000);
+    expect(pinnedMessageManager.getState("chat:-1:10").assistantCost).toBeCloseTo(0.025, 5);
   });
 });

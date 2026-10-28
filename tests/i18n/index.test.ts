@@ -9,6 +9,14 @@ import {
   setRuntimeLocale,
   SUPPORTED_LOCALES,
 } from "../../src/i18n/index.js";
+import { en } from "../../src/i18n/en.js";
+import { de } from "../../src/i18n/de.js";
+import { es } from "../../src/i18n/es.js";
+import { fr } from "../../src/i18n/fr.js";
+import { id } from "../../src/i18n/id.js";
+import { ru } from "../../src/i18n/ru.js";
+import { tr } from "../../src/i18n/tr.js";
+import { zh } from "../../src/i18n/zh.js";
 
 describe("i18n/index locale helpers", () => {
   afterEach(() => {
@@ -46,5 +54,35 @@ describe("i18n/index locale helpers", () => {
     setRuntimeLocale("ru");
 
     expect(getLocale()).toBe("ru");
+  });
+});
+
+describe("i18n locale parity", () => {
+  function placeholders(template: string): string[] {
+    return [...template.matchAll(/\{([a-zA-Z0-9_]+)\}/g)]
+      .map((match) => match[1])
+      .sort();
+  }
+
+  it("keeps the English refresh strings in English", () => {
+    expect(en["refresh.last_message"]).toBe("📋 Last message: {preview}");
+    expect(en["refresh.subscribed"]).toBe("✅ Subscribed to session events");
+    expect(en["refresh.no_topic"]).toBe("⚠️ No topic linked");
+  });
+
+  it("ships the same key set in every locale", () => {
+    const expectedKeys = Object.keys(en).sort();
+
+    for (const [name, dictionary] of Object.entries({ de, es, fr, id, ru, tr, zh })) {
+      expect(Object.keys(dictionary).sort(), name).toEqual(expectedKeys);
+    }
+  });
+
+  it("uses the same interpolation placeholders as English in every locale", () => {
+    for (const [name, dictionary] of Object.entries({ de, es, fr, id, ru, tr, zh })) {
+      for (const [key, template] of Object.entries(en)) {
+        expect(placeholders(dictionary[key]), `${name}:${key}`).toEqual(placeholders(template));
+      }
+    }
   });
 });

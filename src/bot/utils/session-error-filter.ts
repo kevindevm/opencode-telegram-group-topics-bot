@@ -32,6 +32,14 @@ export function isInvalidRequestSessionError(message: string): boolean {
 export class SessionErrorThrottle {
   private readonly lastBySession = new Map<string, { message: string; timestamp: number }>();
 
+  /**
+   * One entry per session that ever errored: without a cap, sessions that
+   * come and go grow this map for the life of the process. Stale entries
+   * are harmless for suppression (window check), so oldest-first eviction
+   * past the cap is safe.
+   */
+  private static readonly MAX_TRACKED_SESSIONS = 500;
+
   constructor(private readonly windowMs: number = 3000) {}
 
   shouldSuppress(sessionId: string, message: string, now: number = Date.now()): boolean {
@@ -45,6 +53,13 @@ export class SessionErrorThrottle {
       message: normalized,
       timestamp: now,
     });
+    while (this.lastBySession.size > SessionErrorThrottle.MAX_TRACKED_SESSIONS) {
+      const oldest = this.lastBySession.keys().next();
+      if (oldest.done) {
+        break;
+      }
+      this.lastBySession.delete(oldest.value);
+    }
 
     if (!previous) {
       return false;

@@ -23,6 +23,8 @@ import {
   DISPLAY_CALLBACK_PREFIX,
   DISPLAY_FLAG,
   buildDisplayKeyboard,
+  formatDisplayMenu,
+  inheritDisplayOverrides,
   isDisplayVisible,
   parseDisplayCallback,
   toggleDisplayFlag,
@@ -79,6 +81,26 @@ describe("display/manager", () => {
     expect(isDisplayVisible(DISPLAY_FLAG.THINKING)).toBe(false);
   });
 
+  it("inherits only the parent's explicit overrides onto the child scope", () => {
+    mocked.scopeOverrides = {
+      "chat:-100:7": { [DISPLAY_FLAG.THINKING]: false, [DISPLAY_FLAG.TOOL_CALLS]: true },
+    };
+
+    inheritDisplayOverrides("chat:-100:7", "chat:-100:10");
+
+    expect(mocked.setScopeOverrideMock).toHaveBeenCalledTimes(2);
+    expect(mocked.setScopeOverrideMock).toHaveBeenCalledWith(
+      "chat:-100:10",
+      DISPLAY_FLAG.THINKING,
+      false,
+    );
+    expect(mocked.setScopeOverrideMock).toHaveBeenCalledWith(
+      "chat:-100:10",
+      DISPLAY_FLAG.TOOL_CALLS,
+      true,
+    );
+  });
+
   it("toggles per topic without touching the global override", () => {
     mocked.overrides = { [DISPLAY_FLAG.TOOL_CALLS]: true };
 
@@ -128,5 +150,13 @@ describe("display/manager", () => {
 
     expect(rows).toHaveLength(8);
     expect(rows[7]?.[0]?.callback_data).toBe("display:agents");
+  });
+
+  it("uses the topic title only for real topic scopes", () => {
+    expect(formatDisplayMenu(undefined)).toBe(formatDisplayMenu("global"));
+    expect(formatDisplayMenu("global")).toContain("this chat");
+    expect(formatDisplayMenu("dm:123")).toContain("this chat");
+    expect(formatDisplayMenu("chat:-100")).toContain("this chat");
+    expect(formatDisplayMenu("-100:77")).toContain("this topic");
   });
 });

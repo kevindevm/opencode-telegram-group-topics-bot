@@ -16,7 +16,7 @@ import {
   MODEL_BUTTON_TEXT_PATTERN,
   VARIANT_BUTTON_TEXT_PATTERN,
 } from "./message-patterns.js";
-import { sessionsCommand, handleSessionSelect } from "./commands/sessions.js";
+import { sessionsCommand, handleSessionSelect, handleBackgroundSessionOpen } from "./commands/sessions.js";
 import { recentCommand, handleRecentSelect } from "./commands/recent.js";
 import { createNewCommand } from "./commands/new.js";
 import { projectsCommand, handleProjectSelect } from "./commands/projects.js";
@@ -62,12 +62,15 @@ import {
   clearAllBackgroundOffers,
   clearSessionBackgroundOffers,
   handleToolBackgroundCallback,
+  isBackgroundableTool,
+  isSubagentTool,
   noteToolBackgroundState,
 } from "../tool/background-offer.js";
 import { createRetryCommand } from "./commands/retry.js";
 import { diffCommand, commitCommand } from "./commands/diff.js";
 import { costCommand } from "./commands/cost.js";
 import { closeCommand } from "./commands/close.js";
+import { cleanupCommand } from "./commands/cleanup.js";
 import { createForkCommand } from "./commands/fork.js";
 import { shareCommand } from "./commands/share.js";
 import { createSavedCommand } from "./commands/saved.js";
@@ -123,6 +126,7 @@ import {
 } from "./utils/session-error-filter.js";
 import { getModelCapabilities, supportsInput } from "../model/capabilities.js";
 import { getStoredModel } from "../model/manager.js";
+import { getStoredAgent } from "../agent/manager.js";
 import { getCurrentProject } from "../settings/manager.js";
 import {
   GLOBAL_SCOPE_KEY,
@@ -166,7 +170,6 @@ import { TOPIC_SESSION_STATUS } from "../settings/manager.js";
 import { ensureTopicSessionTracked, extractTrackableSessionId } from "./event-session-tracking.js";
 
 let botInstance: Bot<Context> | null = null;
-const chatIdInstance: number | null = null;
 const initializedCommandChats = new Set<number>();
 const renamedGeneralTopicChats = new Set<number>();
 const DM_ALLOWED_COMMAND_SET = new Set<string>(DM_ALLOWED_COMMANDS);
@@ -197,11 +200,18 @@ function getSharedBackgroundTracker(): BackgroundSessionTracker | null {
     tracker.setOnNotification(
       createBackgroundNoticeDelivery(
         {
-          getDestination: () => {
-            if (!botInstance || !chatIdInstance) {
+          // Route per session: the policy receives the session id precisely
+          // so each background notice lands in its own session topic instead
+          // of being dropped (or sprayed into General).
+          getDestination: (sessionId: string) => {
+            if (!botInstance) {
               return null;
             }
-            return { api: botInstance.api, chatId: chatIdInstance };
+            const target = getTargetBySessionId(sessionId);
+            if (!target) {
+              return null;
+            }
+            return { api: botInstance.api, chatId: target.chatId, threadId: target.threadId };
           },
         },
         new TelegramEventDelivery(),
@@ -645,6 +655,17 @@ async function finalizeSessionDelivery(
   let deliveryComplete = false;
 
   try {
+    if (!getTargetBySessionId(sessionId)) {
+      // The binding is gone (topic deleted/closed elsewhere): there is
+      // nowhere to deliver, so drop instead of retry-storming the
+      // coordinator budget with a delivery that can never succeed.
+      logger.info(`[Bot] Dropping final delivery for unrouted session ${sessionId}`);
+      await liveStream.deleteLiveMessage(sessionId);
+      clearPromptResponseMode(sessionId);
+      assistantRunState.clearRun(sessionId, "final_delivery_unrouted");
+      return true;
+    }
+
     await liveStream.flushSession(sessionId);
     if (pendingCompletionText) {
       deliveryComplete = await deliverAssistantCompletion(sessionId, pendingCompletionText)
@@ -677,10 +698,11 @@ async function finalizeSessionDelivery(
       // The in-place finalize path edits text only (reply keyboards cannot be
       // attached by edit), so push one silent refresh to guarantee the topic
       // ends the turn with a current keyboard. Fingerprint dedup makes this
-      // a no-op when nothing changed.
+      // a no-op when nothing changed. Forced: the mid-run debounce must not
+      // swallow the turn-end numbers.
       if (botInstance && keyboardManager.isInitialized(target.scopeKey)) {
         await keyboardManager
-          .sendKeyboardUpdate(target.chatId, target.scopeKey)
+          .sendKeyboardUpdate(target.chatId, target.scopeKey, { force: true })
           .catch((error: unknown) => {
             logger.debug("[Bot] Failed to repost final keyboard", { sessionId, error });
           });
@@ -783,7 +805,10 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
 
       try {
         await liveStream.breakServiceBoundary(sessionId);
-        const renderedCards = renderSubagentCards(subagents);
+        // Relative paths in the cards: the formatter falls back to the
+        // global project, which is wrong for topic-scoped sessions.
+        const projectWorktree = getTopicBindingBySessionId(sessionId)?.projectWorktree;
+        const renderedCards = renderSubagentCards(subagents, projectWorktree);
         liveStream.replaceServiceByPrefix(sessionId, SUBAGENT_STREAM_PREFIX, renderedCards);
       } catch (err) {
         logger.error("Failed to render subagent activity for Telegram:", err);
@@ -903,6 +928,19 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
         return;
       }
 
+      // A late reasoning part must not resurrect a hung "thinking" line over
+      // an open question/permission poll: the poll already sealed the stream.
+      if (
+        questionManager.isActive(target.scopeKey) ||
+        permissionManager.isActive(target.scopeKey)
+      ) {
+        logger.debug("[Bot] Skipping thinking update while a poll is active", {
+          sessionId,
+          scopeKey: target.scopeKey,
+        });
+        return;
+      }
+
       logger.debug("[Bot] Agent started thinking");
       liveStream.showThinking(sessionId, t("bot.thinking"));
     },
@@ -1006,20 +1044,25 @@ async function deliverAssistantCompletion(sessionId: string, messageText: string
     return;
   }
 
+  const target = getTargetBySessionId(sessionId);
+  if (!target) {
+    clearPromptResponseMode(sessionId);
+    return;
+  }
+
+  // The footer marks this as the final answer; the store fallback covers
+  // runs whose record is gone, so it never goes out without one.
   const currentRun = assistantRunState.getRun(sessionId);
-  const finalMessageText = currentRun
-    ? `${normalizedMessageText}\n\n${formatAssistantRunFooter(currentRun)}`
-    : normalizedMessageText;
+  const storedModel = getStoredModel(target.scopeKey);
+  const finalMessageText =
+    `${normalizedMessageText}\n\n${formatAssistantRunFooter(currentRun, {
+      agentName: getStoredAgent(target.scopeKey),
+      modelID: storedModel.modelID,
+    })}`;
 
   if (!botInstance) {
     clearPromptResponseMode(sessionId);
     logger.error("Bot not available for sending message");
-    return;
-  }
-
-  const target = getTargetBySessionId(sessionId);
-  if (!target) {
-    clearPromptResponseMode(sessionId);
     return;
   }
 
@@ -1080,7 +1123,13 @@ async function deliverAssistantCompletion(sessionId: string, messageText: string
               is_disabled: !isDisplayVisible(DISPLAY_FLAG.LINK_PREVIEWS, target.scopeKey),
             },
             ...(isLastPart && keyboardManager.isInitialized(target.scopeKey)
-              ? { reply_markup: keyboardManager.getKeyboard(target.scopeKey) }
+              ? (() => {
+                  // Piggyback the keyboard refresh on the answer going out:
+                  // this records the fingerprint, so the turn-end carrier
+                  // below stays silent when the client is already current.
+                  const markup = keyboardManager.consumeStaleKeyboardMarkup(target.scopeKey);
+                  return markup ? { reply_markup: markup } : {};
+                })()
               : {}),
             disable_notification: !isLastPart,
             ...getThreadSendOptions(target.threadId),
@@ -1127,8 +1176,15 @@ function syncKeyboardContextFromPinnedState(scopeKey: string): void {
 }
 
 const liveKeyboardRepostByScope = new Map<string, { at: number; percent: number }>();
-const LIVE_KEYBOARD_REPOST_MIN_INTERVAL_MS = 30_000;
-const LIVE_KEYBOARD_REPOST_MIN_PERCENT_DELTA = 5;
+/**
+ * Standalone reposts are now the fallback, not the main channel: fresh
+ * messages (final answers) carry the keyboard via consumeStaleKeyboardMarkup,
+ * and edits can never carry it (Telegram: edited messages accept inline
+ * keyboards only). So this only fires on long turns with no fresh messages,
+ * at most every 60s and only once the percent actually moved.
+ */
+const LIVE_KEYBOARD_REPOST_MIN_INTERVAL_MS = 60_000;
+const LIVE_KEYBOARD_REPOST_MIN_PERCENT_DELTA = 2;
 const LIVE_KEYBOARD_REPOST_MAX_SCOPES = 200;
 const TYPING_INDICATOR_MIN_INTERVAL_MS = 5_000;
 const lastTypingIndicatorByScope = new Map<string, number>();
@@ -1149,10 +1205,11 @@ function trackLiveKeyboardRepost(scopeKey: string, at: number, percent: number):
  * Reposts the reply keyboard mid-run so its context button stops lagging a
  * full turn behind. Reply keyboards cannot be edited in place: Telegram only
  * swaps them when a new message carries reply_markup, and stream edits never
- * do. To avoid spamming the topic, reposts happen only while a live stream
- * message is on screen, at most every 30s, and only once the displayed
- * percent moved by at least 5 points (identical markups are also skipped by
- * the manager fingerprint).
+ * do (edits accept inline keyboards only). Fresh turn-end messages carry the
+ * keyboard via consumeStaleKeyboardMarkup, so this standalone repost is only
+ * the fallback for long turns with no fresh messages: at most every 60s, and
+ * only once the displayed percent moved by at least 2 points (identical
+ * markups are also skipped by the manager fingerprint).
  */
 async function refreshLiveKeyboardProgress(sessionId: string): Promise<void> {
   const target = getTargetBySessionId(sessionId);
@@ -1571,13 +1628,19 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
         toolInfo.tool !== "task",
     });
     if (toolTarget && botInstance) {
-      const input = toolInfo.input as { command?: unknown; code?: unknown } | undefined;
+      const input = toolInfo.input as
+        | { command?: unknown; code?: unknown; description?: unknown }
+        | undefined;
       const commandPreview =
         typeof input?.command === "string"
           ? input.command
           : typeof input?.code === "string"
             ? input.code
-            : toolInfo.tool;
+            : typeof input?.description === "string"
+              ? input.description
+              : typeof toolInfo.title === "string" && toolInfo.title
+                ? toolInfo.title
+                : toolInfo.tool;
       noteToolBackgroundState({
         api: botInstance.api,
         sessionId: toolInfo.sessionId,
@@ -1588,10 +1651,11 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
             ? (toolInfo.state.status as string | undefined)
             : undefined,
         commandPreview,
+        isSubagent: isSubagentTool(toolInfo.tool),
         chatId: toolTarget.chatId,
         threadId: toolTarget.threadId,
       });
-    } else if (toolInfo.tool === "bash" || toolInfo.tool === "execute") {
+    } else if (isBackgroundableTool(toolInfo.tool)) {
       logger.debug("[BackgroundOffer] Skipping offer: no topic target for session", {
         sessionId: toolInfo.sessionId,
       });
@@ -1816,23 +1880,26 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
 
       // Update keyboardManager SYNCHRONOUSLY before any await
       // This ensures keyboard has correct context when onComplete sends the reply
-      const contextSize = tokens.input + tokens.cacheRead;
+      const rawContextSize = tokens.input + tokens.cacheRead;
       let contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
       // Sanity gate: the live window can never exceed the model limit.
-      // Anything bigger is cumulative accounting leaking into the display.
-      // Refresh first: the cached limit may be stale after a model switch.
-      if (contextLimit > 0 && contextSize > contextLimit) {
+      // Anything bigger is cumulative accounting leaking into the display, or
+      // a stale cached limit after a model switch — refresh once, then clamp
+      // and keep updating instead of dropping the event (dropping is what
+      // froze the pin and the keyboard at saturation, forever).
+      if (contextLimit > 0 && rawContextSize > contextLimit) {
         await pinnedMessageManager.refreshContextLimit(target.scopeKey).catch(() => {});
         contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
-        if (contextLimit > 0 && contextSize > contextLimit) {
-          logger.warn("[Bot] Ignoring implausible context size", {
-            sessionId,
-            contextSize,
-            contextLimit,
-          });
-          return;
-        }
       }
+      if (contextLimit > 0 && rawContextSize > contextLimit) {
+        logger.warn("[Bot] Clamping implausible context size to the model limit", {
+          sessionId,
+          contextSize: rawContextSize,
+          contextLimit,
+        });
+      }
+      const contextSize =
+        contextLimit > 0 ? Math.min(rawContextSize, contextLimit) : rawContextSize;
       if (contextLimit > 0) {
         keyboardManager.updateContext(contextSize, contextLimit, target.scopeKey);
       }
@@ -2149,6 +2216,7 @@ export function createBot(): Bot<Context> {
   bot.command(BOT_COMMAND.COMMIT, commitCommand);
   bot.command(BOT_COMMAND.COST, costCommand);
   bot.command(BOT_COMMAND.CLOSE, closeCommand);
+  bot.command(BOT_COMMAND.CLEANUP, cleanupCommand);
   bot.command(BOT_COMMAND.FORK, createForkCommand({ ensureEventSubscription }));
   bot.command(BOT_COMMAND.SHARE, shareCommand);
   bot.command(BOT_COMMAND.SAVED, createSavedCommand({ bot, ensureEventSubscription }));
@@ -2206,6 +2274,7 @@ export function createBot(): Bot<Context> {
       const handledQueue = await handleQueueCallback(ctx);
       const handledTrust = await handleTrustCallback(ctx);
       const handledSession = await handleSessionSelect(ctx);
+      const handledBackgroundSession = await handleBackgroundSessionOpen(ctx);
       const handledRecent = await handleRecentSelect(ctx);
       const handledProject = await handleProjectSelect(ctx);
       const handledOpen = await handleOpenCallback(ctx);
@@ -2225,7 +2294,7 @@ export function createBot(): Bot<Context> {
       });
 
       logger.debug(
-        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, queuedCancel=${handledQueuedCancel}, queuedFront=${handledQueuedFront}, queuedSteer=${handledQueuedSteer}, queue=${handledQueue}, trust=${handledTrust}, toolBackground=${handledToolBackground}, display=${handledDisplay}, session=${handledSession}, recent=${handledRecent}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
+        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, queuedCancel=${handledQueuedCancel}, queuedFront=${handledQueuedFront}, queuedSteer=${handledQueuedSteer}, queue=${handledQueue}, trust=${handledTrust}, toolBackground=${handledToolBackground}, display=${handledDisplay}, session=${handledSession}, backgroundSession=${handledBackgroundSession}, recent=${handledRecent}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
       );
 
       if (
@@ -2238,6 +2307,7 @@ export function createBot(): Bot<Context> {
         !handledToolBackground &&
         !handledDisplay &&
         !handledSession &&
+        !handledBackgroundSession &&
         !handledRecent &&
         !handledProject &&
         !handledOpen &&

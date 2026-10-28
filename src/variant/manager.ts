@@ -97,7 +97,8 @@ export function setCurrentVariant(variantId: string, scopeKey: string = "global"
  * @returns Formatted string "💭 Default", "💭 Low", etc.
  */
 export function formatVariantForButton(variantId: string): string {
-  const capitalized = variantId.charAt(0).toUpperCase() + variantId.slice(1);
+  const safeId = variantId && variantId.trim().length > 0 ? variantId : "default";
+  const capitalized = safeId.charAt(0).toUpperCase() + safeId.slice(1);
   return `💡 ${capitalized}`;
 }
 
@@ -107,7 +108,8 @@ export function formatVariantForButton(variantId: string): string {
  * @returns Formatted string with capitalized first letter
  */
 export function formatVariantForDisplay(variantId: string): string {
-  return variantId.charAt(0).toUpperCase() + variantId.slice(1);
+  const safeId = variantId && variantId.trim().length > 0 ? variantId : "default";
+  return safeId.charAt(0).toUpperCase() + safeId.slice(1);
 }
 
 /**

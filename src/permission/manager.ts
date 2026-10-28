@@ -30,6 +30,10 @@ class PermissionManager {
     return left.tool.callID === right.tool.callID && left.tool.messageID === right.tool.messageID;
   }
 
+  private peekState(scopeKey: string): PermissionState | undefined {
+    return this.stateByScope.get(scopeKey);
+  }
+
   private getState(scopeKey: string): PermissionState {
     const state = this.stateByScope.get(scopeKey);
     if (state) {
@@ -70,14 +74,18 @@ class PermissionManager {
       return null;
     }
 
-    return this.getState(scopeKey).requestsByMessageId.get(messageId) ?? null;
+    return this.peekState(scopeKey)?.requestsByMessageId.get(messageId) ?? null;
   }
 
   getRequestByID(
     requestID: string,
     scopeKey: string = "global",
   ): { messageId: number; request: PermissionRequest } | null {
-    const entries = Array.from(this.getState(scopeKey).requestsByMessageId.entries());
+    const state = this.peekState(scopeKey);
+    if (!state) {
+      return null;
+    }
+    const entries = Array.from(state.requestsByMessageId.entries());
     for (const [messageId, request] of entries) {
       if (request.id === requestID) {
         return { messageId, request };
@@ -95,7 +103,11 @@ class PermissionManager {
     request: PermissionRequest,
     scopeKey: string = "global",
   ): { messageId: number; request: PermissionRequest } | null {
-    const entries = Array.from(this.getState(scopeKey).requestsByMessageId.entries());
+    const state = this.peekState(scopeKey);
+    if (!state) {
+      return null;
+    }
+    const entries = Array.from(state.requestsByMessageId.entries());
     for (const [messageId, activeRequest] of entries) {
       if (this.isEquivalentRequest(activeRequest, request)) {
         return { messageId, request: activeRequest };
@@ -118,7 +130,7 @@ class PermissionManager {
   }
 
   isActiveMessage(messageId: number | null, scopeKey: string = "global"): boolean {
-    return messageId !== null && this.getState(scopeKey).requestsByMessageId.has(messageId);
+    return messageId !== null && (this.peekState(scopeKey)?.requestsByMessageId.has(messageId) ?? false);
   }
 
   getMessageId(scopeKey: string = "global"): number | null {
@@ -131,16 +143,16 @@ class PermissionManager {
   }
 
   getMessageIds(scopeKey: string = "global"): number[] {
-    return Array.from(this.getState(scopeKey).requestsByMessageId.keys());
+    return Array.from(this.peekState(scopeKey)?.requestsByMessageId.keys() ?? []);
   }
 
   removeByMessageId(
     messageId: number | null,
     scopeKey: string = "global",
   ): PermissionRequest | null {
-    const state = this.getState(scopeKey);
+    const state = this.peekState(scopeKey);
     const request = this.getRequest(messageId, scopeKey);
-    if (!request || messageId === null) {
+    if (!state || !request || messageId === null) {
       return null;
     }
 
@@ -149,6 +161,10 @@ class PermissionManager {
     logger.debug(
       `[PermissionManager] Removed permission request: id=${request.id}, messageId=${messageId}, pending=${state.requestsByMessageId.size}`,
     );
+
+    if (state.requestsByMessageId.size === 0) {
+      this.stateByScope.delete(scopeKey);
+    }
 
     return request;
   }
@@ -163,7 +179,7 @@ class PermissionManager {
   }
 
   getPendingCount(scopeKey: string = "global"): number {
-    return this.getState(scopeKey).requestsByMessageId.size;
+    return this.peekState(scopeKey)?.requestsByMessageId.size ?? 0;
   }
 
   getActiveScopeKeys(): string[] {
@@ -232,19 +248,15 @@ class PermissionManager {
   }
 
   isActive(scopeKey: string = "global"): boolean {
-    return this.getState(scopeKey).requestsByMessageId.size > 0;
+    return (this.peekState(scopeKey)?.requestsByMessageId.size ?? 0) > 0;
   }
 
   clear(scopeKey: string = "global"): void {
-    const state = this.getState(scopeKey);
+    const pending = this.peekState(scopeKey)?.requestsByMessageId.size ?? 0;
 
-    logger.debug(
-      `[PermissionManager] Clearing permission state: pending=${state.requestsByMessageId.size}`,
-    );
+    logger.debug(`[PermissionManager] Clearing permission state: pending=${pending}`);
 
-    this.stateByScope.set(scopeKey, {
-      requestsByMessageId: new Map(),
-    });
+    this.stateByScope.delete(scopeKey);
   }
 
   __resetForTests(): void {

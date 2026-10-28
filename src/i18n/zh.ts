@@ -14,7 +14,7 @@ export const zh: I18nDictionary = {
   "cmd.description.commands": "自定义命令",
   "cmd.description.model": "选择模型",
   "cmd.description.agent": "选择代理",
-  "cmd.description.cleanup": "关闭过期话题",
+  "cmd.description.cleanup": "删除子代理记录话题",
   "cmd.description.opencode_start": "启动 OpenCode 服务器",
   "cmd.description.opencode_stop": "停止 OpenCode 服务器",
   "cmd.description.recent": "Browse recent sessions across projects",
@@ -83,7 +83,8 @@ export const zh: I18nDictionary = {
     "⏳ 你上一条请求还在执行，所以这条新请求没有启动。\n\n原因：OpenCode 在同一个会话里一次只允许一个运行中的任务。\n建议：先等待当前回复；如果看起来卡住了，先用 /abort，再重新发送消息。",
   "bot.session_queued":
     "📝 这条消息已加入当前会话的队列。\n\n队列位置：{position}\n接下来会发生什么：当前运行结束后，它会自动开始。",
-    "bot.session_queued_cancel": "❌ Cancel queued message",
+  "bot.session_queued_duplicate": "⏳ 这条消息已在队列位置 {position}；不会重复添加。",
+  "bot.session_queued_cancel": "❌ Cancel queued message",
   "bot.session_queue_cancelled": "❌ Queued message cancelled, it will not run.\n\nCancelled message:\n{preview}",
   "bot.session_queue_cancelled_callback": "❌ Queued message cancelled",
   "bot.session_queue_cancel_missing": "⚠️ That queued message already started or was cancelled.",
@@ -254,6 +255,8 @@ export const zh: I18nDictionary = {
   "cleanup.no_topics": "✅ 没有需要清理的会话话题。",
   "cleanup.result":
     "🧹 清理完成。检查：{inspected}，关闭：{closed}，跳过：{skipped}，失败：{failed}。",
+  "cleanup.subagents_none": "✅ 没有要删除的子代理话题。",
+  "cleanup.subagents_result": "🧹 已删除 {deleted} 个子代理话题。失败：{failed}。",
 
   "stop.no_active_session": "🛑 代理尚未启动\n\n使用 /new 创建会话，或通过 /sessions 选择一个。",
   "stop.cancelled_interaction": "✅ 当前设置已取消。你现在可以修改默认值或重新开始。",
@@ -434,6 +437,7 @@ export const zh: I18nDictionary = {
     "编辑文件/路径: {path}\n============================================================\n\n",
   "tool.background_button": "⏪ 移到后台",
   "tool.background_offer": "⏳ 此命令仍在运行：\n{command}\n\n要移到后台以便做其他事吗？",
+  "tool.background_offer_subagent": "🧩 此子代理仍在工作：\n{command}\n\n要移到后台以便做其他事吗？",
   "tool.background_no_command": "一条长命令",
   "tool.background_started": "⏪ 已移到后台。继续运行；完成后通知你。",
   "tool.background_started_callback": "⏪ 已移到后台",
@@ -600,6 +604,7 @@ export const zh: I18nDictionary = {
   "cli.args.invalid_mode": "无效的 --mode 值：{value}。期望 sources|installed",
   "cli.args.unknown_option": "未知选项：{value}",
   "cli.args.mode_only_start": "选项 --mode 仅支持 start 和 config 命令",
+  "cli.args.daemon_only_start": "选项 --daemon 仅支持 start 命令",
 
   "legacy.models.fetch_error": "🔴 获取模型列表失败。请使用 /status 检查服务器状态。",
   "legacy.models.empty": "📋 没有可用模型。请在 OpenCode 中配置 providers。",

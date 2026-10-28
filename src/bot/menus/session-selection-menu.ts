@@ -3,7 +3,7 @@ import { InlineKeyboard } from "grammy";
 
 export const SESSION_CALLBACK_PREFIX = "session:";
 
-const BACKGROUND_SESSION_CALLBACK_PREFIX = "background-session:";
+export const BACKGROUND_SESSION_CALLBACK_PREFIX = "background-session:";
 export const SESSION_PAGE_CALLBACK_PREFIX = "session:page:";
 export const BACKGROUND_SESSION_FETCH_EXTRA_COUNT = 1;
 
@@ -82,15 +82,17 @@ export function parseBackgroundSessionCallback(
     return null;
   }
 
-  const markerSeparatorIndex = data.indexOf(":");
+  // Strip the prefix first: searching the raw string finds the prefix's own
+  // colon and yields marker="background-session", which never matches and
+  // drops every Open-session tap as unknown.
+  const remainder = data.slice(BACKGROUND_SESSION_CALLBACK_PREFIX.length);
+  const markerSeparatorIndex = remainder.indexOf(":");
   if (markerSeparatorIndex < 0) {
-    return data.length > 0
-      ? { sessionId: data.slice(BACKGROUND_SESSION_CALLBACK_PREFIX.length), kind: null }
-      : null;
+    return remainder.length > 0 ? { sessionId: remainder, kind: null } : null;
   }
 
-  const marker = data.slice(0, markerSeparatorIndex);
-  const sessionId = data.slice(markerSeparatorIndex + 1);
+  const marker = remainder.slice(0, markerSeparatorIndex);
+  const sessionId = remainder.slice(markerSeparatorIndex + 1);
   const kind = BACKGROUND_SESSION_KIND_BY_CALLBACK_MARKER[marker];
 
   if (!kind || sessionId.length === 0) {

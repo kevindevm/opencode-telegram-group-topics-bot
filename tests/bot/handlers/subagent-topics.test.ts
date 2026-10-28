@@ -4,6 +4,11 @@ const mocked = vi.hoisted(() => ({
   bindingsBySession: new Map<string, any>(),
   routeTarget: null as null | { chatId: number; threadId: number | null; scopeKey: string },
   registered: [] as any[],
+  inheritDisplayMock: vi.fn(),
+}));
+
+vi.mock("../../../src/display/manager.js", () => ({
+  inheritDisplayOverrides: (...args: unknown[]) => mocked.inheritDisplayMock(...args),
 }));
 
 vi.mock("../../../src/topic/manager.js", () => ({
@@ -87,6 +92,7 @@ describe("bot/handlers/subagent-topics", () => {
     mocked.routeTarget = { chatId: -100, threadId: 7, scopeKey: "chat:-100:7" };
     mocked.bindingsBySession.set("parent-1", {
       sessionId: "parent-1",
+      scopeKey: "chat:-100:7",
       projectId: "p1",
       projectWorktree: "/repo",
     });
@@ -113,6 +119,10 @@ describe("bot/handlers/subagent-topics", () => {
       projectWorktree: "/repo",
       ephemeral: true,
     });
+    expect(mocked.inheritDisplayMock).toHaveBeenCalledWith(
+      "chat:-100:7",
+      mocked.registered[0].scopeKey,
+    );
   });
 
   it("renames and closes the transcript on terminal status", async () => {

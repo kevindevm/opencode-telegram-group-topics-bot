@@ -11,6 +11,7 @@ import {
   updateTopicBindingNameBySessionId,
 } from "../../topic/manager.js";
 import type { SubagentInfo } from "../../summary/aggregator.js";
+import { inheritDisplayOverrides } from "../../display/manager.js";
 import { logger } from "../../utils/logger.js";
 
 const SUBAGENT_TOPIC_ICON = "🧩";
@@ -115,6 +116,9 @@ async function createSubagentTopic(
       ephemeral: true,
     };
     registerTopicSessionBinding(input);
+    if (parentBinding.scopeKey) {
+      inheritDisplayOverrides(parentBinding.scopeKey, input.scopeKey);
+    }
     logger.info(
       `[SubagentTopic] Created transcript topic for subagent ${childSessionId}: thread=${created.message_thread_id}`,
     );

@@ -745,6 +745,7 @@ function submitPromptRequest(
         logger.error("[Bot] session.promptAsync raw API error object:", error);
 
         if (errorType === "busy") {
+          clearPromptResponseMode(request.sessionId);
           assistantRunState.clearRun(request.sessionId, "prompt_busy_requeued");
           const queued = withQueuedPromptId({
             ...request,
@@ -1061,6 +1062,23 @@ export async function processUserPrompt(
 
   const sessionIsBusy = await isSessionBusy(currentSession.id, currentSession.directory);
   if (sessionIsBusy) {
+    // Same text as the tail of the queue (double-tap, impatient resend):
+    // acknowledge the existing entry instead of running the turn twice.
+    const pending = queuedPromptRequests.get(currentSession.id) ?? [];
+    const tailText = pending.length > 0 ? getRequestText(pending[pending.length - 1]) : null;
+    if (tailText !== null && tailText === text.trim()) {
+      const tailEntry = pending[pending.length - 1];
+      logger.info(
+        `[Bot] Dropping duplicate queued prompt for busy session ${currentSession.id} (already at position ${pending.length})`,
+      );
+      await ctx.reply(t("bot.session_queued_duplicate", { position: String(pending.length) }), {
+        reply_markup: tailEntry
+          ? buildQueuedPromptCancelKeyboard(tailEntry.queueId)
+          : undefined,
+      });
+      return true;
+    }
+
     const currentAgent = await resolveProjectAgent(getStoredAgent(scopeKey), scopeKey);
     const storedModel = await resolveModelForExistingPrompt(
       currentSession,

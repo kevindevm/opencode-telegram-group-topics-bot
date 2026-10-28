@@ -359,6 +359,17 @@ class SummaryAggregator {
   private onClearedCallback: ClearedCallback | null = null;
   private processedToolStates = new Map<string, string>();
   private static readonly PROCESSED_TOOL_STATES_LIMIT = 10_000;
+  /**
+   * Keys (`sessionId:messageId`) of assistant messages that already ran to
+   * completion. Reconnect replays and durable redeliveries can resurrect a
+   * finished message (delta, snapshot, or even a second `completed`
+   * announcement); without a tombstone those rebuild live state, restart
+   * typing, and emit the final message twice. Bounded FIFO like the rest.
+   */
+  private completedMessageKeys = new Set<string>();
+  private static readonly COMPLETED_MESSAGE_KEYS_LIMIT = 1000;
+  /** Pre-announcement text snapshots with no live message yet; capped, see below. */
+  private static readonly PENDING_PARTS_LIMIT = 500;
 
   /**
    * Records a processed tool state, returning false when it was already seen.
@@ -379,6 +390,31 @@ class SummaryAggregator {
     }
     this.processedToolStates.set(key, sessionId);
     return true;
+  }
+
+  private rememberCompletedMessage(messageKey: string): void {
+    this.completedMessageKeys.delete(messageKey);
+    while (
+      this.completedMessageKeys.size >= SummaryAggregator.COMPLETED_MESSAGE_KEYS_LIMIT
+    ) {
+      const oldest = this.completedMessageKeys.values().next();
+      if (oldest.done) {
+        break;
+      }
+      this.completedMessageKeys.delete(oldest.value);
+    }
+    this.completedMessageKeys.add(messageKey);
+  }
+
+  private clearCompletedMessagesForSessions(sessionIds: Set<string>): void {
+    for (const key of Array.from(this.completedMessageKeys)) {
+      for (const sessionId of sessionIds) {
+        if (key === sessionId || key.startsWith(`${sessionId}:`)) {
+          this.completedMessageKeys.delete(key);
+          break;
+        }
+      }
+    }
   }
 
   private clearProcessedToolStatesForSession(sessionId: string): void {
@@ -435,6 +471,26 @@ class SummaryAggregator {
   /** Whether the aggregator currently processes events for the session. */
   isTracked(sessionId: string): boolean {
     return this.trackedSessionIds.has(sessionId);
+  }
+
+  /** All tracked sessions descending from the given one (transitive). */
+  getDescendantSessionIds(sessionId: string): string[] {
+    const descendants: string[] = [];
+    const seen = new Set<string>([sessionId]);
+    const queue: string[] = [sessionId];
+
+    while (queue.length > 0) {
+      const parent = queue.pop() as string;
+      for (const [tracked, trackedParent] of this.trackedSessionParents) {
+        if (trackedParent === parent && !seen.has(tracked)) {
+          seen.add(tracked);
+          descendants.push(tracked);
+          queue.push(tracked);
+        }
+      }
+    }
+
+    return descendants;
   }
 
   private getParentSessionId(sessionId: string): string | null {
@@ -776,12 +832,30 @@ class SummaryAggregator {
   }
 
   clearSession(sessionId: string): void {
+    // The session plus every tracked descendant: child transcripts keep
+    // per-message state (parts, timers, typing, ...) keyed by their own id,
+    // so clearing only the parent leaks them and lets stale completions and
+    // typing pings fire after the switch.
+    const affected = new Set<string>([sessionId]);
+    let grown = true;
+    while (grown) {
+      grown = false;
+      for (const [tracked, parent] of this.trackedSessionParents) {
+        if (parent !== null && affected.has(parent) && !affected.has(tracked)) {
+          affected.add(tracked);
+          grown = true;
+        }
+      }
+    }
+
     this.trackedSessionIds.delete(sessionId);
-    this.trackedSessionParents.delete(sessionId);
-    this.stopTypingIndicator(sessionId);
+    for (const id of affected) {
+      this.trackedSessionParents.delete(id);
+      this.stopTypingIndicator(id);
+    }
 
     for (const [messageKey, message] of this.messages.entries()) {
-      if (message.sessionId !== sessionId) {
+      if (!affected.has(message.sessionId)) {
         continue;
       }
 
@@ -796,22 +870,16 @@ class SummaryAggregator {
       this.clearCompletionTimer(messageKey);
     }
 
-    this.latestCumulativeUsageBySession.delete(sessionId);
-    this.usageBaselineBySession.delete(sessionId);
-    this.lastStepTokensBySession.delete(sessionId);
-    this.pendingEarlyEventsBySession.delete(sessionId);
-    this.clearProcessedToolStatesForSession(sessionId);
-
-    for (const [trackedSessionId, parentSessionId] of Array.from(
-      this.trackedSessionParents.entries(),
-    )) {
-      if (parentSessionId === sessionId) {
-        this.trackedSessionParents.delete(trackedSessionId);
-        this.subagentCardIdBySessionId.delete(trackedSessionId);
-      }
+    for (const id of affected) {
+      this.latestCumulativeUsageBySession.delete(id);
+      this.usageBaselineBySession.delete(id);
+      this.lastStepTokensBySession.delete(id);
+      this.pendingEarlyEventsBySession.delete(id);
+      this.subagentCardIdBySessionId.delete(id);
+      this.clearProcessedToolStatesForSession(id);
+      this.clearSubagentsForParent(id);
     }
-
-    this.clearSubagentsForParent(sessionId);
+    this.clearCompletedMessagesForSessions(affected);
   }
 
   clear(): void {
@@ -826,6 +894,7 @@ class SummaryAggregator {
     this.deltaTextByPart.clear();
     this.deltaCompletedParts.clear();
     this.partSnapshotByKey.clear();
+    this.completedMessageKeys.clear();
     this.latestCumulativeUsageBySession.clear();
     this.usageBaselineBySession.clear();
     this.lastStepTokensBySession.clear();
@@ -1041,7 +1110,13 @@ class SummaryAggregator {
   private getOrCreateSubagentForSession(sessionId: string): SubagentState {
     const existingCardId = this.subagentCardIdBySessionId.get(sessionId);
     if (existingCardId) {
-      return this.subagentStates.get(existingCardId)!;
+      const existing = this.subagentStates.get(existingCardId);
+      if (existing) {
+        return existing;
+      }
+      // Mapping outlived its card (cleared parent, crashed attach, ...):
+      // drop it instead of crashing on the non-null dereference below.
+      this.subagentCardIdBySessionId.delete(sessionId);
     }
 
     const parentSessionId = this.getParentSessionId(sessionId) ?? sessionId;
@@ -1262,6 +1337,15 @@ class SummaryAggregator {
   ): void {
     const { info } = event.properties;
 
+    const messageID = info.id;
+    const messageKey = this.getMessageKey(info.sessionID, messageID);
+    if (!this.messages.has(messageKey) && this.completedMessageKeys.has(messageKey)) {
+      // Reconnect replay or durable redelivery of a finished message: the
+      // live entry is gone, so this is a duplicate, not a new turn. Dropping
+      // it also keeps a completed subagent card from flipping to running.
+      return;
+    }
+
     const isChildSession = this.isTrackedChildSession(info.sessionID);
     if (isChildSession && info.role === "assistant") {
       this.updateSubagentFromAssistantMessage(
@@ -1278,9 +1362,6 @@ class SummaryAggregator {
       this.bufferEarlyEvent(info.sessionID, event);
       return;
     }
-
-    const messageID = info.id;
-    const messageKey = this.getMessageKey(info.sessionID, messageID);
 
     if (info.role !== "assistant") {
       return;
@@ -1416,6 +1497,10 @@ class SummaryAggregator {
     const messageInfo = this.messages.get(messageKey);
 
     if (part.type === "reasoning") {
+      if (this.completedMessageKeys.has(messageKey)) {
+        // Late duplicate of a finished message: the thinking signal already fired.
+        return;
+      }
       // Fire the thinking callback once per message on the first reasoning part.
       // This is the signal that the model is actually doing extended thinking.
       if (!this.thinkingFiredForMessages.has(messageKey) && this.onThinkingCallback) {
@@ -1452,6 +1537,25 @@ class SummaryAggregator {
           this.scheduleMessageCompletion(messageKey, part.sessionID);
         }
       } else {
+        if (this.completedMessageKeys.has(messageKey)) {
+          // Late duplicate of a finished message: no live entry to update
+          // and nothing left to announce into, so drop it instead of
+          // buffering a pending entry that can never merge.
+          return;
+        }
+        // Parts can arrive before their message announcement (or after a
+        // lost one that never comes): cap the buffer so orphan snapshots
+        // cannot grow it without bound.
+        while (
+          this.pendingParts.size >= SummaryAggregator.PENDING_PARTS_LIMIT &&
+          !this.pendingParts.has(messageKey)
+        ) {
+          const oldest = this.pendingParts.keys().next();
+          if (oldest.done) {
+            break;
+          }
+          this.pendingParts.delete(oldest.value);
+        }
         if (!this.pendingParts.has(messageKey)) {
           this.pendingParts.set(messageKey, []);
         }
@@ -1696,6 +1800,13 @@ class SummaryAggregator {
     const messageKey = this.getMessageKey(sessionId, messageId);
     const partKey = `${messageKey}:${partId}`;
 
+    if (this.completedMessageKeys.has(messageKey)) {
+      // Late duplicate of a finished message: the overlay state was cleared
+      // at completion, so accepting this would resurrect a dead message and
+      // restart its typing indicator.
+      return;
+    }
+
     if (this.deltaCompletedParts.has(partKey)) {
       return;
     }
@@ -1905,6 +2016,11 @@ class SummaryAggregator {
 
     if (this.isTrackedChildSession(sessionID)) {
       logger.info(`[Aggregator] Subagent session became idle: ${sessionID}`);
+      // Child transcripts never reach the root idle callback, so nothing
+      // outside stops their typing indicator: do it here, and deliver any
+      // streamed text the completion timer has not flushed yet.
+      this.flushPendingCompletionsForSession(sessionID);
+      this.stopTypingIndicator(sessionID);
       this.setSubagentTerminalStatus(sessionID, "completed");
       return;
     }
@@ -1977,8 +2093,29 @@ class SummaryAggregator {
     let baseline = this.usageBaselineBySession.get(sessionId);
     const lastStep = this.lastStepTokensBySession.get(sessionId);
     if (!lastStep) {
-      logger.debug("[Aggregator] Ignoring session.usage.updated without a completed step", {
+      // No completed step yet (first turn, or a restart that dropped the
+      // in-memory anchor): the cumulative totals ARE the current context, so
+      // report them directly instead of freezing the display at zero until
+      // the first completion. Downstream clamps against the model limit.
+      this.usageBaselineBySession.set(sessionId, { input, cacheRead });
+      const callback = this.onTokensCallback;
+      if (!callback) {
+        return;
+      }
+      logger.debug("[Aggregator] Reporting first-sight cumulative usage as live context", {
         sessionId,
+      });
+      void Promise.resolve(
+        callback(sessionId, {
+          input,
+          output: 0,
+          reasoning: 0,
+          cacheRead,
+          cacheWrite: 0,
+          cost: 0,
+        }),
+      ).catch((error) => {
+        logger.error("[Aggregator] Tokens callback failed", { sessionId }, error);
       });
       return;
     }
@@ -2076,6 +2213,8 @@ class SummaryAggregator {
 
     if (this.isTrackedChildSession(sessionID)) {
       logger.warn(`[Aggregator] Subagent session error: ${sessionID}: ${message}`);
+      this.flushPendingCompletionsForSession(sessionID);
+      this.stopTypingIndicator(sessionID);
       this.setSubagentTerminalStatus(sessionID, "error", message);
       return;
     }
@@ -2275,8 +2414,13 @@ class SummaryAggregator {
   }
 
   private flushPendingCompletionsForSession(sessionId: string): void {
+    // Idle/error means the turn is over: deliver every open message, not
+    // just the ones with a completion timer. When the `completed`
+    // announcement was lost in an SSE gap there is no timer, but the
+    // streamed text still deserves its final delivery instead of lingering
+    // in the maps until the session is cleared.
     for (const [messageKey, message] of this.messages.entries()) {
-      if (message.sessionId !== sessionId || !this.completionTimers.has(messageKey)) {
+      if (message.sessionId !== sessionId) {
         continue;
       }
 
@@ -2286,6 +2430,7 @@ class SummaryAggregator {
   }
 
   private finalizeMessageCompletion(messageKey: string, sessionId: string): void {
+    this.rememberCompletedMessage(messageKey);
     const parts = this.currentMessageParts.get(messageKey) || [];
     const messageText = `${parts.map((entry) => entry.text).join("")}${this.getDeltaSuffix(messageKey)}`;
 

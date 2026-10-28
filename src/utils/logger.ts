@@ -17,17 +17,43 @@ const FILE_LOG_MAX_BYTES = 5 * 1024 * 1024;
 const FILE_LOG_MAX_ROTATIONS = 5;
 const LOG_LINE_SEPARATOR = "\n";
 const LOG_FILE_SUFFIX_SEPARATOR = ".";
+const REDACTED_VALUE = "[redacted]";
+
+const SECRET_KEY_PATTERN = /(token|password|secret|api[-_]?key|authorization|auth)/i;
 
 let fileLoggerInitialized = false;
 let currentLogFileSizeBytes = 0;
 let fileWriteQueue: Promise<void> = Promise.resolve();
 
-function normalizeLogLevel(value: string): LogLevel {
-  if (value in LOG_LEVELS) {
-    return value as LogLevel;
+export function normalizeLogLevel(value: string): LogLevel {
+  const normalized = value.trim().toLowerCase();
+  if (normalized in LOG_LEVELS) {
+    return normalized as LogLevel;
   }
 
   return "info";
+}
+
+/**
+ * Returns a copy of the value with secret-bearing fields replaced by
+ * "[redacted]" so bot tokens, server passwords, and API keys never reach
+ * the console or the log file when whole objects (config dumps, error
+ * details, request headers) are logged.
+ */
+export function redactSecrets<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSecrets(item)) as unknown as T;
+  }
+
+  if (typeof value === "object" && value !== null) {
+    const redacted: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      redacted[key] = SECRET_KEY_PATTERN.test(key) ? REDACTED_VALUE : redactSecrets(entry);
+    }
+    return redacted as T;
+  }
+
+  return value;
 }
 
 function formatPrefix(level: LogLevel): string {
@@ -37,6 +63,10 @@ function formatPrefix(level: LogLevel): string {
 function formatArg(arg: unknown): unknown {
   if (arg instanceof Error) {
     return arg.stack ?? `${arg.name}: ${arg.message}`;
+  }
+
+  if (typeof arg === "object" && arg !== null) {
+    return redactSecrets(arg);
   }
 
   return arg;
@@ -133,7 +163,7 @@ function stringifyLogArg(arg: unknown): string {
   }
 
   try {
-    return JSON.stringify(arg);
+    return JSON.stringify(redactSecrets(arg));
   } catch {
     return String(arg);
   }
@@ -213,3 +243,12 @@ export const logger = {
     log("error", ...args);
   },
 };
+
+/**
+ * Waits for every log line queued so far to reach the log file.
+ * Call during shutdown (after flushing settings) so the final operational
+ * events are not lost when the process exits.
+ */
+export function flushLogs(): Promise<void> {
+  return fileWriteQueue.catch(() => undefined).then(() => undefined);
+}

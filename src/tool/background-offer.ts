@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import { t } from "../i18n/index.js";
 import { logger } from "../utils/logger.js";
 import { getThreadSendOptions } from "../bot/scope.js";
+import { runWithRateLimitRetries } from "../bot/telegram-rate-limiter.js";
 import { opencodeClient } from "../opencode/client.js";
 import type { Result } from "../opencode/v2/client.js";
 
@@ -14,17 +15,29 @@ const backgroundCapableClient = opencodeClient as unknown as {
 };
 
 /**
- * Offers to move a long-running shell command to the background (⏪ button,
+ * Offers to move long-running work to the background (⏪ button,
  * `session.background` on V2) instead of leaving the user staring at the
- * stream. The offer only pops up when a bash/execute tool is still running
- * after BACKGROUND_OFFER_AFTER_SEC (default 30s), so quick commands never
- * spam.
+ * stream. Mirrors the TUI hint: it only pops up when a shell (bash/execute)
+ * or subagent (task/subagent) tool is still running after
+ * BACKGROUND_OFFER_AFTER_SEC (default 3s), so quick tools never spam.
  */
 
 export const BACKGROUND_OFFER_PREFIX = "bg:";
 
-/** Shell tools worth backgrounding; everything else never triggers an offer. */
-const BACKGROUNDABLE_TOOLS = new Set(["bash", "execute"]);
+/**
+ * Tools worth backgrounding, mirroring the TUI's shell/subagent hint
+ * (canonical names: bash→shell, task→subagent). Everything else never
+ * triggers an offer.
+ */
+const BACKGROUNDABLE_TOOLS = new Set(["bash", "execute", "task", "subagent"]);
+
+export function isBackgroundableTool(tool: string): boolean {
+  return BACKGROUNDABLE_TOOLS.has(tool);
+}
+
+export function isSubagentTool(tool: string): boolean {
+  return tool === "task" || tool === "subagent";
+}
 
 const MAX_COMMAND_PREVIEW_LENGTH = 120;
 
@@ -50,6 +63,8 @@ interface NoteToolBackgroundStateInput {
   tool: string;
   status: string | undefined;
   commandPreview: string;
+  /** True for subagent tools: the offer message names the subagent, not a command. */
+  isSubagent: boolean;
   chatId: number;
   threadId: number | null;
   /** Test-only override for the running-time threshold. */
@@ -152,6 +167,7 @@ async function sendOfferMessage(input: {
   sessionId: string;
   callId: string;
   commandPreview: string;
+  isSubagent: boolean;
   chatId: number;
   threadId: number | null;
 }): Promise<void> {
@@ -162,12 +178,13 @@ async function sendOfferMessage(input: {
   );
 
   try {
-    const sent = await api.sendMessage(chatId, t("tool.background_offer", {
+    const sent = await runWithRateLimitRetries(`background-offer:${sessionId}`, () =>
+      api.sendMessage(chatId, t(input.isSubagent ? "tool.background_offer_subagent" : "tool.background_offer", {
       command: truncateCommandPreview(input.commandPreview) || t("tool.background_no_command"),
     }), {
       reply_markup: keyboard,
       ...getThreadSendOptions(input.threadId),
-    });
+    }));
     sentOffers.set(sessionId, {
       chatId,
       messageId: sent.message_id,
@@ -178,6 +195,9 @@ async function sendOfferMessage(input: {
     const offer = sentOffers.get(sessionId);
     if (offer) {
       offer.expiresTimer = setTimeout(() => {
+        // The session never settled (restart mid-run, deleted topic): drop
+        // the running-call tracking too so the entry does not leak.
+        runningCallIds.delete(sessionId);
         retireOffer(sessionId, true);
       }, OFFER_TTL_MS);
     }
@@ -197,12 +217,12 @@ async function sendOfferMessage(input: {
 
 /**
  * Feeds tool state changes into the offer tracker. Call for every tool event;
- * only bash/execute in "running" status arm the timer, terminal statuses
- * disarm it and retire a live offer for the same call.
+ * only shell/subagent tools in "running" status arm the timer, terminal
+ * statuses disarm it and retire a live offer for the same call.
  */
 export function noteToolBackgroundState(input: NoteToolBackgroundStateInput): void {
   const { api, sessionId, callId, tool, status } = input;
-  if (!BACKGROUNDABLE_TOOLS.has(tool)) {
+  if (!isBackgroundableTool(tool)) {
     return;
   }
 
@@ -262,6 +282,15 @@ export function clearAllBackgroundOffers(): void {
   }
 }
 
+/** Test-only introspection for TTL/leak assertions. */
+export const __backgroundOfferTestHooks = {
+  sizes: () => ({
+    pendingTimers: pendingTimers.size,
+    runningCalls: runningCallIds.size,
+    sentOffers: sentOffers.size,
+  }),
+};
+
 /** Drops pending timers (and an unpressed offer message) when a session settles. */
 export function resetBackgroundOfferStateForTests(): void {
   clearAllBackgroundOffers();
@@ -287,6 +316,14 @@ export async function handleToolBackgroundCallback(ctx: Context): Promise<boolea
     message && "message_id" in message && typeof message.message_id === "number"
       ? message.message_id
       : null;
+
+  // A double-tap must not background twice: the first press already moved
+  // the session and cleared the TTL; the entry stays until the tool settles.
+  const existingOffer = sentOffers.get(sessionId);
+  if (existingOffer?.pressed) {
+    await ctx.answerCallbackQuery({ text: t("tool.background_started_callback") }).catch(() => {});
+    return true;
+  }
 
   try {
     const { data, error } = await backgroundCapableClient.session.background({
