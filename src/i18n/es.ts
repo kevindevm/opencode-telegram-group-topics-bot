@@ -15,7 +15,6 @@ export const es: I18nDictionary = {
   "cmd.description.model": "Seleccionar modelo",
   "cmd.description.agent": "Seleccionar agente",
   "cmd.description.cleanup": "Borrar topics de subagentes",
-  "cmd.description.restore": "Restaurar sesiones abiertas como topics",
   "cmd.description.opencode_start": "Iniciar servidor OpenCode",
   "cmd.description.opencode_stop": "Detener servidor OpenCode",
   "cmd.description.recent": "Ver sesiones recientes de todos los proyectos",
@@ -286,20 +285,6 @@ export const es: I18nDictionary = {
   "cleanup.subagents_none": "✅ No hay topics de subagentes para borrar.",
   "cleanup.subagents_result":
     "🧹 Borrados {deleted} topics de subagentes. Fallidos: {failed}.",
-
-  "restore.requires_forum_general":
-    "⚠️ Usa /restore desde el topic General de un supergrupo con foro.",
-  "restore.list_failed": "⚠️ No se pudieron cargar las sesiones del servidor OpenCode.",
-  "restore.menu_title":
-    "📋 Sesiones abiertas — elegí cuáles restaurar como topics (● corriendo, ○ inactiva).\nYa vinculadas (omitidas): {skipped}.",
-  "restore.confirm_button": "✅ Crear {count}",
-  "restore.no_selection": "⚠️ Seleccioná al menos una sesión.",
-  "restore.empty": "✅ Todas las sesiones recientes ya tienen topic.",
-  "restore.progress": "⏳ Restaurando {total} sesiones como topics…",
-  "restore.result":
-    "✅ Restaurados {created} topics. Ya vinculados (omitidos): {skipped}. Fallidos: {failed}.",
-  "restore.truncated":
-    "⚠️ Límite de {max} topics por vez; quedan {remaining} para el próximo /restore.",
 
   "stop.no_active_session":
     "🛑 El agente no se inició\n\nCrea una sesión con /new o selecciona una con /sessions.",

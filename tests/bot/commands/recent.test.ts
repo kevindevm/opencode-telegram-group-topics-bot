@@ -217,4 +217,44 @@ describe("bot/commands/recent", () => {
       expect.anything(),
     );
   });
+
+  it("paginates the menu forward and back without losing the session buttons", async () => {
+    const many = Array.from({ length: 11 }, (_, index) => entry(`s${index + 1}`));
+    mocked.loadRecentSessionsMock.mockResolvedValue(many);
+    const first = createCallbackContext("recent:page:1");
+    (first as { editMessageText?: unknown }).editMessageText = vi
+      .fn()
+      .mockResolvedValue(undefined);
+
+    await expect(handleRecentSelect(first as never)).resolves.toBe(true);
+
+    const editMessageText = first.editMessageText as ReturnType<typeof vi.fn>;
+    expect(editMessageText).toHaveBeenCalledWith(
+      t("recent.heading"),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+
+    const second = createCallbackContext("recent:page:0");
+    (second as { editMessageText?: unknown }).editMessageText = vi
+      .fn()
+      .mockResolvedValue(undefined);
+
+    await expect(handleRecentSelect(second as never)).resolves.toBe(true);
+
+    expect((second.editMessageText as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves selections from pages beyond the first", async () => {
+    const many = Array.from({ length: 11 }, (_, index) => entry(`s${index + 1}`));
+    mocked.loadRecentSessionsMock.mockResolvedValue(many);
+    mocked.sessionGetMock.mockResolvedValue({
+      data: { id: "s11", title: "title-s11" },
+      error: undefined,
+    });
+    const ctx = createCallbackContext("recent:s11");
+
+    await expect(handleRecentSelect(ctx as never)).resolves.toBe(true);
+
+    expect(mocked.openSessionInNewTopicMock).toHaveBeenCalledTimes(1);
+  });
 });

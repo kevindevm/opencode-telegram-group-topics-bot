@@ -15,7 +15,6 @@ export const de: I18nDictionary = {
   "cmd.description.model": "Modell auswählen",
   "cmd.description.agent": "Agent auswählen",
   "cmd.description.cleanup": "Subagenten-Themen löschen",
-  "cmd.description.restore": "Offene Sessions als Themen wiederherstellen",
   "cmd.description.opencode_start": "OpenCode-Server starten",
   "cmd.description.opencode_stop": "OpenCode-Server stoppen",
   "cmd.description.recent": "Browse recent sessions across projects",
@@ -294,20 +293,6 @@ export const de: I18nDictionary = {
   "cleanup.subagents_none": "✅ Keine Subagenten-Themen zum Löschen.",
   "cleanup.subagents_result":
     "🧹 {deleted} Subagenten-Themen gelöscht. Fehlgeschlagen: {failed}.",
-
-  "restore.requires_forum_general":
-    "⚠️ Führe /restore im General-Thema einer Foren-Supergruppe aus.",
-  "restore.list_failed": "⚠️ Sessions konnten nicht vom OpenCode-Server geladen werden.",
-  "restore.menu_title":
-    "📋 Offene Sessions — wähle, welche als Themen wiederhergestellt werden (● läuft, ○ inaktiv).\nBereits verknüpft (übersprungen): {skipped}.",
-  "restore.confirm_button": "✅ {count} erstellen",
-  "restore.no_selection": "⚠️ Wähle mindestens eine Session aus.",
-  "restore.empty": "✅ Alle aktuellen Sessions haben bereits ein Thema.",
-  "restore.progress": "⏳ Stelle {total} Sessions als Themen wieder her…",
-  "restore.result":
-    "✅ {created} Themen wiederhergestellt. Bereits verknüpft (übersprungen): {skipped}. Fehlgeschlagen: {failed}.",
-  "restore.truncated":
-    "⚠️ Limit: {max} Themen pro Durchlauf; {remaining} übrig für das nächste /restore.",
 
   "stop.no_active_session":
     "🛑 Agent wurde nicht gestartet\n\nErstelle eine Sitzung mit /new oder wähle eine über /sessions aus.",

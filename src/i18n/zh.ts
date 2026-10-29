@@ -15,7 +15,6 @@ export const zh: I18nDictionary = {
   "cmd.description.model": "选择模型",
   "cmd.description.agent": "选择代理",
   "cmd.description.cleanup": "删除子代理记录话题",
-  "cmd.description.restore": "将打开的会话恢复为话题",
   "cmd.description.opencode_start": "启动 OpenCode 服务器",
   "cmd.description.opencode_stop": "停止 OpenCode 服务器",
   "cmd.description.recent": "Browse recent sessions across projects",
@@ -258,18 +257,6 @@ export const zh: I18nDictionary = {
     "🧹 清理完成。检查：{inspected}，关闭：{closed}，跳过：{skipped}，失败：{failed}。",
   "cleanup.subagents_none": "✅ 没有要删除的子代理话题。",
   "cleanup.subagents_result": "🧹 已删除 {deleted} 个子代理话题。失败：{failed}。",
-
-  "restore.requires_forum_general": "⚠️ 请在论坛超级群组的 General 话题中运行 /restore。",
-  "restore.list_failed": "⚠️ 无法从 OpenCode 服务器加载会话。",
-  "restore.menu_title":
-    "📋 打开的会话 — 选择要恢复为话题的会话（● 运行中，○ 空闲）。\n已绑定（已跳过）: {skipped}。",
-  "restore.confirm_button": "✅ 创建 {count} 个",
-  "restore.no_selection": "⚠️ 请至少选择一个会话。",
-  "restore.empty": "✅ 所有最近的会话都已有话题。",
-  "restore.progress": "⏳ 正在将 {total} 个会话恢复为话题…",
-  "restore.result":
-    "✅ 已恢复 {created} 个话题。已绑定（已跳过）: {skipped}。失败: {failed}。",
-  "restore.truncated": "⚠️ 每次最多 {max} 个话题；还有 {remaining} 个留待下次 /restore。",
 
   "stop.no_active_session": "🛑 代理尚未启动\n\n使用 /new 创建会话，或通过 /sessions 选择一个。",
   "stop.cancelled_interaction": "✅ 当前设置已取消。你现在可以修改默认值或重新开始。",

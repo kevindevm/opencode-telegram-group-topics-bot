@@ -118,7 +118,7 @@ function formatSessionsSelectText(page: number): string {
   return t("sessions.select_page", { page: page + 1 });
 }
 
-export function isGeneralForumScope(ctx: Context): boolean {
+function isGeneralForumScope(ctx: Context): boolean {
   const scope = getScopeFromContext(ctx);
   const isForumEnabled =
     ctx.chat?.type === CHAT_TYPE.SUPERGROUP &&
@@ -278,7 +278,7 @@ export interface SessionTopicTarget {
   agent?: string | null;
 }
 
-export function resolveTopicModel(
+function resolveTopicModel(
   session: SessionTopicTarget,
   scopeKey: string,
 ): { providerID: string; modelID: string; variant: string } {

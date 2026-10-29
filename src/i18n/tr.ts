@@ -21,7 +21,6 @@ export const tr: I18nDictionary = {
   "cmd.description.model": "Select model",
   "cmd.description.agent": "Select agent",
   "cmd.description.cleanup": "Alt aracı transkript konularını sil",
-  "cmd.description.restore": "Açık oturumları konu olarak geri yükle",
   "cmd.description.opencode_start": "OpenCode sunucusunu başlat",
   "cmd.description.opencode_stop": "OpenCode sunucusunu durdur",
   "cmd.description.recent": "Browse recent sessions across projects",
@@ -259,19 +258,6 @@ export const tr: I18nDictionary = {
   "cleanup.result": "🧹 Cleanup complete. Checked: {inspected}, closed: {closed}, skipped: {skipped}, failed: {failed}.",
   "cleanup.subagents_none": "✅ Silinecek alt aracı konusu yok.",
   "cleanup.subagents_result": "🧹 {deleted} alt aracı konusu silindi. Başarısız: {failed}.",
-  "restore.requires_forum_general":
-    "⚠️ /restore komutunu forum özellikli bir süper grubun General konusunda çalıştır.",
-  "restore.list_failed": "⚠️ Oturumlar OpenCode sunucusundan yüklenemedi.",
-  "restore.menu_title":
-    "📋 Açık oturumlar — hangilerinin konu olarak geri yükleneceğini seç (● çalışıyor, ○ boşta).\nZaten bağlı (atlandı): {skipped}.",
-  "restore.confirm_button": "✅ {count} oluştur",
-  "restore.no_selection": "⚠️ En az bir oturum seç.",
-  "restore.empty": "✅ Tüm güncel oturumların zaten konusu var.",
-  "restore.progress": "⏳ {total} oturum konu olarak geri yükleniyor…",
-  "restore.result":
-    "✅ {created} konu geri yüklendi. Zaten bağlı (atlandı): {skipped}. Başarısız: {failed}.",
-  "restore.truncated":
-    "⚠️ Çalıştırma başına {max} konu sınırı; bir sonraki /restore için {remaining} kaldı.",
   "stop.no_active_session": "🛑 Ajan başlatılmadı\n\n/new ile bir oturum oluşturun veya /sessions ile birini seçin.",
   "stop.cancelled_interaction": "✅ Cancelled the current setup. You can now change defaults or start again.",
   "stop.in_progress": "🛑 Olay akışı durduruldu, iptal sinyali gönderiliyor...\n\nAjanın durması bekleniyor.",

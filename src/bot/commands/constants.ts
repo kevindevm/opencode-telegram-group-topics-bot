@@ -20,7 +20,6 @@ export const BOT_COMMAND = {
   COMMIT: "commit",
   COST: "cost",
   CLOSE: "close",
-  RESTORE: "restore",
   CLEANUP: "cleanup",
   FORK: "fork",
   SHARE: "share",
