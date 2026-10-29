@@ -1,6 +1,7 @@
 import type { Api } from "grammy";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { config } from "../config.js";
 import { logger } from "../utils/logger.js";
 import { opencodeClient } from "../opencode/client.js";
 import {
@@ -422,7 +423,7 @@ class PinnedMessageManager {
     // single trailing edit with the latest state.
     const waitMs = Math.max(
       0,
-      PinnedMessageManager.PIN_EDIT_MIN_INTERVAL_MS - (Date.now() - context.lastEditAt),
+      this.getPinEditMinIntervalMs() - (Date.now() - context.lastEditAt),
     );
     const effectiveDelayMs = Math.max(delayMs, waitMs);
 
@@ -691,8 +692,11 @@ class PinnedMessageManager {
     return lines.join("\n");
   }
 
-  /** Minimum gap between two Telegram edits of the same dashboard (flood control). */
-  private static readonly PIN_EDIT_MIN_INTERVAL_MS = 15_000;
+  private getPinEditMinIntervalMs(): number {
+    // Configurable so flood pressure can be tuned per deployment without a
+    // code change; floor at 1s to keep the throttle meaningful.
+    return Math.max(1000, config.bot.pinEditIntervalSec * 1000);
+  }
   /**
    * How long a scope stops repainting after a 429. Long on purpose: the
    * coordinator retries final delivery every 15s and each retry re-arms a

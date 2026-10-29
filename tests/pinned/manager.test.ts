@@ -158,7 +158,7 @@ describe("pinned manager scoped state", () => {
     // History load only schedules the repaint; the trailing edit paints it.
     await pinnedMessageManager.flush("chat:-1:10");
     expect(api.editMessageText).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.advanceTimersByTimeAsync(61_000);
 
     expect(api.sendMessage).toHaveBeenCalledWith(
       -1,
@@ -207,7 +207,7 @@ describe("pinned manager scoped state", () => {
       expect(api.editMessageText).not.toHaveBeenCalled();
 
       // Past both the debounce delay and the flood-control gap from a cold start.
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(api.editMessageText).toHaveBeenCalledTimes(1);
       expect(api.editMessageText).toHaveBeenCalledWith(
@@ -240,7 +240,7 @@ describe("pinned manager scoped state", () => {
         { input: 100, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
         "chat:-1:10",
       );
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
       expect(api.editMessageText).toHaveBeenCalledTimes(1);
 
       // A second completion right away is throttled, not dropped.
@@ -250,7 +250,7 @@ describe("pinned manager scoped state", () => {
       );
       expect(api.editMessageText).toHaveBeenCalledTimes(1);
 
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(api.editMessageText).toHaveBeenCalledTimes(2);
       expect(api.editMessageText).toHaveBeenLastCalledWith(
@@ -286,7 +286,7 @@ describe("pinned manager scoped state", () => {
       );
       expect(api.editMessageText).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
       expect(api.editMessageText).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
@@ -338,7 +338,7 @@ describe("pinned manager scoped state", () => {
         new Error("Bad Request: message to edit not found"),
       );
       await pinnedMessageManager.flush("chat:-1:10");
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(api.sendMessage).toHaveBeenCalledTimes(1);
       expect(pinnedMessageManager.getState("chat:-1:10").messageId).toBe(101);
@@ -367,7 +367,7 @@ describe("pinned manager scoped state", () => {
         new Error("Bad Request: message can't be edited"),
       );
       await pinnedMessageManager.flush("chat:-1:10");
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(api.sendMessage).toHaveBeenCalledTimes(1);
       expect(pinnedMessageManager.getState("chat:-1:10").messageId).toBe(101);
@@ -461,7 +461,7 @@ describe("pinned manager scoped state", () => {
         "chat:-1:10",
       );
       await pinnedMessageManager.flush("chat:-1:10");
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(api.editMessageText).toHaveBeenCalledWith(
         -1,
@@ -603,7 +603,7 @@ describe("pinned manager scoped state", () => {
       );
       // Paint the file entry first so clearing it is a visible change.
       await pinnedMessageManager.flush("chat:-1:10");
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
       expect(api.editMessageText).toHaveBeenLastCalledWith(
         -1,
         expect.any(Number),
@@ -614,7 +614,7 @@ describe("pinned manager scoped state", () => {
       await pinnedMessageManager.onSessionDiff([], "chat:-1:10");
       expect(pinnedMessageManager.getState("chat:-1:10").changedFiles).toHaveLength(0);
 
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
       expect(api.editMessageText).toHaveBeenCalled();
       expect(api.editMessageText).toHaveBeenLastCalledWith(
         -1,
@@ -682,7 +682,9 @@ describe("pinned manager scoped state", () => {
         { input: 100, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
         "chat:-1:10",
       );
-      await vi.advanceTimersByTimeAsync(60_000);
+      // 60s throttle + the 429 retry sleeps.
+      await vi.advanceTimersByTimeAsync(61_000);
+      await vi.advanceTimersByTimeAsync(10_000);
       expect(api.editMessageText.mock.calls.length).toBeGreaterThan(0);
 
       // Cooldown is open: new triggers (and coordinator-flush retries)
