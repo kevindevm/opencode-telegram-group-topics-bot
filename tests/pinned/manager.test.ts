@@ -657,4 +657,57 @@ describe("pinned manager scoped state", () => {
     expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(5000);
     expect(pinnedMessageManager.getState("chat:-1:10").assistantCost).toBeCloseTo(0.025, 5);
   });
+
+  it("opens a storm cooldown after repeated 429s and repaints once it lapses", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
+
+      setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+      setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+
+      pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+      await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+      api.editMessageText.mockClear();
+
+      // Every dashboard edit now hits flood control.
+      const flood = Object.assign(new Error("Too Many Requests: retry after 1"), {
+        parameters: { retry_after: 1 },
+      });
+      api.editMessageText.mockRejectedValue(flood);
+
+      // A state change arms a repaint; the trailing edit burns its retries
+      // against 429s and the scope goes quiet for 60s.
+      await pinnedMessageManager.onMessageComplete(
+        { input: 100, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
+        "chat:-1:10",
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(api.editMessageText.mock.calls.length).toBeGreaterThan(0);
+
+      // Cooldown is open: new triggers (and coordinator-flush retries)
+      // schedule nothing instead of feeding the storm.
+      api.editMessageText.mockClear();
+      await pinnedMessageManager.onMessageComplete(
+        { input: 200, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
+        "chat:-1:10",
+      );
+      await pinnedMessageManager.flush("chat:-1:10");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(api.editMessageText).not.toHaveBeenCalled();
+
+      // Storm over and cooldown lapsed: the next trigger repaints with the
+      // latest state instead of staying frozen.
+      await vi.advanceTimersByTimeAsync(60_000);
+      api.editMessageText.mockResolvedValue(true);
+      await pinnedMessageManager.onMessageComplete(
+        { input: 300, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
+        "chat:-1:10",
+      );
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(api.editMessageText).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

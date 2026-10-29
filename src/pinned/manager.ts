@@ -14,7 +14,7 @@ import type { FileChange, PinnedMessageState, TokensInfo } from "./types.js";
 import { t } from "../i18n/index.js";
 import { getThreadIdFromScopeKey, getThreadSendOptions } from "../bot/scope.js";
 import { getScopeFromKey, SCOPE_CONTEXT } from "../bot/scope.js";
-import { runWithRateLimitRetries } from "../bot/telegram-rate-limiter.js";
+import { runWithRateLimitRetries, RateLimitExceededError } from "../bot/telegram-rate-limiter.js";
 import { contextStateManager } from "../context/manager.js";
 
 interface ScopeContext {
@@ -25,6 +25,14 @@ interface ScopeContext {
   debounceTimer: ReturnType<typeof setTimeout> | null;
   lastRenderedText: string | null;
   lastEditAt: number;
+  /**
+   * Flood-control circuit breaker: while now < cooldownUntil, repaint
+   * triggers are dropped instead of scheduled. Set when a dashboard edit
+   * dies with a 429 — without it, the coordinator's 15s final-delivery
+   * retries re-arm a trailing edit on every attempt and the pin feeds the
+   * very storm that freezes it (and the keyboard/stream with it).
+   */
+  cooldownUntil: number;
 }
 
 /**
@@ -83,6 +91,7 @@ class PinnedMessageManager {
       debounceTimer: null,
       lastRenderedText: null,
       lastEditAt: 0,
+      cooldownUntil: 0,
     };
     this.contexts.set(scopeKey, context);
     return context;
@@ -402,6 +411,13 @@ class PinnedMessageManager {
       context.debounceTimer = null;
     }
 
+    // Storm guard: a scope in cooldown drops repaints instead of queueing
+    // another edit Telegram will reject. The dirty state stays and the
+    // next post-cooldown trigger repaints it.
+    if (Date.now() < context.cooldownUntil) {
+      return;
+    }
+
     // Flood control: at most one edit per interval; bursts collapse into a
     // single trailing edit with the latest state.
     const waitMs = Math.max(
@@ -677,6 +693,22 @@ class PinnedMessageManager {
 
   /** Minimum gap between two Telegram edits of the same dashboard (flood control). */
   private static readonly PIN_EDIT_MIN_INTERVAL_MS = 15_000;
+  /**
+   * How long a scope stops repainting after a 429. Long on purpose: the
+   * coordinator retries final delivery every 15s and each retry re-arms a
+   * repaint — a short cooldown would just phase-lock with it.
+   */
+  private static readonly PIN_STORM_COOLDOWN_MS = 60_000;
+
+  /** Opens the circuit breaker after a flood-control rejection. */
+  private openStormCooldown(context: ScopeContext): void {
+    context.cooldownUntil = Date.now() + PinnedMessageManager.PIN_STORM_COOLDOWN_MS;
+    context.lastEditAt = Date.now();
+    if (context.debounceTimer) {
+      clearTimeout(context.debounceTimer);
+      context.debounceTimer = null;
+    }
+  }
 
   private bumpGeneration(scopeKey: string): void {
     this.generations.set(scopeKey, (this.generations.get(scopeKey) ?? 0) + 1);
@@ -836,6 +868,12 @@ class PinnedMessageManager {
       }
 
       logger.error("[PinnedManager] Error updating pinned message:", err);
+      if (err instanceof RateLimitExceededError) {
+        // Flood control rejected us repeatedly: stop repainting for a
+        // while instead of feeding the storm with a trailing edit on
+        // every coordinator retry.
+        this.openStormCooldown(context);
+      }
     }
   }
 
@@ -890,6 +928,7 @@ class PinnedMessageManager {
     context.state = this.createDefaultState(scopeKey);
     context.lastRenderedText = null;
     context.lastEditAt = 0;
+    context.cooldownUntil = 0;
     this.clearPersistedPinnedId(scopeKey);
   }
 }
