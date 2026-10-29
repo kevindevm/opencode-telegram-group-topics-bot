@@ -15,6 +15,7 @@ export const ru: I18nDictionary = {
   "cmd.description.model": "Выбрать модель",
   "cmd.description.agent": "Выбрать режим агента",
   "cmd.description.cleanup": "Удалить темы-транскрипты субагентов",
+  "cmd.description.restore": "Восстановить открытые сессии как темы",
   "cmd.description.opencode_start": "Запустить OpenCode сервер",
   "cmd.description.opencode_stop": "Остановить OpenCode сервер",
   "cmd.description.recent": "Browse recent sessions across projects",
@@ -284,6 +285,16 @@ export const ru: I18nDictionary = {
     "🧹 Очистка завершена. Проверено: {inspected}, закрыто: {closed}, пропущено: {skipped}, ошибок: {failed}.",
   "cleanup.subagents_none": "✅ Нет тем субагентов для удаления.",
   "cleanup.subagents_result": "🧹 Удалено тем субагентов: {deleted}. Не удалось: {failed}.",
+
+  "restore.requires_forum_general":
+    "⚠️ Запусти /restore из темы General супергруппы с форумом.",
+  "restore.list_failed": "⚠️ Не удалось загрузить сессии с сервера OpenCode.",
+  "restore.empty": "✅ У всех недавних сессий уже есть тема.",
+  "restore.progress": "⏳ Восстанавливаю {total} сессий как темы…",
+  "restore.result":
+    "✅ Восстановлено тем: {created}. Уже привязаны (пропущены): {skipped}. Ошибок: {failed}.",
+  "restore.truncated":
+    "⚠️ Лимит {max} тем за раз; осталось {remaining} для следующего /restore.",
 
   "stop.no_active_session":
     "🛑 Агент не был запущен\n\nСначала создайте сессию командой /new или выберите существующую через /sessions.",

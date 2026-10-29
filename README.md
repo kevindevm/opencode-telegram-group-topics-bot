@@ -243,6 +243,7 @@ Any plain text message in a session topic is treated as a prompt when no blockin
 | `/commit`         | Commit session changes with a message                                    |
 | `/cost`           | Show session (incl. subagents) and daily spend                     |
 | `/close`          | Close this session topic                                                 |
+| `/restore`        | Restore open sessions as topics                                          |
 | `/cleanup`        | Delete subagent transcript topics                                        |
 | `/fork`           | Clone this session into a new topic                                      |
 | `/share`          | Export this session transcript as a file                                 |

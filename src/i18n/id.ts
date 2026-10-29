@@ -21,6 +21,7 @@ export const id: I18nDictionary = {
   "cmd.description.model": "Select model",
   "cmd.description.agent": "Select agent",
   "cmd.description.cleanup": "Hapus topik transkrip subagen",
+  "cmd.description.restore": "Pulihkan sesi terbuka sebagai topik",
   "cmd.description.opencode_start": "Mulai server OpenCode",
   "cmd.description.opencode_stop": "Hentikan server OpenCode",
   "cmd.description.recent": "Browse recent sessions across projects",
@@ -258,6 +259,15 @@ export const id: I18nDictionary = {
   "cleanup.result": "🧹 Cleanup complete. Checked: {inspected}, closed: {closed}, skipped: {skipped}, failed: {failed}.",
   "cleanup.subagents_none": "✅ Tidak ada topik subagen untuk dihapus.",
   "cleanup.subagents_result": "🧹 {deleted} topik subagen dihapus. Gagal: {failed}.",
+  "restore.requires_forum_general":
+    "⚠️ Jalankan /restore dari topik General di supergrup forum.",
+  "restore.list_failed": "⚠️ Tidak dapat memuat sesi dari server OpenCode.",
+  "restore.empty": "✅ Semua sesi terbaru sudah memiliki topik.",
+  "restore.progress": "⏳ Memulihkan {total} sesi sebagai topik…",
+  "restore.result":
+    "✅ {created} topik dipulihkan. Sudah tertaut (dilewati): {skipped}. Gagal: {failed}.",
+  "restore.truncated":
+    "⚠️ Batas {max} topik per jalan; {remaining} tersisa untuk /restore berikutnya.",
   "stop.no_active_session": "🛑 Agent belum dimulai\n\nBuat sesi dengan /new atau pilih melalui /sessions.",
   "stop.cancelled_interaction": "✅ Cancelled the current setup. You can now change defaults or start again.",
   "stop.in_progress": "🛑 Stream event dihentikan, mengirim sinyal pembatalan...\n\nMenunggu agent berhenti.",

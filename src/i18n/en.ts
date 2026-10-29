@@ -14,6 +14,7 @@ export const en = {
   "cmd.description.model": "Select model",
   "cmd.description.agent": "Select agent",
   "cmd.description.cleanup": "Delete subagent transcript topics",
+  "cmd.description.restore": "Restore open sessions as topics",
   "cmd.description.opencode_start": "Start OpenCode server",
   "cmd.description.opencode_stop": "Stop OpenCode server",
   "cmd.description.recent": "Browse recent sessions across projects",
@@ -323,6 +324,16 @@ export const en = {
   "cleanup.subagents_none": "✅ No subagent transcript topics to delete.",
   "cleanup.subagents_result":
     "🧹 Deleted {deleted} subagent transcript topics. Failed: {failed}.",
+
+  "restore.requires_forum_general":
+    "⚠️ Run /restore from the General topic of a forum-enabled supergroup.",
+  "restore.list_failed": "⚠️ Could not load sessions from the OpenCode server.",
+  "restore.empty": "✅ Every recent session already has a topic.",
+  "restore.progress": "⏳ Restoring {total} sessions as topics…",
+  "restore.result":
+    "✅ Restored {created} topics. Already bound (skipped): {skipped}. Failed: {failed}.",
+  "restore.truncated":
+    "⚠️ Limited to {max} topics per run; {remaining} left for the next /restore.",
 
   "stop.no_active_session":
     "🛑 Agent was not started\n\nCreate a session with /new or select one via /sessions.",

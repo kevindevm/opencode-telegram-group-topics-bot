@@ -71,6 +71,7 @@ import { diffCommand, commitCommand } from "./commands/diff.js";
 import { costCommand } from "./commands/cost.js";
 import { closeCommand } from "./commands/close.js";
 import { cleanupCommand } from "./commands/cleanup.js";
+import { restoreCommand } from "./commands/restore.js";
 import { createForkCommand } from "./commands/fork.js";
 import { shareCommand } from "./commands/share.js";
 import { createSavedCommand } from "./commands/saved.js";
@@ -2234,6 +2235,7 @@ export function createBot(): Bot<Context> {
   bot.command(BOT_COMMAND.COMMIT, commitCommand);
   bot.command(BOT_COMMAND.COST, costCommand);
   bot.command(BOT_COMMAND.CLOSE, closeCommand);
+  bot.command(BOT_COMMAND.RESTORE, restoreCommand);
   bot.command(BOT_COMMAND.CLEANUP, cleanupCommand);
   bot.command(BOT_COMMAND.FORK, createForkCommand({ ensureEventSubscription }));
   bot.command(BOT_COMMAND.SHARE, shareCommand);
