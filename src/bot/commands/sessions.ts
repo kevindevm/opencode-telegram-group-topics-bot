@@ -304,6 +304,11 @@ function resolveTopicModel(
  * given project. Returns true when the chat is a group General forum and the
  * session was handled there, false otherwise (DM/global callers continue with
  * their own selection flow). Shared by /sessions and /recent.
+ *
+ * With `keepMenu` (used by /recent) the caller's menu survives: no callback
+ * acks (the caller already acked fast, a late second ack throws "query too
+ * old"), no menu deletion, no interaction clear — so several topics can be
+ * opened from the same list instead of orphaning it on the first tap.
  */
 export async function openSessionInNewTopic(
   ctx: Context,
@@ -311,6 +316,7 @@ export async function openSessionInNewTopic(
   project: ProjectInfo,
   scopeKey: string,
   scope: { threadId?: number | null } | null,
+  options: { keepMenu?: boolean } = {},
 ): Promise<boolean> {
   const inGeneralForum = Boolean(ctx.chat && isGeneralForumScope(ctx));
   if (!inGeneralForum || !ctx.chat) {
@@ -342,8 +348,10 @@ export async function openSessionInNewTopic(
     })();
 
     if (existingLink) {
-      clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
-      await ctx.answerCallbackQuery();
+      if (!options.keepMenu) {
+        clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
+        await ctx.answerCallbackQuery();
+      }
       await ctx.reply(
         t(BOT_I18N_KEY.SESSIONS_BOUND_TOPIC_LINK, {
           title: session.title,
@@ -352,7 +360,9 @@ export async function openSessionInNewTopic(
         }),
         getThreadSendOptions(scope?.threadId ?? null),
       );
-      await ctx.deleteMessage().catch(() => {});
+      if (!options.keepMenu) {
+        await ctx.deleteMessage().catch(() => {});
+      }
       return true;
     }
   }
@@ -371,7 +381,9 @@ export async function openSessionInNewTopic(
       );
     } catch (error) {
       logger.error("[Sessions] Error creating forum topic for existing session", error);
-      await ctx.answerCallbackQuery();
+      if (!options.keepMenu) {
+        await ctx.answerCallbackQuery();
+      }
       if (getErrorText(error).includes(TELEGRAM_ERROR_MARKER.NOT_ENOUGH_RIGHTS_CREATE_TOPIC)) {
         await ctx.reply(
           t(BOT_I18N_KEY.NEW_TOPIC_CREATE_NO_RIGHTS),
@@ -383,7 +395,9 @@ export async function openSessionInNewTopic(
           getThreadSendOptions(scope?.threadId ?? null),
         );
       }
-      await ctx.deleteMessage().catch(() => {});
+      if (!options.keepMenu) {
+        await ctx.deleteMessage().catch(() => {});
+      }
       return null;
     }
   })();
@@ -428,7 +442,9 @@ export async function openSessionInNewTopic(
   });
 
   summaryAggregator.setSession(session.id);
-  clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
+  if (!options.keepMenu) {
+    clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
+  }
   clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, topicScopeKey);
 
   if (!pinnedMessageManager.isInitialized(topicScopeKey)) {
@@ -481,7 +497,9 @@ export async function openSessionInNewTopic(
     throw new Error("Unable to build topic link");
   }
 
-  await ctx.answerCallbackQuery();
+  if (!options.keepMenu) {
+    await ctx.answerCallbackQuery();
+  }
   await ctx.reply(
     t(BOT_I18N_KEY.SESSIONS_CREATED_TOPIC_LINK, {
       title: session.title,
@@ -490,7 +508,9 @@ export async function openSessionInNewTopic(
     }),
     getThreadSendOptions(scope?.threadId ?? null),
   );
-  await ctx.deleteMessage().catch(() => {});
+  if (!options.keepMenu) {
+    await ctx.deleteMessage().catch(() => {});
+  }
   return true;
 }
 

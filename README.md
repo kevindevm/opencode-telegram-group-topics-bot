@@ -102,7 +102,12 @@ Fork sync notes: [`FORK_SYNC.md`](./FORK_SYNC.md)
 Run OpenCode on the machine where the bot will live:
 
 ```bash
+# V1
 opencode serve
+# V2: use the background service (stable port + credentials).
+# A bare `opencode serve` binds a random port with a random password,
+# so the bot could never reach it.
+opencode service start
 ```
 
 Default API URL: `http://localhost:4096` (V1) or `http://127.0.0.1:49374` (V2, set `OPENCODE_SERVER_VERSION=v2`).
@@ -158,7 +163,7 @@ Config and runtime state live in the `opencode-group-topics-bot-data` volume (`O
 docker compose -f docker-compose.yml -f docker-compose.desktop.yml up -d --build
 ```
 
-On Docker Desktop the container cannot see host project paths or spawn `opencode` itself: run `opencode serve` on the host and prefer `/projects` paths that resolve inside the container (mount repos with an extra `volumes` entry if needed). `/opencode_start` and `/opencode_stop` are host-only features.
+On Docker Desktop the container cannot see host project paths or spawn `opencode` itself: run `opencode serve` (V1) or `opencode service start` (V2) on the host and prefer `/projects` paths that resolve inside the container (mount repos with an extra `volumes` entry if needed). `/opencode_start` and `/opencode_stop` are host-only features.
 
 Stable releases are published to `ghcr.io/kevindevm/opencode-telegram-group-topics-bot:<version>` and `ghcr.io/kevindevm/opencode-telegram-group-topics-bot:latest` for `linux/amd64` and `linux/arm64`. Release candidates receive only their exact version tag.
 
@@ -205,7 +210,7 @@ If that works, the group workspace is ready.
 
 ## Daily Workflow
 
-1. Start OpenCode with `opencode serve`, then start the bot.
+1. Start OpenCode (`opencode serve` on V1, `opencode service start` on V2), then start the bot.
 2. Open the Telegram group and go to **General**.
 3. Use `/projects` to confirm the selected repo.
 4. Use `/new` to create a new session topic.
@@ -442,7 +447,7 @@ npm run build && npm run lint && npm test
 
 **OpenCode server is unavailable**
 
-- Make sure `opencode serve` is running.
+- Make sure the OpenCode server is running (`opencode serve` on V1, `opencode service start` on V2; pair once with `opencode pair` if it asks for credentials).
 - Confirm `OPENCODE_API_URL` (and `OPENCODE_SERVER_VERSION` for V2) points to the correct address.
 
 **Cannot create new session topics**

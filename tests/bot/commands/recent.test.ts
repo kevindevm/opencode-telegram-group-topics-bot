@@ -188,6 +188,14 @@ describe("bot/commands/recent", () => {
 
     expect(mocked.switchToProjectMock).not.toHaveBeenCalled();
     expect(mocked.openSessionInNewTopicMock).toHaveBeenCalledTimes(1);
+    expect(mocked.openSessionInNewTopicMock).toHaveBeenCalledWith(
+      ctx,
+      expect.objectContaining({ id: "s1" }),
+      projectA,
+      expect.anything(),
+      expect.anything(),
+      { keepMenu: true },
+    );
   });
 
   it("switches projects before opening a foreign session topic", async () => {

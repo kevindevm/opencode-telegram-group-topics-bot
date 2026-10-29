@@ -28,8 +28,11 @@ export interface SessionInfo {
 }
 
 export interface ServerProcessInfo {
-  pid: number;
+  /** Null when the server runs as the v2 background service (no child PID). */
+  pid: number | null;
   startTime: string;
+  /** True when managed through `opencode service` instead of a spawned `serve`. */
+  viaService?: boolean;
 }
 
 export interface SessionDirectoryCacheInfo {
@@ -380,11 +383,12 @@ function sanitizeServerProcessInfo(value: unknown): ServerProcessInfo | undefine
 
   const pid = typeof value.pid === "number" ? value.pid : null;
   const startTime = typeof value.startTime === "string" ? value.startTime : "";
-  if (pid === null || !startTime) {
+  const viaService = value.viaService === true;
+  if ((!viaService && pid === null) || !startTime) {
     return undefined;
   }
 
-  return { pid, startTime };
+  return { pid, startTime, viaService };
 }
 
 function isValidIsoDatetime(value: unknown): value is string {

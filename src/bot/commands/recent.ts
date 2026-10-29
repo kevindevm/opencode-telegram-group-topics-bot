@@ -230,7 +230,7 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
       project = entry.project;
     }
 
-    if (await openSessionInNewTopic(ctx, session, project, scopeKey, scope)) {
+    if (await openSessionInNewTopic(ctx, session, project, scopeKey, scope, { keepMenu: true })) {
       return true;
     }
 

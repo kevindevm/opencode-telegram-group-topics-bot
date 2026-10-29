@@ -1,10 +1,16 @@
 import { spawn, exec, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import { getServerProcess, setServerProcess, clearServerProcess } from "../settings/manager.js";
+import { config } from "../config.js";
+import { opencodeClient } from "../opencode/client.js";
 import { logger } from "../utils/logger.js";
 import type { ProcessState, ProcessOperationResult, ProcessManagerInterface } from "./types.js";
 
 const execAsync = promisify(exec);
+
+/** How long to wait for the background service to answer health after start. */
+const SERVICE_READY_WAIT_MS = 15000;
+const SERVICE_READY_POLL_MS = 500;
 
 /**
  * Singleton manager for OpenCode server process
@@ -17,6 +23,7 @@ class ProcessManager implements ProcessManagerInterface {
     pid: null,
     startTime: null,
     isRunning: false,
+    viaService: false,
   };
 
   /**
@@ -28,6 +35,36 @@ class ProcessManager implements ProcessManagerInterface {
 
     if (!savedProcess) {
       logger.debug("[ProcessManager] No saved process found in settings");
+      return;
+    }
+
+    if (savedProcess.viaService === true) {
+      // No PID to check: the v2 background service owns its process.
+      // Verify it answers health, otherwise drop it so auto-start relaunches.
+      try {
+        const { data, error } = await opencodeClient.global.health();
+        if (!error && data?.healthy) {
+          logger.info("[ProcessManager] Restored managed background service (v2)");
+          this.state = {
+            process: null,
+            pid: null,
+            startTime: new Date(savedProcess.startTime),
+            isRunning: true,
+            viaService: true,
+          };
+          return;
+        }
+      } catch {
+        // Unreachable: fall through to cleanup below.
+      }
+      logger.warn("[ProcessManager] Managed background service is unreachable, cleaning up");
+      clearServerProcess();
+      return;
+    }
+
+    if (savedProcess.pid === null) {
+      logger.warn("[ProcessManager] Saved process has no PID, cleaning up");
+      clearServerProcess();
       return;
     }
 
@@ -44,6 +81,7 @@ class ProcessManager implements ProcessManagerInterface {
         pid: savedProcess.pid,
         startTime: new Date(savedProcess.startTime),
         isRunning: true,
+        viaService: false,
       };
     } else {
       logger.warn(`[ProcessManager] Process PID=${savedProcess.pid} is dead, cleaning up`);
@@ -78,8 +116,14 @@ class ProcessManager implements ProcessManagerInterface {
   }
 
   private async doStart(): Promise<ProcessOperationResult> {
+    // V2 boots through the background service (`opencode service start`):
+    // a bare `opencode serve` binds a random port with a random password,
+    // so the bot could never reach it at the configured URL.
+    if (config.opencode.serverVersion === "v2") {
+      return this.startViaService();
+    }
     try {
-      logger.info("[ProcessManager] Starting OpenCode server process...");
+      logger.info("[ProcessManager] Starting OpenCode server process (v1 `serve`)...");
 
       const isWindows = process.platform === "win32";
       const command = isWindows ? "cmd.exe" : "opencode";
@@ -131,12 +175,14 @@ class ProcessManager implements ProcessManagerInterface {
         pid: childProcess.pid,
         startTime,
         isRunning: true,
+        viaService: false,
       };
 
       // Persist to settings.json
       setServerProcess({
         pid: childProcess.pid,
         startTime: startTime.toISOString(),
+        viaService: false,
       });
 
       logger.info(`[ProcessManager] OpenCode server started with PID=${childProcess.pid}`);
@@ -148,6 +194,71 @@ class ProcessManager implements ProcessManagerInterface {
       this.cleanup();
       return { success: false, error: errorMessage };
     }
+  }
+
+  /**
+   * Start the v2 background service (`opencode service start`) and wait
+   * until it answers health at the configured URL. The service owns its
+   * process (stable port from its own config), so there is no child PID
+   * to track — `service stop` tears it down.
+   */
+  private async startViaService(): Promise<ProcessOperationResult> {
+    try {
+      logger.info("[ProcessManager] Starting OpenCode background service (v2)...");
+      // exec runs through the shell, which resolves npm-installed shims
+      // on both Windows (cmd.exe) and Unix-like systems.
+      const { stdout, stderr } = await execAsync("opencode service start", {
+        timeout: 30_000,
+      });
+      const output = `${stdout ?? ""}\n${stderr ?? ""}`.trim();
+      if (output) {
+        logger.debug(`[ProcessManager] service start output: ${output}`);
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logger.error("[ProcessManager] Failed to start background service:", err);
+      this.cleanup();
+      return { success: false, error: errorMessage };
+    }
+
+    if (!(await this.waitForHealthy(SERVICE_READY_WAIT_MS))) {
+      logger.error("[ProcessManager] Background service did not become healthy in time");
+      this.cleanup();
+      return { success: false, error: "Background service did not become healthy in time" };
+    }
+
+    const startTime = new Date();
+    this.state = {
+      process: null,
+      pid: null,
+      startTime,
+      isRunning: true,
+      viaService: true,
+    };
+    setServerProcess({
+      pid: null,
+      startTime: startTime.toISOString(),
+      viaService: true,
+    });
+
+    logger.info("[ProcessManager] OpenCode background service is healthy");
+    return { success: true };
+  }
+
+  private async waitForHealthy(timeoutMs: number): Promise<boolean> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      try {
+        const { data, error } = await opencodeClient.global.health();
+        if (!error && data?.healthy) {
+          return true;
+        }
+      } catch {
+        // Not ready yet.
+      }
+      await new Promise((resolve) => setTimeout(resolve, SERVICE_READY_POLL_MS));
+    }
+    return false;
   }
 
   /**
@@ -164,19 +275,48 @@ class ProcessManager implements ProcessManagerInterface {
       }
     }
 
-    if (!this.state.isRunning || !this.state.pid) {
+    if (!this.state.isRunning) {
       return {
         success: false,
         error: "Process not running",
       };
     }
 
+    if (this.state.viaService) {
+      this.transitionInProgress = this.doStopService();
+      try {
+        return await this.transitionInProgress;
+      } finally {
+        this.transitionInProgress = null;
+      }
+    }
+
     const pid = this.state.pid;
+    if (pid === null) {
+      return {
+        success: false,
+        error: "Process not running",
+      };
+    }
     this.transitionInProgress = this.doStop(timeoutMs, pid);
     try {
       return await this.transitionInProgress;
     } finally {
       this.transitionInProgress = null;
+    }
+  }
+
+  private async doStopService(): Promise<ProcessOperationResult> {
+    try {
+      logger.info("[ProcessManager] Stopping OpenCode background service (v2)...");
+      await execAsync("opencode service stop", { timeout: 30_000 });
+      this.cleanup();
+      logger.info("[ProcessManager] OpenCode background service stopped");
+      return { success: true };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logger.error("[ProcessManager] Failed to stop background service:", err);
+      return { success: false, error: errorMessage };
     }
   }
 
@@ -275,7 +415,17 @@ class ProcessManager implements ProcessManagerInterface {
    * Validates that the process with stored PID is actually alive
    */
   isRunning(): boolean {
-    if (!this.state.isRunning || !this.state.pid) {
+    if (!this.state.isRunning) {
+      return false;
+    }
+
+    // The background service owns its process: nothing PID-checkable here.
+    // Liveness was verified at start/restore; the stop path tears it down.
+    if (this.state.viaService) {
+      return true;
+    }
+
+    if (!this.state.pid) {
       return false;
     }
 
@@ -360,6 +510,7 @@ class ProcessManager implements ProcessManagerInterface {
       pid: null,
       startTime: null,
       isRunning: false,
+      viaService: false,
     };
     clearServerProcess();
   }
