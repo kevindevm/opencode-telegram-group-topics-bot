@@ -328,6 +328,10 @@ export const en = {
   "restore.requires_forum_general":
     "⚠️ Run /restore from the General topic of a forum-enabled supergroup.",
   "restore.list_failed": "⚠️ Could not load sessions from the OpenCode server.",
+  "restore.menu_title":
+    "📋 Open sessions — pick which ones to restore as topics (● running, ○ idle).\nAlready bound (skipped): {skipped}.",
+  "restore.confirm_button": "✅ Create {count}",
+  "restore.no_selection": "⚠️ Select at least one session first.",
   "restore.empty": "✅ Every recent session already has a topic.",
   "restore.progress": "⏳ Restoring {total} sessions as topics…",
   "restore.result":

@@ -261,6 +261,10 @@ export const zh: I18nDictionary = {
 
   "restore.requires_forum_general": "⚠️ 请在论坛超级群组的 General 话题中运行 /restore。",
   "restore.list_failed": "⚠️ 无法从 OpenCode 服务器加载会话。",
+  "restore.menu_title":
+    "📋 打开的会话 — 选择要恢复为话题的会话（● 运行中，○ 空闲）。\n已绑定（已跳过）: {skipped}。",
+  "restore.confirm_button": "✅ 创建 {count} 个",
+  "restore.no_selection": "⚠️ 请至少选择一个会话。",
   "restore.empty": "✅ 所有最近的会话都已有话题。",
   "restore.progress": "⏳ 正在将 {total} 个会话恢复为话题…",
   "restore.result":

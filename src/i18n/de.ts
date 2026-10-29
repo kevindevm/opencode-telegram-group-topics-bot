@@ -298,6 +298,10 @@ export const de: I18nDictionary = {
   "restore.requires_forum_general":
     "⚠️ Führe /restore im General-Thema einer Foren-Supergruppe aus.",
   "restore.list_failed": "⚠️ Sessions konnten nicht vom OpenCode-Server geladen werden.",
+  "restore.menu_title":
+    "📋 Offene Sessions — wähle, welche als Themen wiederhergestellt werden (● läuft, ○ inaktiv).\nBereits verknüpft (übersprungen): {skipped}.",
+  "restore.confirm_button": "✅ {count} erstellen",
+  "restore.no_selection": "⚠️ Wähle mindestens eine Session aus.",
   "restore.empty": "✅ Alle aktuellen Sessions haben bereits ein Thema.",
   "restore.progress": "⏳ Stelle {total} Sessions als Themen wieder her…",
   "restore.result":

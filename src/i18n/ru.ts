@@ -289,6 +289,10 @@ export const ru: I18nDictionary = {
   "restore.requires_forum_general":
     "⚠️ Запусти /restore из темы General супергруппы с форумом.",
   "restore.list_failed": "⚠️ Не удалось загрузить сессии с сервера OpenCode.",
+  "restore.menu_title":
+    "📋 Открытые сессии — выбери, какие восстановить как темы (● работает, ○ простаивает).\nУже привязаны (пропущены): {skipped}.",
+  "restore.confirm_button": "✅ Создать: {count}",
+  "restore.no_selection": "⚠️ Выбери хотя бы одну сессию.",
   "restore.empty": "✅ У всех недавних сессий уже есть тема.",
   "restore.progress": "⏳ Восстанавливаю {total} сессий как темы…",
   "restore.result":

@@ -71,7 +71,7 @@ import { diffCommand, commitCommand } from "./commands/diff.js";
 import { costCommand } from "./commands/cost.js";
 import { closeCommand } from "./commands/close.js";
 import { cleanupCommand } from "./commands/cleanup.js";
-import { restoreCommand } from "./commands/restore.js";
+import { handleRestoreCallback, restoreCommand } from "./commands/restore.js";
 import { createForkCommand } from "./commands/fork.js";
 import { shareCommand } from "./commands/share.js";
 import { createSavedCommand } from "./commands/saved.js";
@@ -2296,6 +2296,7 @@ export function createBot(): Bot<Context> {
       const handledSession = await handleSessionSelect(ctx);
       const handledBackgroundSession = await handleBackgroundSessionOpen(ctx);
       const handledRecent = await handleRecentSelect(ctx);
+      const handledRestore = await handleRestoreCallback(ctx);
       const handledProject = await handleProjectSelect(ctx);
       const handledOpen = await handleOpenCallback(ctx);
       const handledTaskList = await handleTaskListCallback(ctx);
@@ -2314,7 +2315,7 @@ export function createBot(): Bot<Context> {
       });
 
       logger.debug(
-        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, queuedCancel=${handledQueuedCancel}, queuedFront=${handledQueuedFront}, queuedSteer=${handledQueuedSteer}, queue=${handledQueue}, trust=${handledTrust}, toolBackground=${handledToolBackground}, display=${handledDisplay}, session=${handledSession}, backgroundSession=${handledBackgroundSession}, recent=${handledRecent}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
+        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, queuedCancel=${handledQueuedCancel}, queuedFront=${handledQueuedFront}, queuedSteer=${handledQueuedSteer}, queue=${handledQueue}, trust=${handledTrust}, toolBackground=${handledToolBackground}, display=${handledDisplay}, session=${handledSession}, backgroundSession=${handledBackgroundSession}, recent=${handledRecent}, restore=${handledRestore}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
       );
 
       if (
@@ -2329,6 +2330,7 @@ export function createBot(): Bot<Context> {
         !handledSession &&
         !handledBackgroundSession &&
         !handledRecent &&
+        !handledRestore &&
         !handledProject &&
         !handledOpen &&
         !handledTaskList &&

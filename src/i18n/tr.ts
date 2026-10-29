@@ -262,6 +262,10 @@ export const tr: I18nDictionary = {
   "restore.requires_forum_general":
     "⚠️ /restore komutunu forum özellikli bir süper grubun General konusunda çalıştır.",
   "restore.list_failed": "⚠️ Oturumlar OpenCode sunucusundan yüklenemedi.",
+  "restore.menu_title":
+    "📋 Açık oturumlar — hangilerinin konu olarak geri yükleneceğini seç (● çalışıyor, ○ boşta).\nZaten bağlı (atlandı): {skipped}.",
+  "restore.confirm_button": "✅ {count} oluştur",
+  "restore.no_selection": "⚠️ En az bir oturum seç.",
   "restore.empty": "✅ Tüm güncel oturumların zaten konusu var.",
   "restore.progress": "⏳ {total} oturum konu olarak geri yükleniyor…",
   "restore.result":

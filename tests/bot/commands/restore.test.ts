@@ -112,17 +112,18 @@ vi.mock("../../../src/bot/scope.js", () => ({
   createScopeKeyFromParams: ({ chatId, threadId }: { chatId: number; threadId: number }) =>
     `chat:${chatId}:${threadId}`,
   getScopeFromContext: () => ({ key: "chat:-100123:1", threadId: 1 }),
+  getScopeKeyFromContext: () => "chat:-100123:1",
   getThreadSendOptions: (threadId: number | null) =>
     threadId === null ? {} : { message_thread_id: threadId },
 }));
 
-import { restoreCommand } from "../../../src/bot/commands/restore.js";
+import { handleRestoreCallback, restoreCommand } from "../../../src/bot/commands/restore.js";
 import { t } from "../../../src/i18n/index.js";
 
 function createCommandContext(): Context {
   return {
     chat: { id: -100123, type: "supergroup" },
-    reply: vi.fn().mockResolvedValue(undefined),
+    reply: vi.fn().mockResolvedValue({ message_id: 50 }),
     api: {
       createForumTopic: vi.fn().mockResolvedValue({ message_thread_id: 10 }),
       sendMessage: vi.fn().mockResolvedValue({ message_id: 99 }),
@@ -130,7 +131,23 @@ function createCommandContext(): Context {
   } as unknown as Context;
 }
 
-function listSession(id: string, title: string, updated = 1000) {
+function createCallbackContext(data: string, messageId = 50): Context {
+  return {
+    chat: { id: -100123, type: "supergroup" },
+    callbackQuery: { data, message: { message_id: messageId } },
+    answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+    editMessageText: vi.fn().mockResolvedValue(undefined),
+    deleteMessage: vi.fn().mockResolvedValue(undefined),
+    reply: vi.fn().mockResolvedValue(undefined),
+    api: {
+      createForumTopic: vi.fn().mockResolvedValue({ message_thread_id: 10 }),
+      sendMessage: vi.fn().mockResolvedValue({ message_id: 99 }),
+      editMessageText: vi.fn().mockResolvedValue(true),
+    },
+  } as unknown as Context;
+}
+
+function listSession(id: string, title: string, updated = Date.now()) {
   return { id, title, directory: "/repo/a", time: { updated, created: 1 } };
 }
 
@@ -192,12 +209,14 @@ describe("bot/commands/restore", () => {
     expect(ctx.api.createForumTopic).not.toHaveBeenCalled();
   });
 
-  it("creates topics for unbound sessions, running first, and skips bound ones", async () => {
+  it("posts a selection menu with running sessions pre-selected", async () => {
+    const now = Date.now();
     mocked.listMock.mockResolvedValue({
       data: [
-        listSession("s-idle", "idle work", 3000),
-        listSession("s-bound", "already there", 4000),
-        listSession("s-busy", "active work", 1000),
+        listSession("s-idle", "idle work", now - 1000),
+        listSession("s-bound", "already there", now - 2000),
+        listSession("s-busy", "active work", now - 3000),
+        listSession("s-stale", "old work", now - 48 * 60 * 60 * 1000),
       ],
       error: null,
     });
@@ -209,28 +228,53 @@ describe("bot/commands/restore", () => {
       id === "s-bound" ? { sessionId: "s-bound" } : null,
     );
     const ctx = createCommandContext();
-    const createForumTopic = ctx.api.createForumTopic as ReturnType<typeof vi.fn>;
-    createForumTopic
-      .mockResolvedValueOnce({ message_thread_id: 11 })
-      .mockResolvedValueOnce({ message_thread_id: 12 });
 
     await restoreCommand(ctx as never);
 
-    expect(createForumTopic).toHaveBeenCalledTimes(2);
-    expect(mocked.registerBindingMock).toHaveBeenCalledTimes(2);
-    expect(mocked.registerBindingMock).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ sessionId: "s-busy", threadId: 11 }),
+    expect(ctx.reply).toHaveBeenCalledWith(
+      t("restore.menu_title", { skipped: 1 }),
+      expect.objectContaining({ reply_markup: expect.anything() }),
     );
-    expect(mocked.registerBindingMock).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ sessionId: "s-idle", threadId: 12 }),
+
+    // Deselect the busy session: the stale one was never pre-selected,
+    // so confirming restores only the idle session.
+    const toggleCtx = createCallbackContext("restore:toggle:s-busy");
+    expect(await handleRestoreCallback(toggleCtx as never)).toBe(true);
+
+    const confirmCtx = createCallbackContext("restore:confirm");
+    const createForumTopic = confirmCtx.api.createForumTopic as ReturnType<typeof vi.fn>;
+    createForumTopic.mockResolvedValueOnce({ message_thread_id: 11 });
+    await handleRestoreCallback(confirmCtx as never);
+
+    expect(createForumTopic).toHaveBeenCalledTimes(1);
+    expect(mocked.registerBindingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "s-idle", threadId: 11 }),
     );
-    expect(ctx.reply).toHaveBeenLastCalledWith(
-      expect.stringContaining(
-        t("restore.result", { created: 2, skipped: 1, failed: 0 }),
-      ),
-      { message_thread_id: 1 },
+    const editMessageText = confirmCtx.api.editMessageText as ReturnType<typeof vi.fn>;
+    expect(editMessageText).toHaveBeenCalledWith(
+      -100123,
+      99,
+      expect.stringContaining(t("restore.result", { created: 1, skipped: 1, failed: 0 })),
+    );
+  });
+
+  it("asks for a selection when everything is deselected", async () => {
+    mocked.listMock.mockResolvedValue({
+      data: [listSession("s1", "one")],
+      error: null,
+    });
+    const ctx = createCommandContext();
+    await restoreCommand(ctx as never);
+
+    await handleRestoreCallback(createCallbackContext("restore:toggle:s1") as never);
+    const confirmCtx = createCallbackContext("restore:confirm");
+    await handleRestoreCallback(confirmCtx as never);
+
+    expect(confirmCtx.api.createForumTopic).not.toHaveBeenCalled();
+    expect(confirmCtx.api.sendMessage).toHaveBeenCalledWith(
+      -100123,
+      t("restore.no_selection"),
+      expect.anything(),
     );
   });
 
@@ -240,19 +284,20 @@ describe("bot/commands/restore", () => {
       error: null,
     });
     const ctx = createCommandContext();
-    (ctx.api.createForumTopic as ReturnType<typeof vi.fn>)
-      .mockRejectedValueOnce(new Error("Too many requests"))
-      .mockResolvedValueOnce({ message_thread_id: 13 });
-
     await restoreCommand(ctx as never);
 
+    const confirmCtx = createCallbackContext("restore:confirm");
+    (confirmCtx.api.createForumTopic as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error("Too many requests"))
+      .mockResolvedValueOnce({ message_thread_id: 13 });
+    await handleRestoreCallback(confirmCtx as never);
+
     expect(mocked.registerBindingMock).toHaveBeenCalledTimes(1);
-    expect(ctx.reply).toHaveBeenLastCalledWith(
-      expect.stringContaining(
-        t("restore.result", { created: 1, skipped: 0, failed: 1 }),
-      ),
-      { message_thread_id: 1 },
+    const editMessageText = confirmCtx.api.editMessageText as ReturnType<typeof vi.fn>;
+    const resultCall = editMessageText.mock.calls.find((call) =>
+      String(call[2]).includes(t("restore.result", { created: 1, skipped: 0, failed: 1 })),
     );
+    expect(resultCall).toBeDefined();
   });
 
   it("reports a server list failure instead of creating anything", async () => {

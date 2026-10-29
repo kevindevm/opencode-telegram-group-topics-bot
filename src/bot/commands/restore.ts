@@ -1,4 +1,4 @@
-import { CommandContext, Context } from "grammy";
+import { CommandContext, Context, InlineKeyboard } from "grammy";
 import { opencodeClient } from "../../opencode/client.js";
 import { getStoredAgent, resolveProjectAgent } from "../../agent/manager.js";
 import { getStoredModel } from "../../model/manager.js";
@@ -11,6 +11,7 @@ import {
   setCurrentAgent,
   setCurrentModel,
   setCurrentProject,
+  type ProjectInfo,
 } from "../../settings/manager.js";
 import { summaryAggregator } from "../../summary/aggregator.js";
 import { pinnedMessageManager } from "../../pinned/manager.js";
@@ -22,6 +23,7 @@ import {
   SCOPE_CONTEXT,
   createScopeKeyFromParams,
   getScopeFromContext,
+  getScopeKeyFromContext,
   getThreadSendOptions,
 } from "../scope.js";
 import { BOT_I18N_KEY } from "../constants.js";
@@ -29,6 +31,12 @@ import { getTopicBindingBySessionId, registerTopicSessionBinding } from "../../t
 import { TOPIC_COLORS } from "../../topic/colors.js";
 import { formatTopicTitle } from "../../topic/title-format.js";
 import { buildTopicMessageLink } from "../utils/topic-link.js";
+import {
+  appendInlineMenuCancelButton,
+  clearActiveInlineMenu,
+  ensureActiveInlineMenu,
+  replyWithInlineMenu,
+} from "../handlers/inline-menu.js";
 import {
   isGeneralForumScope,
   resolveTopicModel,
@@ -41,23 +49,94 @@ import { logger } from "../../utils/logger.js";
 const RESTORE_LIST_LIMIT = 25;
 /** Upper bound of topics created per run: forum topic creation is rate-limited. */
 const MAX_RESTORE_TOPICS_PER_RUN = 10;
+/** Sessions touched within this window come pre-selected; older ones are shown unselected. */
+const RESTORE_RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Breathing room between creations so a batch does not trip flood control. */
 const RESTORE_CREATE_DELAY_MS = 1500;
+/** Selection menus never outlive this. */
+const RESTORE_MENU_TTL_MS = 5 * 60 * 1000;
+
+const RESTORE_TOGGLE_PREFIX = "restore:toggle:";
+const RESTORE_CONFIRM_CALLBACK = "restore:confirm";
 
 interface RestorableSession extends SessionTopicTarget {
   updatedAt: number;
   running: boolean;
 }
 
+interface PendingRestoreMenu {
+  chatId: number;
+  threadId: number | null;
+  scopeKey: string;
+  project: ProjectInfo;
+  candidates: RestorableSession[];
+  selected: Set<string>;
+  skipped: number;
+  expiresAt: number;
+}
+
+const pendingRestoreMenus = new Map<string, PendingRestoreMenu>();
+
+function menuKey(scopeKey: string, messageId: number): string {
+  return `${scopeKey}:${messageId}`;
+}
+
+function rememberMenu(scopeKey: string, messageId: number, menu: PendingRestoreMenu): void {
+  if (pendingRestoreMenus.size >= 20) {
+    const oldest = pendingRestoreMenus.keys().next();
+    if (!oldest.done) {
+      pendingRestoreMenus.delete(oldest.value);
+    }
+  }
+  pendingRestoreMenus.set(menuKey(scopeKey, messageId), menu);
+  setTimeout(() => {
+    pendingRestoreMenus.delete(menuKey(scopeKey, messageId));
+  }, RESTORE_MENU_TTL_MS).unref?.();
+}
+
+function takeMenu(scopeKey: string, messageId: number): PendingRestoreMenu | null {
+  const key = menuKey(scopeKey, messageId);
+  const menu = pendingRestoreMenus.get(key) ?? null;
+  if (menu && menu.expiresAt > Date.now()) {
+    return menu;
+  }
+  pendingRestoreMenus.delete(key);
+  return null;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function buildRestoreKeyboard(menu: PendingRestoreMenu): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  menu.candidates.forEach((session, index) => {
+    const mark = menu.selected.has(session.id) ? "✅" : "⬜";
+    const activity = session.running ? "●" : "○";
+    keyboard
+      .text(
+        `${mark} ${index + 1}. ${session.title} ${activity}`,
+        `${RESTORE_TOGGLE_PREFIX}${session.id}`,
+      )
+      .row();
+  });
+  keyboard
+    .text(t("restore.confirm_button", { count: menu.selected.size }), RESTORE_CONFIRM_CALLBACK)
+    .row();
+  return keyboard;
+}
+
+function formatRestoreMenuText(menu: PendingRestoreMenu): string {
+  return t("restore.menu_title", { skipped: menu.skipped });
+}
+
 /**
- * Recreates one topic per open session of the current project. Sessions
- * that already have a bound topic are skipped, never duplicated. Runs from
- * the General topic only, sequentially, so a batch of PC tabs comes back
- * without tripping Telegram flood control.
+ * Shows every unbound recent session of the current project and lets the
+ * user pick which ones become topics. Sessions the server reports as
+ * running — plus anything touched in the last 24h — come pre-selected;
+ * older ones are listed unselected so nothing ancient is restored by
+ * accident. The opposite of /cleanup: only real session tabs, never
+ * subagent transcripts (those are child sessions and never listed).
  */
 export async function restoreCommand(ctx: CommandContext<Context>): Promise<void> {
   const scope = getScopeFromContext(ctx);
@@ -111,14 +190,14 @@ export async function restoreCommand(ctx: CommandContext<Context>): Promise<void
     return;
   }
 
-  const unbound: RestorableSession[] = [];
+  const candidates: RestorableSession[] = [];
   let skipped = 0;
   for (const session of sessions) {
     if (getTopicBindingBySessionId(session.id)) {
       skipped += 1;
       continue;
     }
-    unbound.push({
+    candidates.push({
       id: session.id,
       title: session.title,
       model: session.model,
@@ -128,32 +207,131 @@ export async function restoreCommand(ctx: CommandContext<Context>): Promise<void
     });
   }
 
-  if (unbound.length === 0) {
+  if (candidates.length === 0) {
     await ctx.reply(t("restore.empty"), threadOptions);
     return;
   }
 
-  // Running sessions first, then newest: the active PC tabs come back first.
-  unbound.sort((a, b) => {
+  // Running sessions first, then newest: the active tabs surface on top.
+  candidates.sort((a, b) => {
     if (a.running !== b.running) {
       return a.running ? -1 : 1;
     }
     return b.updatedAt - a.updatedAt;
   });
 
-  const batch = unbound.slice(0, MAX_RESTORE_TOPICS_PER_RUN);
-  const remaining = unbound.length - batch.length;
-  await ctx.reply(t("restore.progress", { total: batch.length }), threadOptions);
+  const freshBefore = Date.now() - RESTORE_RECENT_WINDOW_MS;
+  const menu: PendingRestoreMenu = {
+    chatId: ctx.chat.id,
+    threadId: scope?.threadId ?? null,
+    scopeKey,
+    project: currentProject,
+    candidates,
+    selected: new Set(
+      candidates
+        .filter((session) => session.running || session.updatedAt >= freshBefore)
+        .slice(0, MAX_RESTORE_TOPICS_PER_RUN)
+        .map((session) => session.id),
+    ),
+    skipped,
+    expiresAt: Date.now() + RESTORE_MENU_TTL_MS,
+  };
+
+  const messageId = await replyWithInlineMenu(ctx, {
+    menuKind: "restore",
+    text: formatRestoreMenuText(menu),
+    keyboard: buildRestoreKeyboard(menu),
+  });
+  rememberMenu(scopeKey, messageId, menu);
+}
+
+export async function handleRestoreCallback(ctx: Context): Promise<boolean> {
+  const data = ctx.callbackQuery?.data;
+  if (!data) {
+    return false;
+  }
+
+  const isToggle = data.startsWith(RESTORE_TOGGLE_PREFIX);
+  if (!isToggle && data !== RESTORE_CONFIRM_CALLBACK) {
+    return false;
+  }
+
+  const isActive = await ensureActiveInlineMenu(ctx, "restore");
+  if (!isActive) {
+    return true;
+  }
+
+  const scopeKey = getScopeKeyFromContext(ctx);
+  const message = ctx.callbackQuery?.message;
+  const messageId =
+    message && "message_id" in message && typeof message.message_id === "number"
+      ? message.message_id
+      : null;
+  if (messageId === null) {
+    return true;
+  }
+
+  const menu = takeMenu(scopeKey, messageId);
+  if (!menu) {
+    await ctx.answerCallbackQuery({ text: t("inline.inactive_callback"), show_alert: true });
+    return true;
+  }
+
+  if (isToggle) {
+    const sessionId = data.slice(RESTORE_TOGGLE_PREFIX.length);
+    if (menu.selected.has(sessionId)) {
+      menu.selected.delete(sessionId);
+    } else if (menu.candidates.some((session) => session.id === sessionId)) {
+      menu.selected.add(sessionId);
+    }
+    rememberMenu(scopeKey, messageId, menu);
+    try {
+      await ctx.editMessageText(formatRestoreMenuText(menu), {
+        reply_markup: appendInlineMenuCancelButton(buildRestoreKeyboard(menu), "restore"),
+      });
+    } catch (error) {
+      logger.debug("[Restore] Failed to refresh selection menu", error);
+    }
+    await ctx.answerCallbackQuery().catch(() => {});
+    return true;
+  }
+
+  // Confirm: lock the menu and create one topic per selected session.
+  pendingRestoreMenus.delete(menuKey(scopeKey, messageId));
+  clearActiveInlineMenu("restore_confirmed", scopeKey);
+  await ctx.answerCallbackQuery().catch(() => {});
+  await ctx.deleteMessage().catch(() => {});
+
+  const selected = menu.candidates.filter((session) => menu.selected.has(session.id));
+  if (selected.length === 0) {
+    await ctx.api
+      .sendMessage(
+        menu.chatId,
+        t("restore.no_selection"),
+        getThreadSendOptions(menu.threadId),
+      )
+      .catch(() => {});
+    return true;
+  }
+
+  const batch = selected.slice(0, MAX_RESTORE_TOPICS_PER_RUN);
+  const remaining = selected.length - batch.length;
+  const progressMessage = await ctx.api
+    .sendMessage(
+      menu.chatId,
+      t("restore.progress", { total: batch.length }),
+      getThreadSendOptions(menu.threadId),
+    )
+    .catch(() => null);
 
   const created: Array<{ title: string; url: string | null }> = [];
   let failed = 0;
-  const chatId = ctx.chat.id;
 
   for (let index = 0; index < batch.length; index++) {
     const session = batch[index]!;
     try {
       const createdTopic = await ctx.api.createForumTopic(
-        chatId,
+        menu.chatId,
         formatTopicTitle(
           formatSessionDisplayTitle(session.title),
           formatSessionDisplayTitle(session.title),
@@ -162,7 +340,7 @@ export async function restoreCommand(ctx: CommandContext<Context>): Promise<void
       );
       const topicThreadId = createdTopic.message_thread_id;
       const topicScopeKey = createScopeKeyFromParams({
-        chatId,
+        chatId: menu.chatId,
         threadId: topicThreadId,
         context: SCOPE_CONTEXT.GROUP_TOPIC,
       });
@@ -170,38 +348,38 @@ export async function restoreCommand(ctx: CommandContext<Context>): Promise<void
       const sessionInfo: SessionInfo = {
         id: session.id,
         title: session.title,
-        directory: currentProject.worktree,
+        directory: menu.project.worktree,
       };
-      setCurrentProject(currentProject, topicScopeKey);
+      setCurrentProject(menu.project, topicScopeKey);
       setCurrentSession(sessionInfo, topicScopeKey);
       const sessionAgent =
         session.agent && session.agent.trim().length > 0
           ? session.agent
-          : await resolveProjectAgent(getStoredAgent(scopeKey), scopeKey);
+          : await resolveProjectAgent(getStoredAgent(menu.scopeKey), menu.scopeKey);
       setCurrentAgent(sessionAgent, topicScopeKey);
-      setCurrentModel(resolveTopicModel(session, scopeKey), topicScopeKey);
+      setCurrentModel(resolveTopicModel(session, menu.scopeKey), topicScopeKey);
 
       registerTopicSessionBinding({
         scopeKey: topicScopeKey,
-        chatId,
+        chatId: menu.chatId,
         threadId: topicThreadId,
         sessionId: session.id,
-        projectId: currentProject.id,
-        projectWorktree: currentProject.worktree,
+        projectId: menu.project.id,
+        projectWorktree: menu.project.worktree,
         topicName: formatTopicTitle(session.title, session.title),
         status: TOPIC_SESSION_STATUS.ACTIVE,
       });
 
       summaryAggregator.setSession(session.id);
       if (!pinnedMessageManager.isInitialized(topicScopeKey)) {
-        pinnedMessageManager.initialize(ctx.api, chatId, topicScopeKey, topicThreadId);
+        pinnedMessageManager.initialize(ctx.api, menu.chatId, topicScopeKey, topicThreadId);
       }
-      keyboardManager.initialize(ctx.api, chatId, topicScopeKey);
+      keyboardManager.initialize(ctx.api, menu.chatId, topicScopeKey);
       try {
         await pinnedMessageManager.onSessionChange(session.id, session.title, topicScopeKey);
         await pinnedMessageManager.loadContextFromHistory(
           session.id,
-          currentProject.worktree,
+          menu.project.worktree,
           topicScopeKey,
         );
       } catch (error) {
@@ -212,7 +390,10 @@ export async function restoreCommand(ctx: CommandContext<Context>): Promise<void
       }
 
       const topicModel = getStoredModel(topicScopeKey);
-      const topicAgent = await resolveProjectAgent(getStoredAgent(topicScopeKey), topicScopeKey);
+      const topicAgent = await resolveProjectAgent(
+        getStoredAgent(topicScopeKey),
+        topicScopeKey,
+      );
       const topicKeyboard = createMainKeyboard(
         topicAgent,
         topicModel,
@@ -222,7 +403,7 @@ export async function restoreCommand(ctx: CommandContext<Context>): Promise<void
         formatVariantForButton(topicModel.variant || "default"),
       );
       const topicMessage = await ctx.api.sendMessage(
-        chatId,
+        menu.chatId,
         t(BOT_I18N_KEY.NEW_TOPIC_CREATED, { title: session.title }),
         { ...getThreadSendOptions(topicThreadId), reply_markup: topicKeyboard },
       );
@@ -242,7 +423,13 @@ export async function restoreCommand(ctx: CommandContext<Context>): Promise<void
       const description =
         error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
       if (description.includes("not enough rights")) {
-        await ctx.reply(t(BOT_I18N_KEY.NEW_TOPIC_CREATE_NO_RIGHTS), threadOptions);
+        await ctx.api
+          .sendMessage(
+            menu.chatId,
+            t(BOT_I18N_KEY.NEW_TOPIC_CREATE_NO_RIGHTS),
+            getThreadSendOptions(menu.threadId),
+          )
+          .catch(() => {});
         break;
       }
     }
@@ -255,14 +442,22 @@ export async function restoreCommand(ctx: CommandContext<Context>): Promise<void
   const lines = created.map((entry) =>
     entry.url ? `• ${entry.title}\n  ${entry.url}` : `• ${entry.title}`,
   );
-  await ctx.reply(
-    [
-      t("restore.result", { created: created.length, skipped, failed }),
-      ...lines,
-      ...(remaining > 0
-        ? [t("restore.truncated", { max: MAX_RESTORE_TOPICS_PER_RUN, remaining })]
-        : []),
-    ].join("\n"),
-    threadOptions,
-  );
+  const resultText = [
+    t("restore.result", { created: created.length, skipped: menu.skipped, failed }),
+    ...lines,
+    ...(remaining > 0
+      ? [t("restore.truncated", { max: MAX_RESTORE_TOPICS_PER_RUN, remaining })]
+      : []),
+  ].join("\n");
+
+  if (progressMessage) {
+    await ctx.api
+      .editMessageText(menu.chatId, progressMessage.message_id, resultText)
+      .catch(() => {});
+  } else {
+    await ctx.api
+      .sendMessage(menu.chatId, resultText, getThreadSendOptions(menu.threadId))
+      .catch(() => {});
+  }
+  return true;
 }

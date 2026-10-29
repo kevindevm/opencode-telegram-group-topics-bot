@@ -290,6 +290,10 @@ export const es: I18nDictionary = {
   "restore.requires_forum_general":
     "⚠️ Usa /restore desde el topic General de un supergrupo con foro.",
   "restore.list_failed": "⚠️ No se pudieron cargar las sesiones del servidor OpenCode.",
+  "restore.menu_title":
+    "📋 Sesiones abiertas — elegí cuáles restaurar como topics (● corriendo, ○ inactiva).\nYa vinculadas (omitidas): {skipped}.",
+  "restore.confirm_button": "✅ Crear {count}",
+  "restore.no_selection": "⚠️ Seleccioná al menos una sesión.",
   "restore.empty": "✅ Todas las sesiones recientes ya tienen topic.",
   "restore.progress": "⏳ Restaurando {total} sesiones como topics…",
   "restore.result":

@@ -262,6 +262,10 @@ export const id: I18nDictionary = {
   "restore.requires_forum_general":
     "⚠️ Jalankan /restore dari topik General di supergrup forum.",
   "restore.list_failed": "⚠️ Tidak dapat memuat sesi dari server OpenCode.",
+  "restore.menu_title":
+    "📋 Sesi terbuka — pilih mana yang dipulihkan sebagai topik (● berjalan, ○ idle).\nSudah tertaut (dilewati): {skipped}.",
+  "restore.confirm_button": "✅ Buat {count}",
+  "restore.no_selection": "⚠️ Pilih setidaknya satu sesi.",
   "restore.empty": "✅ Semua sesi terbaru sudah memiliki topik.",
   "restore.progress": "⏳ Memulihkan {total} sesi sebagai topik…",
   "restore.result":
