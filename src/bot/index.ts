@@ -1129,6 +1129,9 @@ async function deliverAssistantCompletion(
 
       // Bounded 429 retries: a persistent storm fails this delivery (and the
       // coordinator reschedules) instead of wedging the session chain.
+      // On failure the piggybacked markup (if any) never reached the
+      // client: release the optimistic fingerprint so the retry and the
+      // turn-end carrier resend it instead of assuming it landed.
       await runWithRateLimitRetries(`final:${sessionId}`, () =>
         sendBotRenderedPart({
           api: activeBot.api,
@@ -1151,7 +1154,10 @@ async function deliverAssistantCompletion(
             ...getThreadSendOptions(target.threadId),
           },
         }),
-      );
+      ).catch((error: unknown) => {
+        keyboardManager.markKeyboardMarkupUnsent(target.scopeKey);
+        throw error;
+      });
     }
 
     const ttsSent = await sendTtsResponseForSession({

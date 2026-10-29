@@ -105,6 +105,28 @@ describe("keyboard/manager", () => {
     keyboardManager.clearScope(scopeKey);
   });
 
+  it("resends markup released after a failed carrying send", () => {
+    const scopeKey = "-100123:58";
+    keyboardManager.updateAgent("build", scopeKey);
+    keyboardManager.updateModel(
+      { providerID: "openai", modelID: "gpt-5.4", variant: "default" },
+      scopeKey,
+    );
+    contextStateManager.update(1_000, 100_000, scopeKey);
+
+    // Piggyback recorded the fingerprint, but the carrying message failed.
+    expect(keyboardManager.consumeStaleKeyboardMarkup(scopeKey)).toBeDefined();
+    expect(keyboardManager.consumeStaleKeyboardMarkup(scopeKey)).toBeUndefined();
+
+    // Release it: the retry (or the turn-end carrier) must resend instead
+    // of assuming the client already has it.
+    keyboardManager.markKeyboardMarkupUnsent(scopeKey);
+    expect(keyboardManager.consumeStaleKeyboardMarkup(scopeKey)).toBeDefined();
+
+    contextStateManager.clear(scopeKey);
+    keyboardManager.clearScope(scopeKey);
+  });
+
   it("reflects store-side model changes without an explicit keyboard update", () => {
     const scopeKey = "-100123:56";
     keyboardManager.updateAgent("build", scopeKey);
