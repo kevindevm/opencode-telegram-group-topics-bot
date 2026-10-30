@@ -379,7 +379,11 @@ class PinnedMessageManager {
         context.state.sessionId &&
         !isControlScope(scopeKey)
       ) {
-        await this.updatePinnedMessage(scopeKey);
+        // Storm guard applies to creation too: a missing dashboard during
+        // a flood waits instead of adding send attempts to it.
+        if (Date.now() >= context.cooldownUntil) {
+          await this.updatePinnedMessage(scopeKey);
+        }
         return;
       }
 
@@ -826,7 +830,22 @@ class PinnedMessageManager {
         return;
       }
 
-      await this.createPinnedMessageOnce(scopeKey);
+      // ...unless Telegram is flood-controlling us: creation sends would
+      // only extend the storm. scheduleThrottledUpdate already drops
+      // repaints while the cooldown lasts; the next post-cooldown trigger
+      // recreates the dashboard.
+      if (Date.now() < context.cooldownUntil) {
+        return;
+      }
+
+      try {
+        await this.createPinnedMessageOnce(scopeKey);
+      } catch (err) {
+        if (err instanceof RateLimitExceededError) {
+          this.openStormCooldown(context);
+        }
+        throw err;
+      }
       return;
     }
 

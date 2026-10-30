@@ -712,4 +712,61 @@ describe("pinned manager scoped state", () => {
       vi.useRealTimers();
     }
   });
+
+  it("skips dashboard creation while the storm cooldown lasts", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
+
+      setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+      setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+
+      pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+      await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+      api.sendMessage.mockClear();
+      expect(pinnedMessageManager.getState("chat:-1:10").messageId).not.toBeNull();
+
+      // Lose the dashboard mid-storm (deleted message): the next flush
+      // would recreate it with a send, feeding the flood.
+      const flood = Object.assign(new Error("Too Many Requests: retry after 1"), {
+        parameters: { retry_after: 1 },
+      });
+      api.sendMessage.mockRejectedValue(flood);
+      const contexts = (
+        pinnedMessageManager as unknown as {
+          contexts: Map<string, { state: { messageId: number | null } }>;
+        }
+      ).contexts;
+      contexts.get("chat:-1:10")!.state.messageId = null;
+      // Run the flush concurrently with the fake clock, stepping so each
+      // retry sleep resolves: creation burns its retries against 429s and
+      // opens the cooldown.
+      const failingFlush = pinnedMessageManager.flush("chat:-1:10");
+      let failedSettled = false;
+      void failingFlush.then(
+        () => { failedSettled = true; },
+        () => { failedSettled = true; },
+      );
+      for (let i = 0; i < 30 && !failedSettled; i++) {
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+      await failingFlush;
+      // Cooldown is now open: further flushes must not attempt more sends.
+      expect(api.sendMessage.mock.calls.length).toBeGreaterThan(0);
+      api.sendMessage.mockClear();
+      api.sendMessage.mockRejectedValue(flood);
+      await pinnedMessageManager.flush("chat:-1:10");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(api.sendMessage).not.toHaveBeenCalled();
+
+      // Storm over and cooldown lapsed: the dashboard is recreated.
+      await vi.advanceTimersByTimeAsync(120_000);
+      api.sendMessage.mockResolvedValue({ message_id: 200 });
+      await pinnedMessageManager.flush("chat:-1:10");
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(pinnedMessageManager.getState("chat:-1:10").messageId).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
