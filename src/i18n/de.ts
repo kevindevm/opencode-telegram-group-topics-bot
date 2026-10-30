@@ -15,6 +15,7 @@ export const de: I18nDictionary = {
   "cmd.description.model": "Modell auswählen",
   "cmd.description.agent": "Agent auswählen",
   "cmd.description.cleanup": "Subagenten-Themen löschen",
+  "cmd.description.compact": "Sitzungskontext komprimieren",
   "cmd.description.opencode_start": "OpenCode-Server starten",
   "cmd.description.opencode_stop": "OpenCode-Server stoppen",
   "cmd.description.recent": "Browse recent sessions across projects",

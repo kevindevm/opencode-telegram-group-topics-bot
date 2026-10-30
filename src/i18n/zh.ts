@@ -15,6 +15,7 @@ export const zh: I18nDictionary = {
   "cmd.description.model": "选择模型",
   "cmd.description.agent": "选择代理",
   "cmd.description.cleanup": "删除子代理记录话题",
+  "cmd.description.compact": "压缩会话上下文",
   "cmd.description.opencode_start": "启动 OpenCode 服务器",
   "cmd.description.opencode_stop": "停止 OpenCode 服务器",
   "cmd.description.recent": "Browse recent sessions across projects",

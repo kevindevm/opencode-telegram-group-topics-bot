@@ -1,4 +1,4 @@
-import { Context, InlineKeyboard } from "grammy";
+import { CommandContext, Context, InlineKeyboard } from "grammy";
 import { getCurrentSession } from "../../session/manager.js";
 import { opencodeClient } from "../../opencode/client.js";
 import { getStoredModel } from "../../model/manager.js";
@@ -52,7 +52,19 @@ export function buildCompactConfirmationMenu(): InlineKeyboard {
  * @param ctx grammY context
  */
 export async function handleContextButtonPress(ctx: Context): Promise<void> {
-  logger.debug("[ContextHandler] Context button pressed");
+  await showCompactConfirmMenu(ctx);
+}
+
+/**
+ * /compact command: same confirmation menu as the keyboard context button,
+ * so compaction never strands without a visible reply keyboard.
+ */
+export async function compactCommand(ctx: CommandContext<Context>): Promise<void> {
+  await showCompactConfirmMenu(ctx as unknown as Context);
+}
+
+async function showCompactConfirmMenu(ctx: Context): Promise<void> {
+  logger.debug("[ContextHandler] Compact menu requested");
   const scope = getScopeFromContext(ctx);
   const scopeKey = getScopeKeyFromContext(ctx);
 

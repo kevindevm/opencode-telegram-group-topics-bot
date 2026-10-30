@@ -246,6 +246,7 @@ Any plain text message in a session topic is treated as a prompt when no blockin
 | `/retry`          | Resend the last prompt                                                   |
 | `/diff`           | Show changed files in this session                                       |
 | `/commit`         | Commit session changes with a message                                    |
+| `/compact`        | Compact the session context (no keyboard needed)                        |
 | `/cost`           | Show session (incl. subagents) and daily spend                     |
 | `/close`          | Close this session topic                                                 |
 | `/cleanup`        | Delete subagent transcript topics                                        |

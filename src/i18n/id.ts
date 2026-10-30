@@ -21,6 +21,7 @@ export const id: I18nDictionary = {
   "cmd.description.model": "Select model",
   "cmd.description.agent": "Select agent",
   "cmd.description.cleanup": "Hapus topik transkrip subagen",
+  "cmd.description.compact": "Padatkan konteks sesi",
   "cmd.description.opencode_start": "Mulai server OpenCode",
   "cmd.description.opencode_stop": "Hentikan server OpenCode",
   "cmd.description.recent": "Browse recent sessions across projects",

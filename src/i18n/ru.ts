@@ -15,6 +15,7 @@ export const ru: I18nDictionary = {
   "cmd.description.model": "Выбрать модель",
   "cmd.description.agent": "Выбрать режим агента",
   "cmd.description.cleanup": "Удалить темы-транскрипты субагентов",
+  "cmd.description.compact": "Сжать контекст сессии",
   "cmd.description.opencode_start": "Запустить OpenCode сервер",
   "cmd.description.opencode_stop": "Остановить OpenCode сервер",
   "cmd.description.recent": "Browse recent sessions across projects",

@@ -14,6 +14,7 @@ export const en = {
   "cmd.description.model": "Select model",
   "cmd.description.agent": "Select agent",
   "cmd.description.cleanup": "Delete subagent transcript topics",
+  "cmd.description.compact": "Compact the session context",
   "cmd.description.opencode_start": "Start OpenCode server",
   "cmd.description.opencode_stop": "Stop OpenCode server",
   "cmd.description.recent": "Browse recent sessions across projects",

@@ -21,6 +21,7 @@ export const tr: I18nDictionary = {
   "cmd.description.model": "Select model",
   "cmd.description.agent": "Select agent",
   "cmd.description.cleanup": "Alt aracı transkript konularını sil",
+  "cmd.description.compact": "Oturum bağlamını sıkıştır",
   "cmd.description.opencode_start": "OpenCode sunucusunu başlat",
   "cmd.description.opencode_stop": "OpenCode sunucusunu durdur",
   "cmd.description.recent": "Browse recent sessions across projects",

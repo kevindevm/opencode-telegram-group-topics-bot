@@ -52,7 +52,7 @@ import { permissionManager } from "../permission/manager.js";
 import { handleAgentSelect, showAgentSelectionMenu } from "./handlers/agent.js";
 import { handleModelSelect, handleModelSearchTextAnswer, showModelSelectionMenu } from "./handlers/model.js";
 import { handleVariantSelect, showVariantSelectionMenu } from "./handlers/variant.js";
-import { handleContextButtonPress, handleCompactConfirm } from "./handlers/context.js";
+import { compactCommand, handleContextButtonPress, handleCompactConfirm } from "./handlers/context.js";
 import { handleInlineMenuCancel } from "./handlers/inline-menu.js";
 import { handleQueuedPromptCancel, handleQueuedPromptFront, handleQueuedPromptSteer } from "./handlers/prompt.js";
 import { displayCommand, handleDisplayCallback } from "./commands/display.js";
@@ -2238,6 +2238,7 @@ export function createBot(): Bot<Context> {
   bot.command(BOT_COMMAND.RETRY, createRetryCommand({ bot, ensureEventSubscription }));
   bot.command(BOT_COMMAND.DIFF, diffCommand);
   bot.command(BOT_COMMAND.COMMIT, commitCommand);
+  bot.command(BOT_COMMAND.COMPACT, compactCommand);
   bot.command(BOT_COMMAND.COST, costCommand);
   bot.command(BOT_COMMAND.CLOSE, closeCommand);
   bot.command(BOT_COMMAND.CLEANUP, cleanupCommand);
