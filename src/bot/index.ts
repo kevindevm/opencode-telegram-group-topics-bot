@@ -155,6 +155,7 @@ import { contextStateManager } from "../context/manager.js";
 import { formatContextForButton } from "./utils/keyboard.js";
 import { SessionOutputCoordinator } from "./session-output-coordinator.js";
 import { assistantRunState } from "./assistant-run-state.js";
+import { ensureAssistantRunForLiveEvent, ensureAssistantRunForTokens } from "./assistant-run-events.js";
 import { formatAssistantRunFooter } from "./utils/assistant-run-footer.js";
 import { renderAssistantFinalPartsSafe } from "./utils/assistant-rendering.js";
 import { buildCodeBlockMessages } from "./utils/code-block.js";
@@ -243,6 +244,7 @@ function getSharedEventCallback(): (event: OpenCodeEvent) => void {
       mirrorPcPromptOnRunStart(event);
       ensureTopicSessionTracked(event);
       ensureTopicManagersForLiveEvent(event);
+      ensureAssistantRunForLiveEvent(event);
 
       const sessionTitleUpdate = extractSessionTitleUpdate(event);
       if (sessionTitleUpdate && botInstance) {
@@ -1883,6 +1885,10 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
       logger.debug("[Bot] Ignoring tokens for session without a topic target", { sessionId });
       return;
     }
+
+    // A busy event missed entirely (restart mid-turn) still gets a clock:
+    // without this the final answer ships without duration.
+    ensureAssistantRunForTokens(sessionId, target.scopeKey);
 
     try {
       logger.debug(`[Bot] Received tokens: input=${tokens.input}, output=${tokens.output}`);
