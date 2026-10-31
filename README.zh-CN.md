@@ -18,7 +18,7 @@
 
 支持平台：macOS、Windows、Linux
 
-机器人界面语言：English (`en`)、Deutsch (`de`)、Espanol (`es`)、Francais (`fr`)、Russkiy (`ru`)、简体中文 (`zh`)
+机器人界面语言：[English (`en`)](./README.md)、[Deutsch (`de`)](./README.de.md)、[Español (`es`)](./README.es.md)、[Français (`fr`)](./README.fr.md)、[Bahasa Indonesia (`id`)](./README.id.md)、[Русский (`ru`)](./README.ru.md)、[Türkçe (`tr`)](./README.tr.md)、[简体中文 (`zh`)](./README.zh-CN.md)
 
 Fork 同步说明：[`FORK_SYNC.md`](./FORK_SYNC.md)
 

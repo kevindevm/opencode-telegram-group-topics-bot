@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 
-Languages: English (`en`), Deutsch (`de`), Español (`es`), Français (`fr`), Bahasa Indonesia (`id`), Русский (`ru`), Türkçe (`tr`), [简体中文 (`zh-CN`)](./README.zh-CN.md)
+Languages: [English (`en`)](./README.md), [Deutsch (`de`)](./README.de.md), [Español (`es`)](./README.es.md), [Français (`fr`)](./README.fr.md), [Bahasa Indonesia (`id`)](./README.id.md), [Русский (`ru`)](./README.ru.md), [Türkçe (`tr`)](./README.tr.md), [简体中文 (`zh`)](./README.zh-CN.md)
 
 A Telegram bot ([grammy](https://grammy.dev/), Node.js 20+) that turns one Telegram supergroup into a **multi-session mobile client for [OpenCode](https://opencode.ai)**: the **General** topic is the control lane, and each OpenCode session gets its own forum topic with live streaming, a pinned status dashboard, a prompt queue, permission/question flows, and a ⏪ send-to-background button for long shell commands.
 
