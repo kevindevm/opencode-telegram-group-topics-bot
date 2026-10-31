@@ -300,15 +300,8 @@ function resolveTopicModel(
 }
 
 /**
- * Opens an existing session in a freshly created forum topic bound to the
- * given project. Returns true when the chat is a group General forum and the
- * session was handled there, false otherwise (DM/global callers continue with
- * their own selection flow). Shared by /sessions and /recent.
- *
- * With `keepMenu` (used by /recent) the caller's menu survives: no callback
- * acks (the caller already acked fast, a late second ack throws "query too
- * old"), no menu deletion, no interaction clear — so several topics can be
- * opened from the same list instead of orphaning it on the first tap.
+ * Open a session in a new forum topic. Returns true if handled in General.
+ * With keepMenu, leave the caller menu alone.
  */
 export async function openSessionInNewTopic(
   ctx: Context,

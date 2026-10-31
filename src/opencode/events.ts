@@ -103,11 +103,8 @@ async function runSharedLoop(state: SharedStreamState): Promise<void> {
   const { abortController } = state;
   let reconnectAttempt = 0;
 
-  // The generation guard (sharedStream === state) handles the stop/start
-  // race: maybeStopSharedLoop aborts and drops the reference, but the old
-  // for-await may still be draining if the SDK ignores the signal. A
-  // superseded loop must not dispatch — otherwise two loops deliver every
-  // event twice until the old one notices the abort.
+  // Only the current loop may dispatch. Drop events from superseded loops
+  // to avoid duplicates.
   const isCurrent = (): boolean => sharedStream === state;
 
   while (!abortController.signal.aborted && hasCallbacks() && isCurrent()) {

@@ -260,13 +260,8 @@ export function createV2EventTranslator(options: V2EventTranslatorOptions = {}) 
 
     switch (event.type) {
       case "server.connected": {
-        // Calls started before this connection never get a start here when
-        // the server itself restarted — only then is the in-flight tool
-        // state unrecoverable. A plain reconnect keeps it so completions
-        // arriving on the new stream still resolve instead of being dropped.
-        // Assistant text and background operations share the same fate: after
-        // a restart their endings never arrive, so drop them too instead of
-        // leaving phantom running cards behind.
+        // On restart, drop in-flight tool and message state. On plain
+        // reconnect, keep it so late completions still resolve.
         if (restarted) {
           tools.clear();
           messages.clear();

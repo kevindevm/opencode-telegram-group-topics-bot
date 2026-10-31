@@ -1203,11 +1203,8 @@ function syncKeyboardContextFromPinnedState(scopeKey: string): void {
 
 const liveKeyboardRepostByScope = new Map<string, { at: number; percent: number }>();
 /**
- * Standalone reposts are now the fallback, not the main channel: fresh
- * messages (final answers) carry the keyboard via consumeStaleKeyboardMarkup,
- * and edits can never carry it (Telegram: edited messages accept inline
- * keyboards only). So this only fires on long turns with no fresh messages,
- * at most once per pin interval and only once the percent actually moved.
+ * Fallback only. Fresh turn-end messages already carry the keyboard.
+ * Reposts at most once per pin interval and only if percent moved.
  */
 const LIVE_KEYBOARD_REPOST_MIN_PERCENT_DELTA = 2;
 const LIVE_KEYBOARD_REPOST_MAX_SCOPES = 200;
@@ -1227,15 +1224,8 @@ function trackLiveKeyboardRepost(scopeKey: string, at: number, percent: number):
 }
 
 /**
- * Reposts the reply keyboard mid-run so its context button stops lagging a
- * full turn behind. Reply keyboards cannot be edited in place: Telegram only
- * swaps them when a new message carries reply_markup, and stream edits never
- * do (edits accept inline keyboards only). Fresh turn-end messages carry the
- * keyboard via consumeStaleKeyboardMarkup, so this standalone repost is only
- * the fallback for long turns with no fresh messages: at most once per pin
- * interval (same cadence as the dashboard), and only once the displayed
- * percent moved by at least 2 points (identical
- * markups are also skipped by the manager fingerprint).
+ * Repost the keyboard mid-run for long turns with no fresh messages.
+ * Same limits: once per pin interval, only if percent moved 2+ points.
  */
 function getLiveKeyboardRepostMinIntervalMs(): number {
   return Math.max(1000, config.bot.pinEditIntervalSec * 1000);
@@ -1886,8 +1876,7 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
       return;
     }
 
-    // A busy event missed entirely (restart mid-turn) still gets a clock:
-    // without this the final answer ships without duration.
+    // Give restarted turns a clock if the busy event was missed.
     ensureAssistantRunForTokens(sessionId, target.scopeKey);
 
     try {
@@ -1911,17 +1900,13 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
         }
       }
 
-      // Update keyboardManager SYNCHRONOUSLY before any await
-      // This ensures keyboard has correct context when onComplete sends the reply
-      // Same footprint the TUI shows: input + output + reasoning + cache.
+      // Update the keyboard synchronously before any await so onComplete
+      // uses fresh context. Same footprint the TUI shows.
       const rawContextSize =
         tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead + tokens.cacheWrite;
       let contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
-      // Sanity gate: the live window can never exceed the model limit.
-      // Anything bigger is cumulative accounting leaking into the display, or
-      // a stale cached limit after a model switch — refresh once, then clamp
-      // and keep updating instead of dropping the event (dropping is what
-      // froze the pin and the keyboard at saturation, forever).
+      // Clamp live context to the model limit. Refresh once, then clamp and
+      // keep updating instead of dropping the event.
       if (contextLimit > 0 && rawContextSize > contextLimit) {
         await pinnedMessageManager.refreshContextLimit(target.scopeKey).catch(() => {});
         contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);

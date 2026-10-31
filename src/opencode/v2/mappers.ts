@@ -245,10 +245,8 @@ function toV1AssistantMessage(
   sessionID: string,
   directory: string,
 ): V1MessageWithParts {
-  // The generated client types lag the server: compaction summaries arrive
-  // with a runtime `summary` flag the type does not declare. Read it
-  // defensively — without it the dashboard can never find the compaction
-  // marker and freezes on the pre-compaction peak.
+  // Generated types lag the server and miss the runtime summary flag.
+  // Read it defensively to find the compaction marker.
   const isSummary = (message as { summary?: unknown }).summary === true;
   const info: AssistantMessage = {
     id: message.id,
@@ -514,9 +512,8 @@ function fieldQuestionText(field: FormField, form: FormInfo): string {
 }
 
 /**
- * A question built from a form field: each choice also carries the value the server expects,
- * and `custom` is stated the way the server enforces it — only an explicit `true` lets a
- * non-choice answer through.
+ * A question built from a form field. Custom is true only if the server
+ * allows non-choice answers.
  */
 type FormQuestionInfo = QuestionInfo & {
   options: Array<QuestionInfo["options"][number] & { value?: string }>;

@@ -43,11 +43,8 @@ function startRunIfMissing(sessionId: string, scopeKey: string, reason: string):
 }
 
 /**
- * A session going busy with no run record: the turn was prompted from
- * another client (PC), or a restart wiped the in-memory clock mid-turn.
- * Without this the final answer ships as `agent · model` with no duration.
- * Never restarts an existing clock: Telegram-submitted turns keep measuring
- * from their submit.
+ * Start a missing run clock for turns from another client or after a restart.
+ * Never restart an existing run.
  */
 export function ensureAssistantRunForLiveEvent(event: LiveEvent): void {
   if (!event || event.type !== "session.status") {
@@ -68,9 +65,8 @@ export function ensureAssistantRunForLiveEvent(event: LiveEvent): void {
 }
 
 /**
- * Tokens flowing for a session with no run record: the busy event was
- * missed entirely (restart mid-turn). Same guard, latest possible moment
- * to still give the final answer a clock.
+ * Backstop for tokens with no run record. Starts the clock if the busy
+ * event was missed.
  */
 export function ensureAssistantRunForTokens(sessionId: string, scopeKey: string): void {
   startRunIfMissing(sessionId, scopeKey, "tokens-without-run");

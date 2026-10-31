@@ -139,6 +139,13 @@ OpenCode Server
 - Keep functions small and focused.
 - Prefer `async/await` over chained `.then()`.
 
+### Comments
+
+- Read like a person wrote them: short, plain, no rambling.
+- Explain the why, not the what. Never narrate history or past bugs.
+- No em dashes in new text (code, comments, commits, PRs).
+- Fix the implementation instead of documenting a workaround.
+
 ### Error handling
 
 - Use `try/catch` around async operations.

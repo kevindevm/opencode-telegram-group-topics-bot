@@ -1036,9 +1036,8 @@ export async function processUserPrompt(
   let currentSession = getCurrentSession(scopeKey);
 
   if (scope?.context === SCOPE_CONTEXT.GROUP_TOPIC && !getTopicBindingByScopeKey(scopeKey)) {
-    // Self-heal: the scope still knows its session (e.g. the binding record
-    // was lost while scope state survived) — re-link instead of stranding
-    // the topic. Only a topic with no session at all stays unbound.
+    // Self-heal: re-link the topic if scope state survived but the binding
+    // was lost. Only a topic with no session at all stays unbound.
     if (currentSession && ctx.chat && typeof scope.threadId === "number") {
       logger.info(
         `[Bot] Re-linking unbound topic: scope=${scopeKey}, session=${currentSession.id}`,

@@ -1418,9 +1418,8 @@ class SummaryAggregator {
         logger.debug(
           `[Aggregator] Tokens: input=${tokens.input}, output=${tokens.output}, reasoning=${tokens.reasoning}, cost=${tokens.cost}`,
         );
-        // Call synchronously so keyboardManager is updated before onComplete sends the reply
-        // completed=true: this is the authoritative per-message window, not a
-        // live estimate, so the dashboard may move down to it (post-compaction).
+        // Call synchronously so the keyboard updates before onComplete.
+        // Completed messages carry the final window.
         this.onTokensCallback(info.sessionID, tokens, true);
 
         // Anchor for live estimates: the exact context of this completed step.

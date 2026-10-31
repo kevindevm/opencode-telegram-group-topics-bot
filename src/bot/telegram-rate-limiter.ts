@@ -43,9 +43,9 @@ export class RateLimitExceededError extends Error {
 
 /**
  * Runs a Telegram call with the same give-up budget as the queued paths.
- * Use this for direct (non-queued) sends — pin edits, final deliveries,
- * documents — so a persistent 429 storm fails loudly instead of wedging
- * the per-session delivery chain forever.
+ * Use this for direct (non-queued) sends: pin edits, final deliveries,
+ * documents. A persistent 429 storm fails loudly instead of wedging the
+ * per-session delivery chain forever.
  */
 export async function runWithRateLimitRetries<T>(
   label: string,

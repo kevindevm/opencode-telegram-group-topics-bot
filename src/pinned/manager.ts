@@ -27,11 +27,8 @@ interface ScopeContext {
   lastRenderedText: string | null;
   lastEditAt: number;
   /**
-   * Flood-control circuit breaker: while now < cooldownUntil, repaint
-   * triggers are dropped instead of scheduled. Set when a dashboard edit
-   * dies with a 429 — without it, the coordinator's 15s final-delivery
-   * retries re-arm a trailing edit on every attempt and the pin feeds the
-   * very storm that freezes it (and the keyboard/stream with it).
+   * Drop repaints while in cooldown. Set after a 429 so retries do not
+   * feed the flood.
    */
   cooldownUntil: number;
 }
@@ -289,12 +286,8 @@ class PinnedMessageManager {
       }
 
       let totalAssistantCost = 0;
-      // Lifetime cost accumulates over the whole stored history, but the
-      // context baseline is the LIVE window: the latest assistant message,
-      // not the historic peak. max() over history freezes the dashboard at
-      // the pre-compaction high forever (e.g. 917k shown while the real
-      // window is ~100k). Summaries never count: they carry the
-      // pre-compaction window that was just discarded.
+      // Cost totals use full history. Context uses only the latest live
+      // message, not the historic peak. Summaries never count.
       const baseline = onlyPostCompactionMessages(messagesData);
       const windowSizeOf = (entry: unknown): { created: number; size: number } | null => {
         const { info } = entry as { info?: unknown };
@@ -336,10 +329,8 @@ class PinnedMessageManager {
           totalAssistantCost += cost;
         }
       }
-      // The server's session cost is the same number the TUI shows: it also
-      // covers turns our history slice misses (subagents, compaction
-      // requests). Prefer it when available, keep the accumulated sum as
-      // the offline fallback.
+      // Prefer the server session cost when available. It covers turns
+      // missing from history.
       try {
         const { data: sessionData } = await opencodeClient.session.get({
           sessionID: sessionId,
@@ -401,11 +392,8 @@ class PinnedMessageManager {
     }
 
     const context = this.getContext(scopeKey);
-    // Live estimates (completed=false) only move the dashboard forward: they
-    // are intra-step growth and must not flicker it backwards mid-turn.
-    // Completed messages (completed=true) carry the authoritative window for
-    // that step, so they set it outright — this is what lets the dashboard
-    // drop after a compaction instead of freezing at the old peak.
+    // Live estimates only move the dashboard forward. Completed messages
+    // set it outright, so it can drop after compaction.
     // Same footprint the TUI shows: input + output + reasoning + cache.
     const rawUsed =
       tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead + tokens.cacheWrite;
@@ -474,13 +462,8 @@ class PinnedMessageManager {
   }
 
   async flush(scopeKey: string = "global"): Promise<void> {
-    // Pin failures must never break message delivery. Repaints go through
-    // the throttle like every other trigger: flush runs on every
-    // final-delivery attempt (including coordinator retries), and a direct
-    // edit here would turn each retry into fresh flood-control ammunition.
-    // The trailing edit still carries the latest state. Only a missing
-    // dashboard is created immediately — a topic must never be left without
-    // one while its session is active.
+    // Pin failures must never break delivery. Flush only schedules a
+    // throttled repaint.
     try {
       await this.refreshProjectMetadata(scopeKey);
 
@@ -813,9 +796,7 @@ class PinnedMessageManager {
     return Math.max(1000, config.bot.pinEditIntervalSec * 1000);
   }
   /**
-   * How long a scope stops repainting after a 429. Long on purpose: the
-   * coordinator retries final delivery every 15s and each retry re-arms a
-   * repaint — a short cooldown would just phase-lock with it.
+   * Cooldown after a 429. Kept long so it does not sync with delivery retries.
    */
   private static readonly PIN_STORM_COOLDOWN_MS = 60_000;
 
