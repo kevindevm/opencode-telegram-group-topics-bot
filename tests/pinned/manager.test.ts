@@ -626,6 +626,54 @@ describe("pinned manager scoped state", () => {
     }
   });
 
+  it("re-baselines from the compaction marker instead of the stored history", async () => {
+    const api = createApi();
+
+    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+    opencodeMocks.messages.mockResolvedValueOnce({
+      data: [
+        {
+          info: {
+            role: "assistant",
+            cost: 5.0,
+            tokens: { input: 900000, cache: { read: 100000 } },
+            time: { created: 1000 },
+          },
+          parts: [{ type: "text", text: "old work" }],
+        },
+        {
+          info: {
+            role: "assistant",
+            summary: true,
+            cost: 0.1,
+            tokens: { input: 5000, cache: { read: 0 } },
+            time: { created: 2000 },
+          },
+          parts: [{ type: "compaction", text: "summary" }],
+        },
+        {
+          info: {
+            role: "assistant",
+            cost: 0.02,
+            tokens: { input: 40000, cache: { read: 10000 } },
+            time: { created: 3000 },
+          },
+          parts: [{ type: "text", text: "new work" }],
+        },
+      ],
+      error: null,
+    });
+
+    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+    await pinnedMessageManager.onSessionCompacted("s1", "/repo/a", "chat:-1:10");
+
+    // Context drops to the post-compaction window instead of freezing at 1M;
+    // lifetime cost still accumulates.
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(50000);
+    expect(pinnedMessageManager.getState("chat:-1:10").assistantCost).toBeCloseTo(5.12, 5);
+  });
+
   it("keeps the history baseline when a live update reports a smaller window", async () => {
     const api = createApi();
 

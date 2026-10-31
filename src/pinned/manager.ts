@@ -43,6 +43,50 @@ function isControlScope(scopeKey: string): boolean {
   return getScopeFromKey(scopeKey)?.context === SCOPE_CONTEXT.GROUP_GENERAL;
 }
 
+type HistoryEntry = {
+  info?: {
+    role?: unknown;
+    summary?: unknown;
+    time?: { created?: unknown };
+    tokens?: { input?: unknown; cache?: { read?: unknown } };
+    cost?: unknown;
+  } | null;
+  parts?: Array<{ type?: unknown } | null> | null;
+};
+
+/**
+ * Drops pre-compaction messages from a baseline computation: the server
+ * keeps them stored, but the model only sees what came after the latest
+ * compaction marker, so max() must run on that tail.
+ */
+function onlyPostCompactionMessages<TEntry extends HistoryEntry>(entries: TEntry[]): TEntry[] {
+  let markerCreated = -1;
+  let found = false;
+  for (const entry of entries) {
+    const parts = entry?.parts;
+    // A compaction marker is either an explicit compaction part or a
+    // summary message (summaries only exist because of a compaction).
+    const isMarker =
+      Boolean(entry?.info?.summary) ||
+      (Array.isArray(parts) && parts.some((part) => part?.type === "compaction"));
+    if (!isMarker) {
+      continue;
+    }
+    found = true;
+    const created = entry?.info?.time?.created;
+    if (typeof created === "number" && created > markerCreated) {
+      markerCreated = created;
+    }
+  }
+  if (!found) {
+    return entries;
+  }
+  return entries.filter((entry) => {
+    const created = entry?.info?.time?.created;
+    return typeof created !== "number" || created >= markerCreated;
+  });
+}
+
 class PinnedMessageManager {
   private contexts = new Map<string, ScopeContext>();
   /** In-flight dashboard creations per scope (dedupes concurrent recreations). */
@@ -229,8 +273,7 @@ class PinnedMessageManager {
     }
   }
 
-  async loadContextFromHistory(
-    sessionId: string,
+  async loadContextFromHistory(    sessionId: string,
     directory: string,
     scopeKey: string = "global",
     options: { includeSummaries?: boolean } = {},
@@ -247,8 +290,17 @@ class PinnedMessageManager {
 
       let maxContextSize = 0;
       let totalAssistantCost = 0;
-      messagesData.forEach(({ info }) => {
-        if (info.role !== "assistant") {
+      // Lifetime cost accumulates over the whole stored history, but the
+      // context baseline must come from the compaction marker onward:
+      // earlier messages stay stored server-side but are no longer sent to
+      // the model, and max() over them would freeze the dashboard at the
+      // pre-compaction high forever.
+      const baseline = onlyPostCompactionMessages(messagesData);
+      const baselineSet = new Set<unknown>(baseline);
+      let maxBaselineSize = 0;
+      messagesData.forEach((entry) => {
+        const { info } = entry as { info?: unknown };
+        if (!info || (info as { role?: unknown }).role !== "assistant") {
           return;
         }
 
@@ -257,18 +309,23 @@ class PinnedMessageManager {
           cost?: number;
           tokens?: { input: number; cache?: { read: number } };
         };
+
+        totalAssistantCost += assistantInfo.cost || 0;
+
+        if (!baselineSet.has(entry)) {
+          return;
+        }
         if (assistantInfo.summary && !options.includeSummaries) {
           return;
         }
 
         const contextSize =
           (assistantInfo.tokens?.input || 0) + (assistantInfo.tokens?.cache?.read || 0);
-        if (contextSize > maxContextSize) {
-          maxContextSize = contextSize;
+        if (contextSize > maxBaselineSize) {
+          maxBaselineSize = contextSize;
         }
-
-        totalAssistantCost += assistantInfo.cost || 0;
       });
+      maxContextSize = maxBaselineSize;
 
       context.state.tokensUsed = maxContextSize;
       context.state.assistantCost = totalAssistantCost;
