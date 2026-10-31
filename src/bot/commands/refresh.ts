@@ -13,7 +13,7 @@ import {
 } from "../../topic/manager.js";
 import { ensureEventSubscription } from "../index.js";
 import { t } from "../../i18n/index.js";
-import { buildTopicMessageLink } from "../utils/topic-link.js";
+import { buildTopicThreadLink } from "../utils/topic-link.js";
 
 export async function handleRefreshCommand(ctx: Context): Promise<boolean> {
   if (ctx.callbackQuery) {
@@ -92,7 +92,7 @@ export async function handleRefreshCommand(ctx: Context): Promise<boolean> {
       const binding = getTopicBindingBySessionId(currentSession.id);
       if (binding?.chatId != null && binding?.threadId != null) {
         topicLink =
-          buildTopicMessageLink(
+          buildTopicThreadLink(
             { id: binding.chatId, type: "supergroup" } as unknown as Context["chat"],
             binding.threadId,
           ) ?? "";

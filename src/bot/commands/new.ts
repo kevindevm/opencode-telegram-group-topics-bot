@@ -43,7 +43,7 @@ import {
   TELEGRAM_ERROR_MARKER,
 } from "../constants.js";
 import { INTERACTION_CLEAR_REASON } from "../../interaction/constants.js";
-import { buildTopicMessageLink } from "../utils/topic-link.js";
+import { buildTopicThreadLink } from "../utils/topic-link.js";
 import type { TextPartInput } from "@opencode-ai/sdk/v2";
 import {
   activatePromptResponseMode,
@@ -271,7 +271,7 @@ export function createNewCommand(deps: NewCommandDeps) {
         variantName,
       );
 
-      const topicReadyMessage = await ctx.api.sendMessage(
+      await ctx.api.sendMessage(
         ctx.chat!.id,
         t(BOT_I18N_KEY.NEW_TOPIC_CREATED, { title: formatSessionDisplayTitle(session.title) }),
         {
@@ -280,7 +280,7 @@ export function createNewCommand(deps: NewCommandDeps) {
         },
       );
 
-      const topicMessageLink = buildTopicMessageLink(ctx.chat, topicReadyMessage.message_id);
+      const topicMessageLink = buildTopicThreadLink(ctx.chat, topicThreadId);
       const generalReplyText = topicMessageLink
         ? `${t(BOT_I18N_KEY.NEW_GENERAL_CREATED)}\n${t(BOT_I18N_KEY.NEW_GENERAL_OPEN_LINK, { url: topicMessageLink })}`
         : t(BOT_I18N_KEY.NEW_TOPIC_CREATE_ERROR);
