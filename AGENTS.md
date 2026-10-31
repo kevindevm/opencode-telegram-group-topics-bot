@@ -106,6 +106,8 @@ OpenCode Server
 - Do not create documentation for obvious code.
 - Update existing documentation when behavior changes.
 - Prefer fixing the implementation over documenting a known issue.
+- README changes must be mirrored in all 8 supported locales (en, es, de, fr, id, ru, tr, zh): every user-facing string added in English needs its translation (or the English fallback where a locale inherits it), and `I18nKey` coverage must stay complete or `tsc` fails.
+- The repo keeps one README per locale (English master plus translations). Any content change to one README must be ported to the other 7 — never leave a translated README behind the English one.
 
 ## Before coding
 - Search the repository for an existing implementation first.
