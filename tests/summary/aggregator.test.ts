@@ -826,6 +826,7 @@ describe("summary/aggregator", () => {
         cacheWrite: 8,
         cost: 0.01234,
       }),
+      true,
     );
   });
 
@@ -884,7 +885,7 @@ describe("summary/aggregator", () => {
       },
     } as unknown as Event);
 
-    expect(onTokens).toHaveBeenCalledWith("session-1", expect.objectContaining({ cost: 0.0042 }));
+    expect(onTokens).toHaveBeenCalledWith("session-1", expect.objectContaining({ cost: 0.0042 }), true);
   });
 
   it("emits the full assistant message across all text parts", async () => {
@@ -1755,6 +1756,7 @@ describe("summary/aggregator", () => {
     expect(onTokens).toHaveBeenCalledWith(
       "session-1",
       expect.objectContaining({ input: 1000, cacheRead: 200, cost: 0 }),
+      false,
     );
   });
 
@@ -1785,6 +1787,7 @@ describe("summary/aggregator", () => {
     expect(onTokens).toHaveBeenLastCalledWith(
       "session-1",
       expect.objectContaining({ input: 5000, cacheRead: 1000, cost: 0 }),
+      false,
     );
 
     // Step 1 completes with exact per-step tokens.
@@ -1804,6 +1807,7 @@ describe("summary/aggregator", () => {
     expect(onTokens).toHaveBeenLastCalledWith(
       "session-1",
       expect.objectContaining({ input: 100, cacheRead: 20 }),
+      true,
     );
 
     // Step 2 starts: live growth is measured from here.
@@ -1818,6 +1822,7 @@ describe("summary/aggregator", () => {
     expect(onTokens).toHaveBeenLastCalledWith(
       "session-1",
       expect.objectContaining({ input: 400, cacheRead: 120, cost: 0 }),
+      false,
     );
 
     // Server counters reset: re-anchor instead of reporting negative growth.
@@ -1831,11 +1836,56 @@ describe("summary/aggregator", () => {
     expect(onTokens).toHaveBeenLastCalledWith(
       "session-1",
       expect.objectContaining({ input: 100, cacheRead: 20, cost: 0 }),
+      false,
     );
   });
 
-  it("ignores empty session.usage.updated totals", () => {
+  it("resets live usage anchors on compaction so post-compaction estimates start fresh", () => {
     const onTokens = vi.fn();
+    summaryAggregator.setOnTokens(onTokens);
+    summaryAggregator.setSession("session-1");
+
+    // Step 1 completes with a big pre-compaction window.
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-pre-compact",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now(), completed: Date.now() },
+          tokens: { input: 800000, output: 20, reasoning: 0, cache: { read: 100000, write: 0 } },
+          cost: 1.0,
+        },
+      },
+    } as unknown as Event);
+    expect(onTokens).toHaveBeenLastCalledWith(
+      "session-1",
+      expect.objectContaining({ input: 800000, cacheRead: 100000 }),
+      true,
+    );
+
+    summaryAggregator.processEvent({
+      type: "session.compacted",
+      properties: { sessionID: "session-1" },
+    } as unknown as Event);
+
+    // Post-compaction totals start from the fresh window, not lastStep + growth.
+    summaryAggregator.processEvent({
+      type: "session.usage.updated",
+      properties: {
+        sessionID: "session-1",
+        tokens: { input: 90000, output: 50, reasoning: 0, cache: { read: 10000, write: 0 } },
+      },
+    } as unknown as Event);
+    expect(onTokens).toHaveBeenLastCalledWith(
+      "session-1",
+      expect.objectContaining({ input: 90000, cacheRead: 10000, cost: 0 }),
+      false,
+    );
+  });
+
+  it("ignores empty session.usage.updated totals", () => {    const onTokens = vi.fn();
     summaryAggregator.setOnTokens(onTokens);
     summaryAggregator.setSession("session-1");
 

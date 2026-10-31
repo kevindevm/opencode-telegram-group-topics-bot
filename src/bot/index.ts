@@ -1877,7 +1877,7 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
     });
   });
 
-  summaryAggregator.setOnTokens(async (sessionId, tokens) => {
+  summaryAggregator.setOnTokens(async (sessionId, tokens, completed) => {
     const target = getTargetBySessionId(sessionId);
     if (!target) {
       logger.debug("[Bot] Ignoring tokens for session without a topic target", { sessionId });
@@ -1932,7 +1932,7 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
       }
 
       if (pinnedMessageManager.isInitialized(target.scopeKey)) {
-        await pinnedMessageManager.onMessageComplete(tokens, target.scopeKey);
+        await pinnedMessageManager.onMessageComplete(tokens, target.scopeKey, completed);
 
         if (contextLimit <= 0) {
           contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);

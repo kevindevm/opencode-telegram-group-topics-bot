@@ -273,10 +273,10 @@ class PinnedMessageManager {
     }
   }
 
-  async loadContextFromHistory(    sessionId: string,
+  async loadContextFromHistory(
+    sessionId: string,
     directory: string,
     scopeKey: string = "global",
-    options: { includeSummaries?: boolean } = {},
   ): Promise<void> {
     const context = this.getContext(scopeKey);
     try {
@@ -288,46 +288,64 @@ class PinnedMessageManager {
         return;
       }
 
-      let maxContextSize = 0;
       let totalAssistantCost = 0;
       // Lifetime cost accumulates over the whole stored history, but the
-      // context baseline must come from the compaction marker onward:
-      // earlier messages stay stored server-side but are no longer sent to
-      // the model, and max() over them would freeze the dashboard at the
-      // pre-compaction high forever.
+      // context baseline is the LIVE window: the latest assistant message,
+      // not the historic peak. max() over history freezes the dashboard at
+      // the pre-compaction high forever (e.g. 917k shown while the real
+      // window is ~100k). Summaries never count: they carry the
+      // pre-compaction window that was just discarded.
       const baseline = onlyPostCompactionMessages(messagesData);
-      const baselineSet = new Set<unknown>(baseline);
-      let maxBaselineSize = 0;
-      messagesData.forEach((entry) => {
+      const windowSizeOf = (entry: unknown): { created: number; size: number } | null => {
         const { info } = entry as { info?: unknown };
         if (!info || (info as { role?: unknown }).role !== "assistant") {
-          return;
+          return null;
         }
-
         const assistantInfo = info as {
           summary?: boolean;
-          cost?: number;
           tokens?: { input: number; cache?: { read: number } };
+          time?: { created?: number };
         };
-
-        totalAssistantCost += assistantInfo.cost || 0;
-
-        if (!baselineSet.has(entry)) {
-          return;
+        if (assistantInfo.summary) {
+          return null;
         }
-        if (assistantInfo.summary && !options.includeSummaries) {
-          return;
-        }
-
-        const contextSize =
+        // Messages without a timestamp sort as oldest; the API always sends
+        // created, this only covers hand-built shapes.
+        const created =
+          typeof assistantInfo.time?.created === "number" ? assistantInfo.time.created : 0;
+        const size =
           (assistantInfo.tokens?.input || 0) + (assistantInfo.tokens?.cache?.read || 0);
-        if (contextSize > maxBaselineSize) {
-          maxBaselineSize = contextSize;
+        return size > 0 ? { created, size } : null;
+      };
+      for (const entry of messagesData) {
+        const { info } = entry as { info?: unknown };
+        const cost = (info as { cost?: unknown })?.cost;
+        if (typeof cost === "number") {
+          totalAssistantCost += cost;
         }
-      });
-      maxContextSize = maxBaselineSize;
+      }
+      const pickLatest = (entries: unknown[]): number => {
+        let latestSize = 0;
+        let latestCreated = -1;
+        for (const entry of entries) {
+          const window = windowSizeOf(entry);
+          // Strictly greater: entries arrive oldest-first, so ties keep the
+          // first (earliest) one and real timestamps still resolve to latest.
+          if (window && window.created > latestCreated) {
+            latestCreated = window.created;
+            latestSize = window.size;
+          }
+        }
+        return latestCreated < 0 ? -1 : latestSize;
+      };
+      let picked = pickLatest(baseline);
+      if (picked < 0) {
+        // No usable post-marker message yet (fresh compaction): fall back to
+        // the latest pre-marker window instead of showing zero.
+        picked = pickLatest(messagesData);
+      }
 
-      context.state.tokensUsed = maxContextSize;
+      context.state.tokensUsed = Math.max(0, picked);
       context.state.assistantCost = totalAssistantCost;
       context.state.sessionId = sessionId;
       this.syncSharedContext(scopeKey);
@@ -342,24 +360,30 @@ class PinnedMessageManager {
     directory: string,
     scopeKey: string = "global",
   ): Promise<void> {
-    await this.loadContextFromHistory(sessionId, directory, scopeKey, {
-      includeSummaries: true,
-    });
+    await this.loadContextFromHistory(sessionId, directory, scopeKey);
   }
 
-  async onMessageComplete(tokens: TokensInfo, scopeKey: string = "global"): Promise<void> {
+  async onMessageComplete(
+    tokens: TokensInfo,
+    scopeKey: string = "global",
+    completed: boolean = false,
+  ): Promise<void> {
     if (this.getContextLimit(scopeKey) === 0) {
       await this.fetchContextLimit(scopeKey);
     }
 
     const context = this.getContext(scopeKey);
-    // Preserve the history baseline: the live window must never move the
-    // dashboard backwards (history load races message events on reopen).
-    // Compaction re-baselines explicitly via loadContextFromHistory.
+    // Live estimates (completed=false) only move the dashboard forward: they
+    // are intra-step growth and must not flicker it backwards mid-turn.
+    // Completed messages (completed=true) carry the authoritative window for
+    // that step, so they set it outright — this is what lets the dashboard
+    // drop after a compaction instead of freezing at the old peak.
     const rawUsed = tokens.input + tokens.cacheRead;
     const limit = context.state.tokensLimit > 0 ? context.state.tokensLimit : 0;
-    const highWater = Math.max(context.state.tokensUsed, rawUsed);
-    context.state.tokensUsed = limit > 0 ? Math.min(highWater, limit) : highWater;
+    const nextUsed = completed
+      ? rawUsed
+      : Math.max(context.state.tokensUsed, rawUsed);
+    context.state.tokensUsed = limit > 0 ? Math.min(nextUsed, limit) : nextUsed;
     context.state.assistantCost += tokens.cost;
     await this.refreshSessionTitle(scopeKey);
     this.syncSharedContext(scopeKey);

@@ -245,10 +245,16 @@ function toV1AssistantMessage(
   sessionID: string,
   directory: string,
 ): V1MessageWithParts {
+  // The generated client types lag the server: compaction summaries arrive
+  // with a runtime `summary` flag the type does not declare. Read it
+  // defensively — without it the dashboard can never find the compaction
+  // marker and freezes on the pre-compaction peak.
+  const isSummary = (message as { summary?: unknown }).summary === true;
   const info: AssistantMessage = {
     id: message.id,
     sessionID,
     role: "assistant",
+    ...(isSummary ? { summary: true } : {}),
     time: {
       created: message.time.created,
       ...(message.time.completed ? { completed: message.time.completed } : {}),

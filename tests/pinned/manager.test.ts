@@ -505,7 +505,7 @@ describe("pinned manager scoped state", () => {
     );
   });
 
-  it("includes summary messages when reloading context after compaction", async () => {
+  it("skips summary messages when reloading context after compaction", async () => {
     const api = createApi();
 
     setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
@@ -529,12 +529,81 @@ describe("pinned manager scoped state", () => {
 
     await pinnedMessageManager.onSessionCompacted("s1", "/repo/a", "chat:-1:10");
 
+    // The summary carries the discarded pre-compaction window, so it must
+    // not become the baseline; its cost still counts towards the lifetime.
     expect(pinnedMessageManager.getState("chat:-1:10")).toEqual(
       expect.objectContaining({
-        tokensUsed: 920,
+        tokensUsed: 0,
         assistantCost: expect.closeTo(0.005, 5),
       }),
     );
+  });
+
+  it("baselines on the latest message instead of the historic peak", async () => {
+    const api = createApi();
+
+    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+    opencodeMocks.messages.mockResolvedValueOnce({
+      data: [
+        {
+          info: {
+            role: "assistant",
+            cost: 1.0,
+            tokens: { input: 800000, cache: { read: 117146 } },
+            time: { created: 1000 },
+          },
+        },
+        {
+          info: {
+            role: "assistant",
+            cost: 0.01,
+            tokens: { input: 1000, cache: { read: 127000 } },
+            time: { created: 2000 },
+          },
+        },
+      ],
+      error: null,
+    });
+
+    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+    await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+
+    // Live window is the latest message (128k), never the 917k peak.
+    expect(pinnedMessageManager.getState("chat:-1:10")).toEqual(
+      expect.objectContaining({ tokensUsed: 128000 }),
+    );
+  });
+
+  it("lets a completed message move the dashboard down to the real window", async () => {
+    const api = createApi();
+
+    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+    await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+
+    await pinnedMessageManager.onMessageComplete(
+      { input: 280000, output: 10, reasoning: 0, cacheRead: 20000, cacheWrite: 0, cost: 1.0 },
+      "chat:-1:10",
+      true,
+    );
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(300000);
+
+    // Post-compaction completion with the real (smaller) window resets it.
+    await pinnedMessageManager.onMessageComplete(
+      { input: 1000, output: 10, reasoning: 0, cacheRead: 127000, cacheWrite: 0, cost: 0.01 },
+      "chat:-1:10",
+      true,
+    );
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(128000);
+
+    // Live estimates still only move forward mid-turn, never backwards.
+    await pinnedMessageManager.onMessageComplete(
+      { input: 100, output: 0, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0 },
+      "chat:-1:10",
+    );
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(128000);
   });
 
   it("shows the git branch for linked worktree projects", async () => {
