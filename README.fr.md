@@ -337,7 +337,7 @@ Chemins de configuration en mode installé :
 | `SHOW_PC_USER_MIRROR` | Recopier dans le topic les prompts tapés sur PC (bascule aussi via `/display`) | Non | `true` |
 | `SHOW_LINK_PREVIEWS` | Afficher les aperçus de liens sous les messages de l'assistant (bascule aussi via `/display`) | Non | `true` |
 | `MESSAGE_FORMAT_MODE` | Mode de formatage des réponses de l'assistant : `markdown` ou `raw` | Non | `markdown` |
-| `RESPONSE_STREAM_THROTTLE_MS` | Délai entre les mises à jour en streaming de l'assistant, en ms | Non | `1000` |
+| `RESPONSE_STREAM_THROTTLE_MS` | Délai entre les mises à jour en streaming de l'assistant, en ms | Non | `2500` |
 | `BASH_TOOL_DISPLAY_MAX_LENGTH` | Longueur maximale affichée du code `bash`/`execute` dans les résumés | Non | `128` |
 | `CODE_FILE_MAX_SIZE_KB` | Taille maximale (Ko) d'un fichier envoyé comme document | Non | `100` |
 | `STT_API_URL` | URL de base d'une API compatible Whisper (ou endpoint complet pour `plain`) | Non | - |

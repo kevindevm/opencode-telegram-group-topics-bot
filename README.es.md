@@ -337,7 +337,7 @@ Rutas de configuración en modo instalado:
 | `SHOW_PC_USER_MIRROR` | Reflejar en el topic los prompts escritos en la PC (también activable vía `/display`) | No | `true` |
 | `SHOW_LINK_PREVIEWS` | Mostrar previews de enlaces bajo los mensajes del asistente (también activable vía `/display`) | No | `true` |
 | `MESSAGE_FORMAT_MODE` | Modo de formato de las respuestas del asistente: `markdown` o `raw` | No | `markdown` |
-| `RESPONSE_STREAM_THROTTLE_MS` | Retardo entre actualizaciones transmitidas del asistente, en ms | No | `1000` |
+| `RESPONSE_STREAM_THROTTLE_MS` | Retardo entre actualizaciones transmitidas del asistente, en ms | No | `2500` |
 | `BASH_TOOL_DISPLAY_MAX_LENGTH` | Longitud máxima mostrada del código `bash`/`execute` en los resúmenes | No | `128` |
 | `CODE_FILE_MAX_SIZE_KB` | Tamaño máximo de archivo (KB) para enviarlo como documento | No | `100` |
 | `STT_API_URL` | URL base de la API compatible con Whisper (o endpoint completo para `plain`) | No | - |

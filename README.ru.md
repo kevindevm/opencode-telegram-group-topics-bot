@@ -337,7 +337,7 @@ nssm start OpenCodeTelegramBot
 | `SHOW_PC_USER_MIRROR` | Дублировать промпты, набранные на ПК, в тему (также переключается через `/display`) | Нет | `true` |
 | `SHOW_LINK_PREVIEWS` | Показывать превью ссылок под сообщениями ассистента (также переключается через `/display`) | Нет | `true` |
 | `MESSAGE_FORMAT_MODE` | Режим форматирования ответов ассистента: `markdown` или `raw` | Нет | `markdown` |
-| `RESPONSE_STREAM_THROTTLE_MS` | Задержка между обновлениями стриминга ответов, в мс | Нет | `1000` |
+| `RESPONSE_STREAM_THROTTLE_MS` | Задержка между обновлениями стриминга ответов, в мс | Нет | `2500` |
 | `BASH_TOOL_DISPLAY_MAX_LENGTH` | Максимальная длина показа кода `bash`/`execute` в сводках | Нет | `128` |
 | `CODE_FILE_MAX_SIZE_KB` | Максимальный размер файла (КБ) для отправки документом | Нет | `100` |
 | `STT_API_URL` | Базовый URL Whisper-совместимого API (или полный endpoint для `plain`) | Нет | - |

@@ -333,7 +333,7 @@ Installed-mode config paths:
 | `SHOW_PC_USER_MIRROR` | Mirror prompts typed on PC into the topic (also flippable via `/display`) | No | `true` |
 | `SHOW_LINK_PREVIEWS` | Show link previews under assistant messages (also flippable via `/display`) | No | `true` |
 | `MESSAGE_FORMAT_MODE` | Assistant reply formatting mode: `markdown` or `raw` | No | `markdown` |
-| `RESPONSE_STREAM_THROTTLE_MS` | Delay between streamed assistant updates, in ms | No | `1000` |
+| `RESPONSE_STREAM_THROTTLE_MS` | Delay between streamed assistant updates, in ms | No | `2500` |
 | `BASH_TOOL_DISPLAY_MAX_LENGTH` | Max displayed length for `bash`/`execute` code in summaries | No | `128` |
 | `CODE_FILE_MAX_SIZE_KB` | Max file size (KB) to send as a document | No | `100` |
 | `STT_API_URL` | Whisper-compatible API base URL (or full endpoint for `plain`) | No | - |

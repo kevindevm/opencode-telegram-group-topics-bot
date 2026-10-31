@@ -14,6 +14,7 @@ import {
   getQueuedPromptCountForTests,
   handleQueuedPromptCancel,
   handleQueuedPromptFront,
+  handleQueuedPromptInterrupt,
   handleQueuedPromptSteer,
   listQueuedPrompts,
   processUserPrompt,
@@ -720,7 +721,52 @@ describe("bot/handlers/prompt", () => {
     expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
       expect.objectContaining({ delivery: "steer" }),
     );
-    expect(steerCtx.editMessageText).toHaveBeenCalledWith(expect.stringContaining("⚡"));
+    expect(steerCtx.editMessageText).toHaveBeenCalledWith(expect.stringContaining("🧭"));
+  });
+
+  it("interrupts the running turn and dispatches the queued prompt fresh", async () => {
+    mocked.serverVersion = "v2";
+    mocked.sessionAbortMock.mockResolvedValue({ data: true, error: null });
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.sessionStatusMock.mockResolvedValue({
+      data: { "session-1": { type: "busy" } },
+      error: null,
+    });
+    const bot = {
+      api: { sendMessage: vi.fn().mockResolvedValue(undefined) },
+    } as unknown as Bot<Context>;
+
+    const ctx = createContext();
+    await processUserPrompt(ctx, "Urgent", {
+      bot,
+      ensureEventSubscription: vi.fn(),
+    });
+    expect(getQueuedPromptCountForTests("session-1")).toBe(1);
+
+    const markup = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]?.reply_markup as {
+      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
+    };
+    const interruptCallback = markup?.inline_keyboard
+      ?.flat()
+      .map((button) => button.callback_data ?? "")
+      .find((data) => data.startsWith("queue:interrupt:"));
+    expect(interruptCallback).toBeDefined();
+
+    const interruptCtx = {
+      callbackQuery: { data: interruptCallback },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageText: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Context;
+
+    expect(await handleQueuedPromptInterrupt(interruptCtx)).toBe(true);
+
+    expect(getQueuedPromptCountForTests("session-1")).toBe(0);
+    expect(mocked.sessionAbortMock).toHaveBeenCalled();
+    // Fresh turn, not steer: aborts first, then submits without delivery override.
+    expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ delivery: "steer" }),
+    );
+    expect(interruptCtx.editMessageText).toHaveBeenCalledWith(expect.stringContaining("⏹"));
   });
 
   it("aborts before steering on v1", async () => {
@@ -766,10 +812,11 @@ describe("bot/handlers/prompt", () => {
     mocked.serverVersion = "v2";
   });
 
-  it("answers missing for front and steer on unknown ids", async () => {
+  it("answers missing for front, steer and interrupt on unknown ids", async () => {
     for (const [handler, prefix] of [
       [handleQueuedPromptFront, "queue:front:"],
       [handleQueuedPromptSteer, "queue:steer:"],
+      [handleQueuedPromptInterrupt, "queue:interrupt:"],
     ] as const) {
       const ctx = {
         callbackQuery: { data: `${prefix}nope` },
@@ -784,7 +831,7 @@ describe("bot/handlers/prompt", () => {
     }
   });
 
-  it("ignores unrelated front and steer callbacks", async () => {
+  it("ignores unrelated front, steer and interrupt callbacks", async () => {
     const ctx = {
       callbackQuery: { data: "model:result:0" },
       answerCallbackQuery: vi.fn(),
@@ -792,6 +839,7 @@ describe("bot/handlers/prompt", () => {
 
     expect(await handleQueuedPromptFront(ctx)).toBe(false);
     expect(await handleQueuedPromptSteer(ctx)).toBe(false);
+    expect(await handleQueuedPromptInterrupt(ctx)).toBe(false);
   });
 
   it("persists queued prompts when they are queued and removed", async () => {

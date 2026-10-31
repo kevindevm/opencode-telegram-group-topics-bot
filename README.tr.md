@@ -337,7 +337,7 @@ Kurulu mod yapılandırma yolları:
 | `SHOW_PC_USER_MIRROR` | PC'de yazılan promptları konuya yansıtır (`/display` ile de çevrilebilir) | Hayır | `true` |
 | `SHOW_LINK_PREVIEWS` | Asistan mesajlarının altında link önizlemeleri gösterir (`/display` ile de çevrilebilir) | Hayır | `true` |
 | `MESSAGE_FORMAT_MODE` | Asistan yanıt biçimlendirme modu: `markdown` veya `raw` | Hayır | `markdown` |
-| `RESPONSE_STREAM_THROTTLE_MS` | Akış halindeki asistan güncellemeleri arasındaki gecikme, ms | Hayır | `1000` |
+| `RESPONSE_STREAM_THROTTLE_MS` | Akış halindeki asistan güncellemeleri arasındaki gecikme, ms | Hayır | `2500` |
 | `BASH_TOOL_DISPLAY_MAX_LENGTH` | Özetlerde `bash`/`execute` kodu için azami görüntülenen uzunluk | Hayır | `128` |
 | `CODE_FILE_MAX_SIZE_KB` | Belge olarak gönderilecek azami dosya boyutu (KB) | Hayır | `100` |
 | `STT_API_URL` | Whisper uyumlu API taban adresi (`plain` için tam endpoint) | Hayır | - |

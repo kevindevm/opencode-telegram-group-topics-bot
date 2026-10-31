@@ -81,14 +81,18 @@ export const en = {
   "bot.session_queued_duplicate":
     "⏳ That message is already queued at position {position}; not adding it twice.",
   "bot.session_queued_cancel": "❌ Cancel queued message",
-  "bot.session_queue_steer": "⚡ Interrupt & run now",
+  "bot.session_queue_steer": "🧭 Steer into running turn",
   "bot.session_queue_front": "⏫ Move to front",
   "bot.session_queue_moved_front":
     "⏫ Moved to the front of the queue. It will run when the current one finishes.\n\nMessage:\n{preview}",
   "bot.session_queue_moved_front_callback": "⏫ Moved to front",
-  "bot.session_queue_steering": "⚡ Interrupting and running now:\n{preview}",
-  "bot.session_queue_steering_callback": "⚡ Running now",
-  "bot.session_queue_steer_failed": "⚠️ Could not redirect. Still queued.",
+  "bot.session_queue_steering": "🧭 Steering into the running turn:\n{preview}",
+  "bot.session_queue_steering_callback": "🧭 Steering now",
+  "bot.session_queue_steer_failed": "⚠️ Could not steer. Still queued.",
+  "bot.session_queue_interrupt": "⏹ Interrupt",
+  "bot.session_queue_interrupting": "⏹ Interrupting and running now:\n{preview}",
+  "bot.session_queue_interrupting_callback": "⏹ Running now",
+  "bot.session_queue_interrupt_failed": "⚠️ Could not interrupt. Still queued.",
   "bot.session_queue_cancelled":
     "❌ Queued message cancelled, it will not run.\n\nCancelled message:\n{preview}",
   "bot.session_queue_cancelled_callback": "❌ Queued message cancelled",

@@ -337,7 +337,7 @@ Konfigurationspfade im Installationsmodus:
 | `SHOW_PC_USER_MIRROR` | Am PC getippte Prompts in das Thema spiegeln (auch umschaltbar über `/display`) | Nein | `true` |
 | `SHOW_LINK_PREVIEWS` | Linkvorschauen unter Assistentennachrichten anzeigen (auch umschaltbar über `/display`) | Nein | `true` |
 | `MESSAGE_FORMAT_MODE` | Formatierungsmodus der Assistentenantwort: `markdown` oder `raw` | Nein | `markdown` |
-| `RESPONSE_STREAM_THROTTLE_MS` | Verzögerung zwischen gestreamten Assistenten-Updates, in ms | Nein | `1000` |
+| `RESPONSE_STREAM_THROTTLE_MS` | Verzögerung zwischen gestreamten Assistenten-Updates, in ms | Nein | `2500` |
 | `BASH_TOOL_DISPLAY_MAX_LENGTH` | Maximale angezeigte Länge für `bash`-/`execute`-Code in Zusammenfassungen | Nein | `128` |
 | `CODE_FILE_MAX_SIZE_KB` | Maximale Dateigröße (KB) zum Senden als Dokument | Nein | `100` |
 | `STT_API_URL` | Whisper-kompatible API-Basis-URL (oder vollständiger Endpunkt für `plain`) | Nein | - |

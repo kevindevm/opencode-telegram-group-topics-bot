@@ -111,6 +111,7 @@ interface QueuedPromptRequest {
 export const QUEUED_PROMPT_CANCEL_PREFIX = "queue:cancel:";
 export const QUEUED_PROMPT_STEER_PREFIX = "queue:steer:";
 export const QUEUED_PROMPT_FRONT_PREFIX = "queue:front:";
+export const QUEUED_PROMPT_INTERRUPT_PREFIX = "queue:interrupt:";
 
 const queuedPromptRequests = new Map<string, QueuedPromptRequest[]>();
 const drainingQueuedSessions = new Set<string>();
@@ -393,11 +394,12 @@ function takeNextQueuedPromptRequest(sessionId: string): QueuedPromptRequest | n
   return nextRequest;
 }
 
-function buildQueuedPromptCancelKeyboard(queueId: string): InlineKeyboard {
+function buildQueuedPromptKeyboard(queueId: string): InlineKeyboard {
   return new InlineKeyboard()
+    .text(t("bot.session_queue_interrupt"), `${QUEUED_PROMPT_INTERRUPT_PREFIX}${queueId}`)
     .text(t("bot.session_queue_steer"), `${QUEUED_PROMPT_STEER_PREFIX}${queueId}`)
-    .text(t("bot.session_queue_front"), `${QUEUED_PROMPT_FRONT_PREFIX}${queueId}`)
     .row()
+    .text(t("bot.session_queue_front"), `${QUEUED_PROMPT_FRONT_PREFIX}${queueId}`)
     .text(t("bot.session_queued_cancel"), `${QUEUED_PROMPT_CANCEL_PREFIX}${queueId}`);
 }
 
@@ -411,7 +413,7 @@ async function sendQueuedPromptNotice(
   await bot.api
     .sendMessage(chatId, t("bot.session_queued", { position: String(position) }), {
       ...getThreadSendOptions(threadId),
-      reply_markup: buildQueuedPromptCancelKeyboard(queueId),
+      reply_markup: buildQueuedPromptKeyboard(queueId),
     })
     .catch(() => {});
 }
@@ -535,6 +537,56 @@ export async function handleQueuedPromptSteer(ctx: Context): Promise<boolean> {
   }
 
   submitPromptRequest(botInstance, { ...removed, notifyOnQueue: false }, { delivery: "steer" });
+  return true;
+}
+
+/** Handles the "interrupt and run now" button: aborts the running turn and dispatches the queued prompt as a fresh turn. Returns true when consumed. */
+export async function handleQueuedPromptInterrupt(ctx: Context): Promise<boolean> {
+  const data = ctx.callbackQuery?.data ?? "";
+  if (!data.startsWith(QUEUED_PROMPT_INTERRUPT_PREFIX)) {
+    return false;
+  }
+
+  const queueId = data.slice(QUEUED_PROMPT_INTERRUPT_PREFIX.length);
+  if (!queueId) {
+    return true;
+  }
+
+  const removed = cancelQueuedPrompt(queueId);
+  if (!removed) {
+    await ctx.answerCallbackQuery({ text: t("bot.session_queue_cancel_missing") }).catch(() => {});
+    return true;
+  }
+
+  if (!botInstance) {
+    logger.error("[Bot] Cannot interrupt: bot instance unavailable");
+    enqueuePromptRequest(removed);
+    await ctx.answerCallbackQuery({ text: t("bot.session_queue_interrupt_failed") }).catch(() => {});
+    return true;
+  }
+
+  logger.info(`[Bot] Interrupting session ${removed.sessionId} for queued prompt ${queueId}`);
+  markForwardedPrompt(removed.sessionId, getRequestText(removed));
+
+  await ctx
+    .answerCallbackQuery({ text: t("bot.session_queue_interrupting_callback") })
+    .catch(() => {});
+  await ctx
+    .editMessageText(
+      t("bot.session_queue_interrupting", { preview: getQueuedPromptPreview(removed) }),
+    )
+    .catch(() => {});
+
+  try {
+    await opencodeClient.session.abort({
+      sessionID: removed.promptOptions.sessionID,
+      directory: removed.promptOptions.directory,
+    });
+  } catch (error) {
+    logger.warn("[Bot] Abort before interrupt failed, submitting anyway:", error);
+  }
+  // Fresh turn, not steer: the running work was just killed.
+  submitPromptRequest(botInstance, { ...removed, notifyOnQueue: true });
   return true;
 }
 
@@ -1136,7 +1188,7 @@ export async function processUserPrompt(
         `[Bot] Dropping duplicate queued prompt for busy session ${currentSession.id} (already at position ${pending.length})`,
       );
       await ctx.reply(t("bot.session_queued_duplicate", { position: String(pending.length) }), {
-        reply_markup: tailEntry ? buildQueuedPromptCancelKeyboard(tailEntry.queueId) : undefined,
+        reply_markup: tailEntry ? buildQueuedPromptKeyboard(tailEntry.queueId) : undefined,
       });
       return true;
     }
@@ -1173,7 +1225,7 @@ export async function processUserPrompt(
     const queuedList = queuedPromptRequests.get(currentSession.id) ?? [];
     const queuedEntry = queuedList[queuedList.length - 1];
     await ctx.reply(t("bot.session_queued", { position: String(position) }), {
-      reply_markup: queuedEntry ? buildQueuedPromptCancelKeyboard(queuedEntry.queueId) : undefined,
+      reply_markup: queuedEntry ? buildQueuedPromptKeyboard(queuedEntry.queueId) : undefined,
     });
     return true;
   }

@@ -142,12 +142,12 @@ describe("config boolean env parsing", () => {
     expect(config.bot.scheduledTaskExecutionTimeoutMinutes).toBe(45);
   });
 
-  it("uses 1000ms as default response stream throttle", async () => {
+  it("uses 2500ms as default response stream throttle", async () => {
     vi.stubEnv("RESPONSE_STREAM_THROTTLE_MS", "");
 
     const config = await loadConfig();
 
-    expect(config.bot.responseStreamThrottleMs).toBe(1000);
+    expect(config.bot.responseStreamThrottleMs).toBe(2500);
   });
 
   it("keeps open browser roots unset by default", async () => {
@@ -179,7 +179,7 @@ describe("config boolean env parsing", () => {
 
     const config = await loadConfig();
 
-    expect(config.bot.responseStreamThrottleMs).toBe(1000);
+    expect(config.bot.responseStreamThrottleMs).toBe(2500);
   });
 
   it("uses 128 as default bash tool display length", async () => {

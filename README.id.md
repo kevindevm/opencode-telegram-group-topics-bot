@@ -337,7 +337,7 @@ Path konfigurasi mode terpasang:
 | `SHOW_PC_USER_MIRROR` | Cerminan prompt yang diketik di PC ke dalam topik (juga bisa dibalik lewat `/display`) | Tidak | `true` |
 | `SHOW_LINK_PREVIEWS` | Tampilkan pratinjau tautan di bawah pesan asisten (juga bisa dibalik lewat `/display`) | Tidak | `true` |
 | `MESSAGE_FORMAT_MODE` | Mode format balasan asisten: `markdown` atau `raw` | Tidak | `markdown` |
-| `RESPONSE_STREAM_THROTTLE_MS` | Jeda antar pembaruan asisten yang di-streaming, dalam ms | Tidak | `1000` |
+| `RESPONSE_STREAM_THROTTLE_MS` | Jeda antar pembaruan asisten yang di-streaming, dalam ms | Tidak | `2500` |
 | `BASH_TOOL_DISPLAY_MAX_LENGTH` | Panjang tampilan maksimum untuk kode `bash`/`execute` dalam ringkasan | Tidak | `128` |
 | `CODE_FILE_MAX_SIZE_KB` | Ukuran file maksimum (KB) untuk dikirim sebagai dokumen | Tidak | `100` |
 | `STT_API_URL` | URL dasar API kompatibel Whisper (atau endpoint lengkap untuk `plain`) | Tidak | - |

@@ -81,14 +81,18 @@ export const es: I18nDictionary = {
   "bot.session_queued_duplicate":
     "⏳ Ese mensaje ya está en cola en la posición {position}; no lo agrego dos veces.",
   "bot.session_queued_cancel": "❌ Borrar mensaje en cola",
-  "bot.session_queue_steer": "⚡ Interrumpir y ejecutar ahora",
+  "bot.session_queue_steer": "🧭 Orientar el turno",
   "bot.session_queue_front": "⏫ Pasar adelante",
   "bot.session_queue_moved_front":
     "⏫ Pasado al frente de la cola. Se ejecutará cuando termine la actual.\n\nMensaje:\n{preview}",
   "bot.session_queue_moved_front_callback": "⏫ Pasado adelante",
-  "bot.session_queue_steering": "⚡ Interrumpiendo y ejecutando ahora:\n{preview}",
-  "bot.session_queue_steering_callback": "⚡ Ejecutando ahora",
-  "bot.session_queue_steer_failed": "⚠️ No se pudo redirigir. Sigue en cola.",
+  "bot.session_queue_steering": "🧭 Orientando el turno actual:\n{preview}",
+  "bot.session_queue_steering_callback": "🧭 Orientando",
+  "bot.session_queue_steer_failed": "⚠️ No se pudo orientar. Sigue en cola.",
+  "bot.session_queue_interrupt": "⏹ Interrumpir",
+  "bot.session_queue_interrupting": "⏹ Interrumpiendo y ejecutando ahora:\n{preview}",
+  "bot.session_queue_interrupting_callback": "⏹ Ejecutando ahora",
+  "bot.session_queue_interrupt_failed": "⚠️ No se pudo interrumpir. Sigue en cola.",
   "bot.session_queue_cancelled":
     "❌ Mensaje en cola borrado, no se va a ejecutar.\n\nMensaje borrado:\n{preview}",
   "bot.session_queue_cancelled_callback": "❌ Mensaje en cola borrado",

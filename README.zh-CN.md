@@ -337,7 +337,7 @@ installed 模式下的配置路径：
 | `SHOW_PC_USER_MIRROR` | 将电脑上输入的 prompt 镜像到话题中（也可通过 `/display` 切换） | 否 | `true` |
 | `SHOW_LINK_PREVIEWS` | 在助手消息下方显示链接预览（也可通过 `/display` 切换） | 否 | `true` |
 | `MESSAGE_FORMAT_MODE` | 助手回复的格式化模式：`markdown` 或 `raw` | 否 | `markdown` |
-| `RESPONSE_STREAM_THROTTLE_MS` | 流式助手更新之间的延迟，单位为毫秒 | 否 | `1000` |
+| `RESPONSE_STREAM_THROTTLE_MS` | 流式助手更新之间的延迟，单位为毫秒 | 否 | `2500` |
 | `BASH_TOOL_DISPLAY_MAX_LENGTH` | 摘要中 `bash`/`execute` 代码的最大展示长度 | 否 | `128` |
 | `CODE_FILE_MAX_SIZE_KB` | 以文档形式发送的文件最大大小（KB） | 否 | `100` |
 | `STT_API_URL` | 兼容 Whisper 的 API 基础地址（`plain` 模式则是完整端点） | 否 | - |

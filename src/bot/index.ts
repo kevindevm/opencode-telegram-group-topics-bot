@@ -54,7 +54,7 @@ import { handleModelSelect, handleModelSearchTextAnswer, showModelSelectionMenu 
 import { handleVariantSelect, showVariantSelectionMenu } from "./handlers/variant.js";
 import { compactCommand, handleContextButtonPress, handleCompactConfirm } from "./handlers/context.js";
 import { handleInlineMenuCancel } from "./handlers/inline-menu.js";
-import { handleQueuedPromptCancel, handleQueuedPromptFront, handleQueuedPromptSteer } from "./handlers/prompt.js";
+import { handleQueuedPromptCancel, handleQueuedPromptFront, handleQueuedPromptInterrupt, handleQueuedPromptSteer } from "./handlers/prompt.js";
 import { displayCommand, handleDisplayCallback } from "./commands/display.js";
 import { queueCommand, handleQueueCallback } from "./commands/queue.js";
 import { trustCommand, handleTrustCallback } from "./commands/trust.js";
@@ -2296,6 +2296,7 @@ export function createBot(): Bot<Context> {
       const handledQueuedCancel = await handleQueuedPromptCancel(ctx);
       const handledQueuedFront = await handleQueuedPromptFront(ctx);
       const handledQueuedSteer = await handleQueuedPromptSteer(ctx);
+      const handledQueuedInterrupt = await handleQueuedPromptInterrupt(ctx);
       const handledQueue = await handleQueueCallback(ctx);
       const handledTrust = await handleTrustCallback(ctx);
       const handledSession = await handleSessionSelect(ctx);
@@ -2319,7 +2320,7 @@ export function createBot(): Bot<Context> {
       });
 
       logger.debug(
-        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, queuedCancel=${handledQueuedCancel}, queuedFront=${handledQueuedFront}, queuedSteer=${handledQueuedSteer}, queue=${handledQueue}, trust=${handledTrust}, toolBackground=${handledToolBackground}, display=${handledDisplay}, session=${handledSession}, backgroundSession=${handledBackgroundSession}, recent=${handledRecent}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
+        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, queuedCancel=${handledQueuedCancel}, queuedFront=${handledQueuedFront}, queuedSteer=${handledQueuedSteer}, queuedInterrupt=${handledQueuedInterrupt}, queue=${handledQueue}, trust=${handledTrust}, toolBackground=${handledToolBackground}, display=${handledDisplay}, session=${handledSession}, backgroundSession=${handledBackgroundSession}, recent=${handledRecent}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
       );
 
       if (

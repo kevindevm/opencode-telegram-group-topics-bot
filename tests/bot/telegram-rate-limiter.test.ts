@@ -336,6 +336,104 @@ describe("bot/telegram-rate-limiter", () => {
 });
 
 describe("runWithRateLimitRetries", () => {
+  it("serves user traffic before repaints when both are ready", async () => {
+    vi.useFakeTimers();
+    try {
+      const limiter = new TelegramRateLimiter();
+      const executionOrder: string[] = [];
+
+      // Occupy the loop so the next two jobs actually queue up together.
+      let releaseGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      const gateJob = limiter.enqueue(
+        "sendMessage",
+        { chat_id: -1000, message_thread_id: 1 },
+        async () => {
+          await gate;
+          return "gate-ok";
+        },
+      );
+
+      const repaintJob = limiter.enqueue(
+        "editMessageText",
+        { chat_id: -1001, message_thread_id: 1, message_id: 10 },
+        async () => {
+          executionOrder.push("repaint");
+          return "repaint-ok";
+        },
+      );
+
+      const userJob = limiter.enqueue(
+        "sendMessage",
+        { chat_id: -1002, message_thread_id: 2 },
+        async () => {
+          executionOrder.push("user");
+          return "user-ok";
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      releaseGate!();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await Promise.all([gateJob, repaintJob, userJob]);
+
+      expect(executionOrder).toEqual(["user", "repaint"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps in-order delivery within the same scope across priorities", async () => {
+    vi.useFakeTimers();
+    try {
+      const limiter = new TelegramRateLimiter();
+      const executionOrder: string[] = [];
+
+      let releaseGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      const gateJob = limiter.enqueue(
+        "sendMessage",
+        { chat_id: -1000, message_thread_id: 9 },
+        async () => {
+          await gate;
+          return "gate-ok";
+        },
+      );
+
+      const repaintJob = limiter.enqueue(
+        "editMessageText",
+        { chat_id: -1001, message_thread_id: 1, message_id: 10 },
+        async () => {
+          executionOrder.push("repaint");
+          return "repaint-ok";
+        },
+      );
+
+      const userJob = limiter.enqueue(
+        "sendMessage",
+        { chat_id: -1001, message_thread_id: 1 },
+        async () => {
+          executionOrder.push("user");
+          return "user-ok";
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      releaseGate!();
+      await vi.advanceTimersByTimeAsync(2000);
+      await Promise.all([gateJob, repaintJob, userJob]);
+
+      // Same scope: FIFO wins over priority, messages never reorder.
+      expect(executionOrder).toEqual(["repaint", "user"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("passes through the first success", async () => {
     const { runWithRateLimitRetries } = await import(
       "../../src/bot/telegram-rate-limiter.js"
