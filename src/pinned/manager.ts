@@ -303,18 +303,30 @@ class PinnedMessageManager {
         }
         const assistantInfo = info as {
           summary?: boolean;
-          tokens?: { input: number; cache?: { read: number } };
+          tokens?: {
+            input: number;
+            output: number;
+            reasoning: number;
+            cache?: { read: number; write: number };
+          };
           time?: { created?: number };
         };
         if (assistantInfo.summary) {
           return null;
         }
+        // Same window the TUI shows: the whole message footprint, not just
+        // the fresh input plus cache reads.
+        const tokens = assistantInfo.tokens;
+        const size =
+          (tokens?.input || 0) +
+          (tokens?.output || 0) +
+          (tokens?.reasoning || 0) +
+          (tokens?.cache?.read || 0) +
+          (tokens?.cache?.write || 0);
         // Messages without a timestamp sort as oldest; the API always sends
         // created, this only covers hand-built shapes.
         const created =
           typeof assistantInfo.time?.created === "number" ? assistantInfo.time.created : 0;
-        const size =
-          (assistantInfo.tokens?.input || 0) + (assistantInfo.tokens?.cache?.read || 0);
         return size > 0 ? { created, size } : null;
       };
       for (const entry of messagesData) {
@@ -323,6 +335,22 @@ class PinnedMessageManager {
         if (typeof cost === "number") {
           totalAssistantCost += cost;
         }
+      }
+      // The server's session cost is the same number the TUI shows: it also
+      // covers turns our history slice misses (subagents, compaction
+      // requests). Prefer it when available, keep the accumulated sum as
+      // the offline fallback.
+      try {
+        const { data: sessionData } = await opencodeClient.session.get({
+          sessionID: sessionId,
+          directory,
+        });
+        const serverCost = (sessionData as { cost?: unknown } | null)?.cost;
+        if (typeof serverCost === "number" && Number.isFinite(serverCost)) {
+          totalAssistantCost = serverCost;
+        }
+      } catch {
+        // Keep the accumulated history cost.
       }
       const pickLatest = (entries: unknown[]): number => {
         let latestSize = 0;
@@ -378,7 +406,9 @@ class PinnedMessageManager {
     // Completed messages (completed=true) carry the authoritative window for
     // that step, so they set it outright — this is what lets the dashboard
     // drop after a compaction instead of freezing at the old peak.
-    const rawUsed = tokens.input + tokens.cacheRead;
+    // Same footprint the TUI shows: input + output + reasoning + cache.
+    const rawUsed =
+      tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead + tokens.cacheWrite;
     const limit = context.state.tokensLimit > 0 ? context.state.tokensLimit : 0;
     const nextUsed = completed
       ? rawUsed

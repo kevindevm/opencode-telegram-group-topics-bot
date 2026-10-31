@@ -539,6 +539,38 @@ describe("pinned manager scoped state", () => {
     );
   });
 
+  it("prefers the server session cost over the accumulated history slice", async () => {
+    const api = createApi();
+
+    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+    opencodeMocks.messages.mockResolvedValueOnce({
+      data: [
+        {
+          info: {
+            role: "assistant",
+            cost: 0.02,
+            tokens: { input: 5000, cache: { read: 250 } },
+          },
+        },
+      ],
+      error: null,
+    });
+    // The server total also covers subagents and compaction requests that
+    // never appear as root messages in history.
+    opencodeMocks.get.mockResolvedValueOnce({
+      data: { cost: 6.3576 },
+      error: null,
+    });
+
+    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+    await pinnedMessageManager.onSessionCompacted("s1", "/repo/a", "chat:-1:10");
+
+    expect(pinnedMessageManager.getState("chat:-1:10")).toEqual(
+      expect.objectContaining({ assistantCost: expect.closeTo(6.3576, 4) }),
+    );
+  });
+
   it("baselines on the latest message instead of the historic peak", async () => {
     const api = createApi();
 
@@ -588,7 +620,7 @@ describe("pinned manager scoped state", () => {
       "chat:-1:10",
       true,
     );
-    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(300000);
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(300010);
 
     // Post-compaction completion with the real (smaller) window resets it.
     await pinnedMessageManager.onMessageComplete(
@@ -596,14 +628,14 @@ describe("pinned manager scoped state", () => {
       "chat:-1:10",
       true,
     );
-    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(128000);
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(128010);
 
     // Live estimates still only move forward mid-turn, never backwards.
     await pinnedMessageManager.onMessageComplete(
       { input: 100, output: 0, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0 },
       "chat:-1:10",
     );
-    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(128000);
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(128010);
   });
 
   it("shows the git branch for linked worktree projects", async () => {

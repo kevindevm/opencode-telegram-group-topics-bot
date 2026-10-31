@@ -1907,7 +1907,9 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
 
       // Update keyboardManager SYNCHRONOUSLY before any await
       // This ensures keyboard has correct context when onComplete sends the reply
-      const rawContextSize = tokens.input + tokens.cacheRead;
+      // Same footprint the TUI shows: input + output + reasoning + cache.
+      const rawContextSize =
+        tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead + tokens.cacheWrite;
       let contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
       // Sanity gate: the live window can never exceed the model limit.
       // Anything bigger is cumulative accounting leaking into the display, or
