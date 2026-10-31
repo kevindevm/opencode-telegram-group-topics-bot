@@ -12,6 +12,7 @@ import {
   isTtsEnabled,
   setCurrentModel,
   setPersistedQueuedPrompts,
+  TOPIC_SESSION_STATUS,
   type PersistedQueuedPrompt,
 } from "../../settings/manager.js";
 import { getStoredAgent, resolveProjectAgent } from "../../agent/manager.js";
@@ -36,7 +37,10 @@ import {
 } from "../scope.js";
 import { BOT_I18N_KEY, CHAT_TYPE } from "../constants.js";
 import { INTERACTION_CLEAR_REASON } from "../../interaction/constants.js";
-import { getTopicBindingByScopeKey } from "../../topic/manager.js";
+import {
+  getTopicBindingByScopeKey,
+  registerTopicSessionBinding,
+} from "../../topic/manager.js";
 import { isEphemeralTopicScope } from "./subagent-topics.js";
 import { getScheduledTaskTopicByChatAndThread } from "../../scheduled-task/store.js";
 import { assistantRunState } from "../assistant-run-state.js";
@@ -962,8 +966,27 @@ export async function processUserPrompt(
   let currentSession = getCurrentSession(scopeKey);
 
   if (scope?.context === SCOPE_CONTEXT.GROUP_TOPIC && !getTopicBindingByScopeKey(scopeKey)) {
-    await ctx.reply(t(BOT_I18N_KEY.TOPIC_UNBOUND), getThreadSendOptions(scope.threadId));
-    return false;
+    // Self-heal: the scope still knows its session (e.g. the binding record
+    // was lost while scope state survived) — re-link instead of stranding
+    // the topic. Only a topic with no session at all stays unbound.
+    if (currentSession && ctx.chat && typeof scope.threadId === "number") {
+      logger.info(
+        `[Bot] Re-linking unbound topic: scope=${scopeKey}, session=${currentSession.id}`,
+      );
+      registerTopicSessionBinding({
+        scopeKey,
+        chatId: ctx.chat.id,
+        threadId: scope.threadId,
+        sessionId: currentSession.id,
+        projectId: currentProject.id,
+        projectWorktree: currentProject.worktree,
+        topicName: currentSession.title,
+        status: TOPIC_SESSION_STATUS.ACTIVE,
+      });
+    } else {
+      await ctx.reply(t(BOT_I18N_KEY.TOPIC_UNBOUND), getThreadSendOptions(scope.threadId));
+      return false;
+    }
   }
 
   if (currentSession && currentSession.directory !== currentProject.worktree) {
