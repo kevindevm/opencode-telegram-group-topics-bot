@@ -471,6 +471,8 @@ Créé et maintenu par le propriétaire du dépôt, avec des contributions de la
 
 Co-écrit avec **OpenCode (Muse Spark)** : assistant de programmation en binôme utilisé pour l'architecture, l'implémentation et la revue tout au long de ce fork.
 
+Ce dépôt est un fork maintenu par [kevindevm](https://github.com/kevindevm), avec le support des group-topics ajouté au projet upstream.
+
 Dépôt upstream : [grinev/opencode-telegram-bot](https://github.com/grinev/opencode-telegram-bot) par Ruslan Grinev.
 
 ## Licence

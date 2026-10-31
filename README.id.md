@@ -471,6 +471,8 @@ Dibuat dan dipelihara oleh pemilik repositori, dengan kontribusi dari komunitas.
 
 Ditulis bersama dengan **OpenCode (Muse Spark)**, AI pair-programmer yang digunakan untuk arsitektur, implementasi, dan review di seluruh fork ini.
 
+Repositori ini adalah fork yang dikelola oleh [kevindevm](https://github.com/kevindevm), dengan dukungan group-topics di atas proyek upstream.
+
 Proyek upstream: [grinev/opencode-telegram-bot](https://github.com/grinev/opencode-telegram-bot) karya Ruslan Grinev.
 
 ## Lisensi

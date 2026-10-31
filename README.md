@@ -467,6 +467,8 @@ Created and maintained by the repository owner, with contributions from the comm
 
 Co-authored with **OpenCode (Muse Spark)** — AI pair-programmer used for architecture, implementation, and review throughout this fork.
 
+This repository is a fork maintained by [kevindevm](https://github.com/kevindevm), with group-topics support added on top of the upstream project.
+
 Upstream project: [grinev/opencode-telegram-bot](https://github.com/grinev/opencode-telegram-bot) by Ruslan Grinev.
 
 ## License

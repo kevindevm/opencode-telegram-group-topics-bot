@@ -471,6 +471,8 @@ Depo sahibi tarafından oluşturulur ve sürdürülür; topluluktan katkılarla.
 
 **OpenCode (Muse Spark)** ile birlikte yazılmıştır: bu fork boyunca mimari, uygulama ve incelemede kullanılan AI pair-programmer.
 
+Bu depo, [kevindevm](https://github.com/kevindevm) tarafından sürdürülen bir çataldır (fork); upstream projenin üzerine grup konuları desteği eklenmiştir.
+
 Upstream proje: Ruslan Grinev'in [grinev/opencode-telegram-bot](https://github.com/grinev/opencode-telegram-bot) projesi.
 
 ## Lisans

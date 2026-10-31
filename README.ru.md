@@ -471,6 +471,8 @@ npm run build && npm run lint && npm test
 
 Написан в соавторстве с **OpenCode (Muse Spark)**, ИИ-программистом, использовавшимся для архитектуры, реализации и ревью во всем этом форке.
 
+Этот репозиторий — форк, поддерживаемый [kevindevm](https://github.com/kevindevm), с поддержкой групповых топиков поверх upstream-проекта.
+
 Upstream-проект: [grinev/opencode-telegram-bot](https://github.com/grinev/opencode-telegram-bot) от Ruslan Grinev.
 
 ## Лицензия

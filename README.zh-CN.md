@@ -471,6 +471,8 @@ npm run build && npm run lint && npm test
 
 与 **OpenCode (Muse Spark)** 共同开发：一个 AI 结对程序员，在本 fork 的架构、实现和评审中全程参与。
 
+本仓库是由 [kevindevm](https://github.com/kevindevm) 维护的分支，在上游项目的基础上增加了群组话题支持。
+
 上游项目：Ruslan Grinev 的 [grinev/opencode-telegram-bot](https://github.com/grinev/opencode-telegram-bot)。
 
 ## 许可证

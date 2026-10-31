@@ -471,6 +471,8 @@ Erstellt und gepflegt vom Repository-Owner, mit Beiträgen aus der Community.
 
 In Zusammenarbeit mit **OpenCode (Muse Spark)** geschrieben, dem KI-Pair-Programmer, der in diesem Fork für Architektur, Implementierung und Review genutzt wurde.
 
+Dieses Repository ist ein Fork, gepflegt von [kevindevm](https://github.com/kevindevm), mit Group-Topics-Unterstützung auf Basis des Upstream-Projekts.
+
 Upstream-Projekt: [grinev/opencode-telegram-bot](https://github.com/grinev/opencode-telegram-bot) von Ruslan Grinev.
 
 ## Lizenz
