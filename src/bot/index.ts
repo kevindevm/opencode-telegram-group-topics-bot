@@ -1205,9 +1205,8 @@ const liveKeyboardRepostByScope = new Map<string, { at: number; percent: number 
  * messages (final answers) carry the keyboard via consumeStaleKeyboardMarkup,
  * and edits can never carry it (Telegram: edited messages accept inline
  * keyboards only). So this only fires on long turns with no fresh messages,
- * at most every 60s and only once the percent actually moved.
+ * at most once per pin interval and only once the percent actually moved.
  */
-const LIVE_KEYBOARD_REPOST_MIN_INTERVAL_MS = 60_000;
 const LIVE_KEYBOARD_REPOST_MIN_PERCENT_DELTA = 2;
 const LIVE_KEYBOARD_REPOST_MAX_SCOPES = 200;
 const TYPING_INDICATOR_MIN_INTERVAL_MS = 5_000;
@@ -1231,10 +1230,14 @@ function trackLiveKeyboardRepost(scopeKey: string, at: number, percent: number):
  * swaps them when a new message carries reply_markup, and stream edits never
  * do (edits accept inline keyboards only). Fresh turn-end messages carry the
  * keyboard via consumeStaleKeyboardMarkup, so this standalone repost is only
- * the fallback for long turns with no fresh messages: at most every 60s, and
- * only once the displayed percent moved by at least 2 points (identical
+ * the fallback for long turns with no fresh messages: at most once per pin
+ * interval (same cadence as the dashboard), and only once the displayed
+ * percent moved by at least 2 points (identical
  * markups are also skipped by the manager fingerprint).
  */
+function getLiveKeyboardRepostMinIntervalMs(): number {
+  return Math.max(1000, config.bot.pinEditIntervalSec * 1000);
+}
 async function refreshLiveKeyboardProgress(sessionId: string): Promise<void> {
   const target = getTargetBySessionId(sessionId);
   if (!target || !botInstance) {
@@ -1257,7 +1260,7 @@ async function refreshLiveKeyboardProgress(sessionId: string): Promise<void> {
   const percent = Math.round((contextInfo.tokensUsed / contextInfo.tokensLimit) * 100);
   const now = Date.now();
   const last = liveKeyboardRepostByScope.get(target.scopeKey);
-  if (last && now - last.at < LIVE_KEYBOARD_REPOST_MIN_INTERVAL_MS) {
+  if (last && now - last.at < getLiveKeyboardRepostMinIntervalMs()) {
     return;
   }
   if (last && Math.abs(percent - last.percent) < LIVE_KEYBOARD_REPOST_MIN_PERCENT_DELTA) {
