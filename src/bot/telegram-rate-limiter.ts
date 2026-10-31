@@ -437,6 +437,22 @@ export class TelegramRateLimiter {
   }
 
   private requeueRetryJob(job: QueueJob): void {
+    if (isEditMessageJob(job)) {
+      // A newer edit for the same message makes this retry stale: drop the
+      // old text instead of resending it ahead of the fresh one. The old
+      // waiters join the newer job so they resolve with the latest repaint.
+      const newerIndex = this.findCoalescibleEditIndex(job.payload);
+      if (newerIndex >= 0) {
+        const newer = this.queue[newerIndex];
+        newer.resolves.push(...job.resolves);
+        newer.rejects.push(...job.rejects);
+        logger.debug(
+          `[RateLimiter] Dropping stale ${job.method} retry; newer edit already queued`,
+        );
+        return;
+      }
+    }
+
     if (!job.scopeKey) {
       this.queue.push(job);
       return;

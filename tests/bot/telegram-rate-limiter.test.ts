@@ -333,6 +333,74 @@ describe("bot/telegram-rate-limiter", () => {
 
     vi.useRealTimers();
   });
+
+  it("drops a stale pin edit retry when a newer edit for the same message is queued", async () => {
+    vi.useFakeTimers();
+    try {
+      const limiter = new TelegramRateLimiter();
+      const sentTexts: string[] = [];
+
+      const oldJob = limiter.enqueue(
+        "editMessageText",
+        { chat_id: -1001, message_thread_id: 77, message_id: 10, text: "old" },
+        async () => {
+          sentTexts.push("old");
+          throw createRetryAfterError(5);
+        },
+      );
+      // Swallow the old rejection path: after the merge it resolves with the newer result.
+      const oldSettled = oldJob.then(
+        (value) => ({ status: "resolved" as const, value }),
+        (error) => ({ status: "rejected" as const, error }),
+      );
+
+      // Let the old edit attempt once so it requeues with a retry_after.
+      await vi.advanceTimersByTimeAsync(500);
+
+      const newJob = limiter.enqueue(
+        "editMessageText",
+        { chat_id: -1001, message_thread_id: 77, message_id: 10, text: "new" },
+        async () => {
+          sentTexts.push("new");
+          return "new-ok";
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(newJob).resolves.toBe("new-ok");
+      // The stale retry is dropped, never resent; its waiters get the fresh result.
+      await expect(oldSettled).resolves.toEqual({ status: "resolved", value: "new-ok" });
+      expect(sentTexts).toEqual(["old", "new"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries an edit when no newer edit supersedes it", async () => {
+    vi.useFakeTimers();
+    try {
+      const limiter = new TelegramRateLimiter();
+      let attempts = 0;
+
+      const job = limiter.enqueue(
+        "editMessageText",
+        { chat_id: -1001, message_thread_id: 77, message_id: 10, text: "same" },
+        async () => {
+          attempts += 1;
+          if (attempts === 1) {
+            throw createRetryAfterError(2);
+          }
+          return "ok";
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(job).resolves.toBe("ok");
+      expect(attempts).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("runWithRateLimitRetries", () => {
