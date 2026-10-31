@@ -30,6 +30,7 @@ const mocked = vi.hoisted(() => ({
   getStoredModelMock: vi.fn(),
   getTopicBindingByScopeKeyMock: vi.fn(),
   registerBindingMock: vi.fn(),
+  updateBindingStatusMock: vi.fn(),
   safeBackgroundTaskMock: vi.fn(),
   sessionStatusMock: vi.fn(),
   sessionGetMock: vi.fn(),
@@ -182,6 +183,7 @@ vi.mock("../../../src/interaction/constants.js", () => ({
 vi.mock("../../../src/topic/manager.js", () => ({
   getTopicBindingByScopeKey: mocked.getTopicBindingByScopeKeyMock,
   registerTopicSessionBinding: mocked.registerBindingMock,
+  updateTopicBindingStatus: mocked.updateBindingStatusMock,
 }));
 
 vi.mock("../../../src/scheduled-task/store.js", () => ({
@@ -213,6 +215,7 @@ describe("bot/handlers/prompt", () => {
     mocked.getStoredModelMock.mockReset();
     mocked.getTopicBindingByScopeKeyMock.mockReset();
     mocked.registerBindingMock.mockReset();
+    mocked.updateBindingStatusMock.mockReset();
     mocked.safeBackgroundTaskMock.mockReset();
     mocked.sessionStatusMock.mockReset();
     mocked.sessionGetMock.mockReset();
@@ -993,6 +996,49 @@ describe("bot/handlers/prompt", () => {
     );
     expect(ctx.reply).not.toHaveBeenCalledWith(t("topic.unbound"), expect.anything());
     expect(result).toBe(true);
+  });
+
+  it("reopens an abandoned topic whose session still exists on the server", async () => {
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.getTopicBindingByScopeKeyMock.mockReturnValue({ sessionId: "session-1" });
+    mocked.getCurrentSessionMock.mockReturnValue(null);
+    mocked.sessionGetMock.mockResolvedValue({
+      data: { id: "session-1", title: "Session" },
+      error: null,
+    });
+
+    const ctx = createContext();
+    const bot = {
+      api: {
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+      },
+    } as unknown as Bot<Context>;
+
+    const result = await processUserPrompt(ctx, "Test", {
+      bot,
+      ensureEventSubscription: vi.fn(),
+    });
+
+    expect(mocked.updateBindingStatusMock).toHaveBeenCalledWith(-100123, 555, "active");
+    expect(ctx.reply).not.toHaveBeenCalledWith(t("topic.unbound"), expect.anything());
+    expect(result).toBe(true);
+  });
+
+  it("rejects an abandoned topic whose session is gone from the server", async () => {
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.getTopicBindingByScopeKeyMock.mockReturnValue({ sessionId: "session-1" });
+    mocked.getCurrentSessionMock.mockReturnValue(null);
+    mocked.sessionGetMock.mockResolvedValue({ data: null, error: new Error("gone") });
+
+    const ctx = createContext();
+
+    const result = await processUserPrompt(ctx, "Test", {
+      bot: {} as Bot<Context>,
+      ensureEventSubscription: vi.fn(),
+    });
+
+    expect(result).toBe(false);
+    expect(ctx.reply).toHaveBeenCalledWith(t("topic.unbound"), { message_thread_id: 555 });
   });
 
   it("still rejects a topic with neither binding nor session", async () => {
