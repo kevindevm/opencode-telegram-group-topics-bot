@@ -11,6 +11,7 @@ Functional requirements, features, and development status are in [PRODUCT.md](./
 This repo is a fork of `grinev/opencode-telegram-bot` with group-topics support added; if you need to review or port upstream changes, read [FORK_SYNC.md](./FORK_SYNC.md).
 ## Rules from the owner
 - Commits, PRs and issue comments read like a person wrote them: short, plain, no em dashes in new text.
+- Everything is written in English: PR titles and descriptions, issue comments, code and code comments. User-facing Telegram strings stay localized through i18n.
 - GitHub issue comments are short and non-technical. Fix things properly instead of documenting a partial fix.
 - Do not publish a release or push without the user asking for it.
 
