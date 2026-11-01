@@ -18,6 +18,7 @@ export const BOT_COMMAND = {
   RETRY: "retry",
   DIFF: "diff",
   COMMIT: "commit",
+  COMPACT: "compact",
   COST: "cost",
   CLOSE: "close",
   CLEANUP: "cleanup",

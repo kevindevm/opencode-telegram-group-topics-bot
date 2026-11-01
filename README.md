@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 
-Languages: English (`en`), Deutsch (`de`), Español (`es`), Français (`fr`), Bahasa Indonesia (`id`), Русский (`ru`), Türkçe (`tr`), [简体中文 (`zh-CN`)](./README.zh-CN.md)
+Languages: [English (`en`)](./README.md), [Deutsch (`de`)](./README.de.md), [Español (`es`)](./README.es.md), [Français (`fr`)](./README.fr.md), [Bahasa Indonesia (`id`)](./README.id.md), [Русский (`ru`)](./README.ru.md), [Türkçe (`tr`)](./README.tr.md), [简体中文 (`zh`)](./README.zh-CN.md)
 
 A Telegram bot ([grammy](https://grammy.dev/), Node.js 20+) that turns one Telegram supergroup into a **multi-session mobile client for [OpenCode](https://opencode.ai)**: the **General** topic is the control lane, and each OpenCode session gets its own forum topic with live streaming, a pinned status dashboard, a prompt queue, permission/question flows, and a ⏪ send-to-background button for long shell commands.
 
@@ -102,7 +102,12 @@ Fork sync notes: [`FORK_SYNC.md`](./FORK_SYNC.md)
 Run OpenCode on the machine where the bot will live:
 
 ```bash
+# V1
 opencode serve
+# V2: use the background service (stable port + credentials).
+# A bare `opencode serve` binds a random port with a random password,
+# so the bot could never reach it.
+opencode service start
 ```
 
 Default API URL: `http://localhost:4096` (V1) or `http://127.0.0.1:49374` (V2, set `OPENCODE_SERVER_VERSION=v2`).
@@ -158,7 +163,7 @@ Config and runtime state live in the `opencode-group-topics-bot-data` volume (`O
 docker compose -f docker-compose.yml -f docker-compose.desktop.yml up -d --build
 ```
 
-On Docker Desktop the container cannot see host project paths or spawn `opencode` itself: run `opencode serve` on the host and prefer `/projects` paths that resolve inside the container (mount repos with an extra `volumes` entry if needed). `/opencode_start` and `/opencode_stop` are host-only features.
+On Docker Desktop the container cannot see host project paths or spawn `opencode` itself: run `opencode serve` (V1) or `opencode service start` (V2) on the host and prefer `/projects` paths that resolve inside the container (mount repos with an extra `volumes` entry if needed). `/opencode_start` and `/opencode_stop` are host-only features.
 
 Stable releases are published to `ghcr.io/kevindevm/opencode-telegram-group-topics-bot:<version>` and `ghcr.io/kevindevm/opencode-telegram-group-topics-bot:latest` for `linux/amd64` and `linux/arm64`. Release candidates receive only their exact version tag.
 
@@ -205,7 +210,7 @@ If that works, the group workspace is ready.
 
 ## Daily Workflow
 
-1. Start OpenCode with `opencode serve`, then start the bot.
+1. Start OpenCode (`opencode serve` on V1, `opencode service start` on V2), then start the bot.
 2. Open the Telegram group and go to **General**.
 3. Use `/projects` to confirm the selected repo.
 4. Use `/new` to create a new session topic.
@@ -241,6 +246,7 @@ Any plain text message in a session topic is treated as a prompt when no blockin
 | `/retry`          | Resend the last prompt                                                   |
 | `/diff`           | Show changed files in this session                                       |
 | `/commit`         | Commit session changes with a message                                    |
+| `/compact`        | Compact the session context (no keyboard needed)                        |
 | `/cost`           | Show session (incl. subagents) and daily spend                     |
 | `/close`          | Close this session topic                                                 |
 | `/cleanup`        | Delete subagent transcript topics                                        |
@@ -327,7 +333,7 @@ Installed-mode config paths:
 | `SHOW_PC_USER_MIRROR` | Mirror prompts typed on PC into the topic (also flippable via `/display`) | No | `true` |
 | `SHOW_LINK_PREVIEWS` | Show link previews under assistant messages (also flippable via `/display`) | No | `true` |
 | `MESSAGE_FORMAT_MODE` | Assistant reply formatting mode: `markdown` or `raw` | No | `markdown` |
-| `RESPONSE_STREAM_THROTTLE_MS` | Delay between streamed assistant updates, in ms | No | `1000` |
+| `RESPONSE_STREAM_THROTTLE_MS` | Delay between streamed assistant updates, in ms | No | `2500` |
 | `BASH_TOOL_DISPLAY_MAX_LENGTH` | Max displayed length for `bash`/`execute` code in summaries | No | `128` |
 | `CODE_FILE_MAX_SIZE_KB` | Max file size (KB) to send as a document | No | `100` |
 | `STT_API_URL` | Whisper-compatible API base URL (or full endpoint for `plain`) | No | - |
@@ -442,7 +448,7 @@ npm run build && npm run lint && npm test
 
 **OpenCode server is unavailable**
 
-- Make sure `opencode serve` is running.
+- Make sure the OpenCode server is running (`opencode serve` on V1, `opencode service start` on V2; pair once with `opencode pair` if it asks for credentials).
 - Confirm `OPENCODE_API_URL` (and `OPENCODE_SERVER_VERSION` for V2) points to the correct address.
 
 **Cannot create new session topics**
@@ -460,6 +466,8 @@ npm run build && npm run lint && npm test
 Created and maintained by the repository owner, with contributions from the community.
 
 Co-authored with **OpenCode (Muse Spark)** — AI pair-programmer used for architecture, implementation, and review throughout this fork.
+
+This repository is a fork maintained by [kevindevm](https://github.com/kevindevm), with group-topics support added on top of the upstream project.
 
 Upstream project: [grinev/opencode-telegram-bot](https://github.com/grinev/opencode-telegram-bot) by Ruslan Grinev.
 

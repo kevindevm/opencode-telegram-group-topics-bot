@@ -1,7 +1,11 @@
 import { Bot, Context, InlineKeyboard } from "grammy";
 import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/v2";
 import { projectDirectoryExists } from "../../project/directory.js";
-import { opencodeClient, opencodeServerVersion, probeOpencodeServer } from "../../opencode/client.js";
+import {
+  opencodeClient,
+  opencodeServerVersion,
+  probeOpencodeServer,
+} from "../../opencode/client.js";
 import { classifyPromptSubmitError } from "../../opencode/prompt-submit-error.js";
 import { clearSession, getCurrentSession, setCurrentSession } from "../../session/manager.js";
 import { markForwardedPrompt, unmarkForwardedPrompt } from "../../session/forwarded-prompts.js";
@@ -12,6 +16,7 @@ import {
   isTtsEnabled,
   setCurrentModel,
   setPersistedQueuedPrompts,
+  TOPIC_SESSION_STATUS,
   type PersistedQueuedPrompt,
 } from "../../settings/manager.js";
 import { getStoredAgent, resolveProjectAgent } from "../../agent/manager.js";
@@ -36,7 +41,11 @@ import {
 } from "../scope.js";
 import { BOT_I18N_KEY, CHAT_TYPE } from "../constants.js";
 import { INTERACTION_CLEAR_REASON } from "../../interaction/constants.js";
-import { getTopicBindingByScopeKey } from "../../topic/manager.js";
+import {
+  getTopicBindingByScopeKey,
+  registerTopicSessionBinding,
+  updateTopicBindingStatus,
+} from "../../topic/manager.js";
 import { isEphemeralTopicScope } from "./subagent-topics.js";
 import { getScheduledTaskTopicByChatAndThread } from "../../scheduled-task/store.js";
 import { assistantRunState } from "../assistant-run-state.js";
@@ -102,6 +111,7 @@ interface QueuedPromptRequest {
 export const QUEUED_PROMPT_CANCEL_PREFIX = "queue:cancel:";
 export const QUEUED_PROMPT_STEER_PREFIX = "queue:steer:";
 export const QUEUED_PROMPT_FRONT_PREFIX = "queue:front:";
+export const QUEUED_PROMPT_INTERRUPT_PREFIX = "queue:interrupt:";
 
 const queuedPromptRequests = new Map<string, QueuedPromptRequest[]>();
 const drainingQueuedSessions = new Set<string>();
@@ -179,7 +189,9 @@ function persistQueuedPrompts(): void {
       try {
         serializedParts = JSON.stringify(request.promptOptions.parts);
       } catch {
-        logger.warn(`[Bot] Skipping unserializable queued prompt for persistence: session=${sessionId}`);
+        logger.warn(
+          `[Bot] Skipping unserializable queued prompt for persistence: session=${sessionId}`,
+        );
         continue;
       }
 
@@ -314,9 +326,7 @@ export function clearQueuedPrompts(sessionId: string): number {
 }
 
 /** Snapshot of queued prompts for display (id + preview), oldest first. */
-export function listQueuedPrompts(
-  sessionId: string,
-): Array<{ queueId: string; preview: string }> {
+export function listQueuedPrompts(sessionId: string): Array<{ queueId: string; preview: string }> {
   return (queuedPromptRequests.get(sessionId) ?? []).map((request) => ({
     queueId: request.queueId,
     preview: getQueuedPromptPreview(request),
@@ -384,11 +394,12 @@ function takeNextQueuedPromptRequest(sessionId: string): QueuedPromptRequest | n
   return nextRequest;
 }
 
-function buildQueuedPromptCancelKeyboard(queueId: string): InlineKeyboard {
+function buildQueuedPromptKeyboard(queueId: string): InlineKeyboard {
   return new InlineKeyboard()
+    .text(t("bot.session_queue_interrupt"), `${QUEUED_PROMPT_INTERRUPT_PREFIX}${queueId}`)
     .text(t("bot.session_queue_steer"), `${QUEUED_PROMPT_STEER_PREFIX}${queueId}`)
-    .text(t("bot.session_queue_front"), `${QUEUED_PROMPT_FRONT_PREFIX}${queueId}`)
     .row()
+    .text(t("bot.session_queue_front"), `${QUEUED_PROMPT_FRONT_PREFIX}${queueId}`)
     .text(t("bot.session_queued_cancel"), `${QUEUED_PROMPT_CANCEL_PREFIX}${queueId}`);
 }
 
@@ -402,7 +413,7 @@ async function sendQueuedPromptNotice(
   await bot.api
     .sendMessage(chatId, t("bot.session_queued", { position: String(position) }), {
       ...getThreadSendOptions(threadId),
-      reply_markup: buildQueuedPromptCancelKeyboard(queueId),
+      reply_markup: buildQueuedPromptKeyboard(queueId),
     })
     .catch(() => {});
 }
@@ -469,7 +480,9 @@ export async function handleQueuedPromptFront(ctx: Context): Promise<boolean> {
 
   logger.info(`[Bot] Moved queued prompt ${queueId} to front for session ${moved.sessionId}`);
 
-  await ctx.answerCallbackQuery({ text: t("bot.session_queue_moved_front_callback") }).catch(() => {});
+  await ctx
+    .answerCallbackQuery({ text: t("bot.session_queue_moved_front_callback") })
+    .catch(() => {});
   await ctx
     .editMessageText(t("bot.session_queue_moved_front", { preview: getQueuedPromptPreview(moved) }))
     .catch(() => {});
@@ -527,6 +540,56 @@ export async function handleQueuedPromptSteer(ctx: Context): Promise<boolean> {
   return true;
 }
 
+/** Handles the "interrupt and run now" button: aborts the running turn and dispatches the queued prompt as a fresh turn. Returns true when consumed. */
+export async function handleQueuedPromptInterrupt(ctx: Context): Promise<boolean> {
+  const data = ctx.callbackQuery?.data ?? "";
+  if (!data.startsWith(QUEUED_PROMPT_INTERRUPT_PREFIX)) {
+    return false;
+  }
+
+  const queueId = data.slice(QUEUED_PROMPT_INTERRUPT_PREFIX.length);
+  if (!queueId) {
+    return true;
+  }
+
+  const removed = cancelQueuedPrompt(queueId);
+  if (!removed) {
+    await ctx.answerCallbackQuery({ text: t("bot.session_queue_cancel_missing") }).catch(() => {});
+    return true;
+  }
+
+  if (!botInstance) {
+    logger.error("[Bot] Cannot interrupt: bot instance unavailable");
+    enqueuePromptRequest(removed);
+    await ctx.answerCallbackQuery({ text: t("bot.session_queue_interrupt_failed") }).catch(() => {});
+    return true;
+  }
+
+  logger.info(`[Bot] Interrupting session ${removed.sessionId} for queued prompt ${queueId}`);
+  markForwardedPrompt(removed.sessionId, getRequestText(removed));
+
+  await ctx
+    .answerCallbackQuery({ text: t("bot.session_queue_interrupting_callback") })
+    .catch(() => {});
+  await ctx
+    .editMessageText(
+      t("bot.session_queue_interrupting", { preview: getQueuedPromptPreview(removed) }),
+    )
+    .catch(() => {});
+
+  try {
+    await opencodeClient.session.abort({
+      sessionID: removed.promptOptions.sessionID,
+      directory: removed.promptOptions.directory,
+    });
+  } catch (error) {
+    logger.warn("[Bot] Abort before interrupt failed, submitting anyway:", error);
+  }
+  // Fresh turn, not steer: the running work was just killed.
+  submitPromptRequest(botInstance, { ...removed, notifyOnQueue: true });
+  return true;
+}
+
 /** Handles the "cancel queued message" button. Returns true when consumed. */
 export async function handleQueuedPromptCancel(ctx: Context): Promise<boolean> {
   const data = ctx.callbackQuery?.data ?? "";
@@ -548,7 +611,9 @@ export async function handleQueuedPromptCancel(ctx: Context): Promise<boolean> {
   logger.info(`[Bot] Cancelled queued prompt ${queueId} for session ${removed.sessionId}`);
   unmarkForwardedPrompt(removed.sessionId, getRequestText(removed));
 
-  await ctx.answerCallbackQuery({ text: t("bot.session_queue_cancelled_callback") }).catch(() => {});
+  await ctx
+    .answerCallbackQuery({ text: t("bot.session_queue_cancelled_callback") })
+    .catch(() => {});
   await ctx
     .editMessageText(t("bot.session_queue_cancelled", { preview: getQueuedPromptPreview(removed) }))
     .catch(() => {});
@@ -617,10 +682,7 @@ function isConfiguredDefaultModel(model: StoredPromptModel): boolean {
     return false;
   }
 
-  return (
-    model.providerID === provider &&
-    model.modelID === modelId
-  );
+  return model.providerID === provider && model.modelID === modelId;
 }
 
 function toPromptModelInfo(model: LiveSessionModel | null | undefined): ModelInfo | null {
@@ -753,7 +815,13 @@ function submitPromptRequest(
           });
           const position = enqueuePromptRequest(queued);
           if (request.notifyOnQueue) {
-            void sendQueuedPromptNotice(bot, request.chatId, request.threadId, position, queued.queueId);
+            void sendQueuedPromptNotice(
+              bot,
+              request.chatId,
+              request.threadId,
+              position,
+              queued.queueId,
+            );
           }
           return;
         }
@@ -794,7 +862,13 @@ function submitPromptRequest(
         });
         const position = enqueuePromptRequest(queued);
         if (request.notifyOnQueue) {
-          void sendQueuedPromptNotice(bot, request.chatId, request.threadId, position, queued.queueId);
+          void sendQueuedPromptNotice(
+            bot,
+            request.chatId,
+            request.threadId,
+            position,
+            queued.queueId,
+          );
         }
         return;
       }
@@ -962,8 +1036,26 @@ export async function processUserPrompt(
   let currentSession = getCurrentSession(scopeKey);
 
   if (scope?.context === SCOPE_CONTEXT.GROUP_TOPIC && !getTopicBindingByScopeKey(scopeKey)) {
-    await ctx.reply(t(BOT_I18N_KEY.TOPIC_UNBOUND), getThreadSendOptions(scope.threadId));
-    return false;
+    // Self-heal: re-link the topic if scope state survived but the binding
+    // was lost. Only a topic with no session at all stays unbound.
+    if (currentSession && ctx.chat && typeof scope.threadId === "number") {
+      logger.info(
+        `[Bot] Re-linking unbound topic: scope=${scopeKey}, session=${currentSession.id}`,
+      );
+      registerTopicSessionBinding({
+        scopeKey,
+        chatId: ctx.chat.id,
+        threadId: scope.threadId,
+        sessionId: currentSession.id,
+        projectId: currentProject.id,
+        projectWorktree: currentProject.worktree,
+        topicName: currentSession.title,
+        status: TOPIC_SESSION_STATUS.ACTIVE,
+      });
+    } else {
+      await ctx.reply(t(BOT_I18N_KEY.TOPIC_UNBOUND), getThreadSendOptions(scope.threadId));
+      return false;
+    }
   }
 
   if (currentSession && currentSession.directory !== currentProject.worktree) {
@@ -975,14 +1067,37 @@ export async function processUserPrompt(
     return false;
   }
 
-  if (!currentSession) {
-    if (scope?.context === SCOPE_CONTEXT.GROUP_TOPIC) {
+  if (!currentSession && scope?.context === SCOPE_CONTEXT.GROUP_TOPIC) {
+    // Reopen: the topic was closed/abandoned but its session may still
+    // exist on the server. Revive it instead of forcing /new.
+    const binding = ctx.chat ? getTopicBindingByScopeKey(scopeKey) : undefined;
+    if (binding && ctx.chat && typeof scope.threadId === "number") {
+      try {
+        const { data: session, error } = await opencodeClient.session.get({
+          sessionID: binding.sessionId,
+          directory: currentProject.worktree,
+        });
+        if (!error && session) {
+          logger.info(`[Bot] Reopening topic: scope=${scopeKey}, session=${session.id}`);
+          currentSession = {
+            id: session.id,
+            title: session.title,
+            directory: currentProject.worktree,
+          };
+          setCurrentSession(currentSession, scopeKey);
+          updateTopicBindingStatus(ctx.chat.id, scope.threadId, TOPIC_SESSION_STATUS.ACTIVE);
+        }
+      } catch (err) {
+        logger.warn("[Bot] Failed to reopen topic session:", err);
+      }
+    }
+    if (!currentSession) {
       await ctx.reply(t(BOT_I18N_KEY.TOPIC_UNBOUND), getThreadSendOptions(scope.threadId));
       return false;
     }
+  }
 
-    await ctx.reply(t("bot.creating_session"));
-
+  if (!currentSession) {
     const { data: session, error } = await opencodeClient.session.create({
       directory: currentProject.worktree,
     });
@@ -1072,9 +1187,7 @@ export async function processUserPrompt(
         `[Bot] Dropping duplicate queued prompt for busy session ${currentSession.id} (already at position ${pending.length})`,
       );
       await ctx.reply(t("bot.session_queued_duplicate", { position: String(pending.length) }), {
-        reply_markup: tailEntry
-          ? buildQueuedPromptCancelKeyboard(tailEntry.queueId)
-          : undefined,
+        reply_markup: tailEntry ? buildQueuedPromptKeyboard(tailEntry.queueId) : undefined,
       });
       return true;
     }
@@ -1111,9 +1224,7 @@ export async function processUserPrompt(
     const queuedList = queuedPromptRequests.get(currentSession.id) ?? [];
     const queuedEntry = queuedList[queuedList.length - 1];
     await ctx.reply(t("bot.session_queued", { position: String(position) }), {
-      reply_markup: queuedEntry
-        ? buildQueuedPromptCancelKeyboard(queuedEntry.queueId)
-        : undefined,
+      reply_markup: queuedEntry ? buildQueuedPromptKeyboard(queuedEntry.queueId) : undefined,
     });
     return true;
   }
@@ -1131,15 +1242,18 @@ export async function processUserPrompt(
 
     const request = buildPromptRequest(currentSession, currentAgent, storedModel, text, fileParts);
     markForwardedPrompt(currentSession.id, text);
-    submitPromptRequest(bot, withQueuedPromptId({
-      sessionId: currentSession.id,
-      chatId: ctx.chat!.id,
-      threadId: scope?.threadId ?? null,
-      responseMode,
-      promptOptions: request.promptOptions,
-      promptErrorLogContext: request.promptErrorLogContext,
-      notifyOnQueue: true,
-    }));
+    submitPromptRequest(
+      bot,
+      withQueuedPromptId({
+        sessionId: currentSession.id,
+        chatId: ctx.chat!.id,
+        threadId: scope?.threadId ?? null,
+        responseMode,
+        promptOptions: request.promptOptions,
+        promptErrorLogContext: request.promptErrorLogContext,
+        notifyOnQueue: true,
+      }),
+    );
 
     return true;
   } catch (err) {

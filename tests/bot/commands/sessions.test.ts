@@ -551,7 +551,7 @@ describe("bot/commands/sessions", () => {
     );
   });
 
-  it("links to the first bot message inside the created topic", async () => {
+  it("links to the created topic itself instead of a message inside it", async () => {
     mocked.sessionGetMock.mockResolvedValueOnce({
       data: {
         id: "session-9",
@@ -583,7 +583,7 @@ describe("bot/commands/sessions", () => {
     await handleSessionSelect(ctx);
 
     const linkReply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls.find(
-      ([text]) => typeof text === "string" && text.includes("https://t.me/c/1234567890/888"),
+      ([text]) => typeof text === "string" && text.includes("https://t.me/c/1234567890/49"),
     );
     expect(linkReply).toBeDefined();
   });
@@ -636,7 +636,7 @@ describe("bot/commands/sessions", () => {
     expect(mocked.settingsClearTopicSessionBindingMock).toHaveBeenCalledWith("111:49");
     expect(ctx.api.createForumTopic).toHaveBeenCalled();
     const linkReply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls.find(
-      ([text]) => typeof text === "string" && text.includes("https://t.me/c/111/888"),
+      ([text]) => typeof text === "string" && text.includes("https://t.me/c/111/50"),
     );
     expect(linkReply).toBeDefined();
   });

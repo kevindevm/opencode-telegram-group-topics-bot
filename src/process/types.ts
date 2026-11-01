@@ -8,6 +8,12 @@ export interface ProcessState {
   pid: number | null;
   startTime: Date | null;
   isRunning: boolean;
+  /**
+   * True when the server is the v2 background service (`opencode service`)
+   * instead of a spawned child: there is no PID to track or kill, the
+   * service manager owns the process.
+   */
+  viaService: boolean;
 }
 
 /**

@@ -320,6 +320,24 @@ describe("opencode/v2/mappers", () => {
     expect(toV1Message(idle, "ses-1", "D:/repo")).toBeNull();
   });
 
+  it("preserves the compaction summary flag on assistant messages", () => {
+    const message = {
+      id: "msg-summary",
+      type: "assistant",
+      agent: "build",
+      model: { id: "m", providerID: "p" },
+      time: { created: 1, completed: 5 },
+      summary: true,
+      tokens: { input: 731000, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+      cost: 0.5,
+      content: [{ type: "text", text: "summary" }],
+    } as unknown as SessionMessageInfo;
+
+    const mapped = toV1Message(message, "ses-1", "D:/repo");
+
+    expect(mapped?.info).toMatchObject({ role: "assistant", summary: true });
+  });
+
   it("folds enabled V2 models into the V1 providers catalog", () => {
     const model = {
       id: "gpt",

@@ -52,7 +52,7 @@ import { getTopicBindingBySessionId, registerTopicSessionBinding } from "../../t
 import { parseBackgroundSessionCallback } from "../menus/session-selection-menu.js";
 import { TOPIC_COLORS } from "../../topic/colors.js";
 import { formatTopicTitle } from "../../topic/title-format.js";
-import { buildTopicMessageLink } from "../utils/topic-link.js";
+import { buildTopicThreadLink } from "../utils/topic-link.js";
 import {
   loadLastAssistantMessage,
   loadLastVisibleTurn,
@@ -300,10 +300,8 @@ function resolveTopicModel(
 }
 
 /**
- * Opens an existing session in a freshly created forum topic bound to the
- * given project. Returns true when the chat is a group General forum and the
- * session was handled there, false otherwise (DM/global callers continue with
- * their own selection flow). Shared by /sessions and /recent.
+ * Open a session in a new forum topic. Returns true if handled in General.
+ * With keepMenu, leave the caller menu alone.
  */
 export async function openSessionInNewTopic(
   ctx: Context,
@@ -311,6 +309,7 @@ export async function openSessionInNewTopic(
   project: ProjectInfo,
   scopeKey: string,
   scope: { threadId?: number | null } | null,
+  options: { keepMenu?: boolean } = {},
 ): Promise<boolean> {
   const inGeneralForum = Boolean(ctx.chat && isGeneralForumScope(ctx));
   if (!inGeneralForum || !ctx.chat) {
@@ -330,7 +329,7 @@ export async function openSessionInNewTopic(
         logger.info(
           `[Sessions] Reusing existing topic: threadId=${existingBinding.threadId}, linkedMessageId=${topicMessage.message_id}`,
         );
-        return buildTopicMessageLink(chat, topicMessage.message_id);
+        return buildTopicThreadLink(chat, existingBinding.threadId);
       } catch (error) {
         logger.warn(
           "[Sessions] Bound topic no longer exists, creating a new one",
@@ -342,8 +341,10 @@ export async function openSessionInNewTopic(
     })();
 
     if (existingLink) {
-      clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
-      await ctx.answerCallbackQuery();
+      if (!options.keepMenu) {
+        clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
+        await ctx.answerCallbackQuery();
+      }
       await ctx.reply(
         t(BOT_I18N_KEY.SESSIONS_BOUND_TOPIC_LINK, {
           title: session.title,
@@ -352,7 +353,9 @@ export async function openSessionInNewTopic(
         }),
         getThreadSendOptions(scope?.threadId ?? null),
       );
-      await ctx.deleteMessage().catch(() => {});
+      if (!options.keepMenu) {
+        await ctx.deleteMessage().catch(() => {});
+      }
       return true;
     }
   }
@@ -371,7 +374,9 @@ export async function openSessionInNewTopic(
       );
     } catch (error) {
       logger.error("[Sessions] Error creating forum topic for existing session", error);
-      await ctx.answerCallbackQuery();
+      if (!options.keepMenu) {
+        await ctx.answerCallbackQuery();
+      }
       if (getErrorText(error).includes(TELEGRAM_ERROR_MARKER.NOT_ENOUGH_RIGHTS_CREATE_TOPIC)) {
         await ctx.reply(
           t(BOT_I18N_KEY.NEW_TOPIC_CREATE_NO_RIGHTS),
@@ -383,7 +388,9 @@ export async function openSessionInNewTopic(
           getThreadSendOptions(scope?.threadId ?? null),
         );
       }
-      await ctx.deleteMessage().catch(() => {});
+      if (!options.keepMenu) {
+        await ctx.deleteMessage().catch(() => {});
+      }
       return null;
     }
   })();
@@ -428,7 +435,9 @@ export async function openSessionInNewTopic(
   });
 
   summaryAggregator.setSession(session.id);
-  clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
+  if (!options.keepMenu) {
+    clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
+  }
   clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, topicScopeKey);
 
   if (!pinnedMessageManager.isInitialized(topicScopeKey)) {
@@ -473,7 +482,7 @@ export async function openSessionInNewTopic(
     },
   );
 
-  const topicLink = buildTopicMessageLink(chat, topicMessage.message_id);
+  const topicLink = buildTopicThreadLink(chat, topicThreadId);
   logger.info(
     `[Sessions] Created topic: threadId=${topicThreadId}, linkedMessageId=${topicMessage.message_id}`,
   );
@@ -481,7 +490,9 @@ export async function openSessionInNewTopic(
     throw new Error("Unable to build topic link");
   }
 
-  await ctx.answerCallbackQuery();
+  if (!options.keepMenu) {
+    await ctx.answerCallbackQuery();
+  }
   await ctx.reply(
     t(BOT_I18N_KEY.SESSIONS_CREATED_TOPIC_LINK, {
       title: session.title,
@@ -490,7 +501,9 @@ export async function openSessionInNewTopic(
     }),
     getThreadSendOptions(scope?.threadId ?? null),
   );
-  await ctx.deleteMessage().catch(() => {});
+  if (!options.keepMenu) {
+    await ctx.deleteMessage().catch(() => {});
+  }
   return true;
 }
 
@@ -518,12 +531,13 @@ export async function handleBackgroundSessionOpen(ctx: Context): Promise<boolean
   }
 
   try {
-    const topicMessage = await ctx.api.sendMessage(
+    // Visible marker inside the topic (also probes that it still exists).
+    await ctx.api.sendMessage(
       binding.chatId,
       t("sessions.selected", { title: binding.topicName ?? parsed.sessionId }),
       getThreadSendOptions(binding.threadId),
     );
-    const topicLink = buildTopicMessageLink(ctx.chat, topicMessage.message_id);
+    const topicLink = buildTopicThreadLink(ctx.chat, binding.threadId);
     await ctx.answerCallbackQuery().catch(() => {});
     if (topicLink) {
       await ctx

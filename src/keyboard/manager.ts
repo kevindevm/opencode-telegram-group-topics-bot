@@ -158,6 +158,17 @@ class KeyboardManager {
     return keyboard;
   }
 
+  /**
+   * Releases an optimistically recorded fingerprint: the carrying message
+   * never reached the client (429, deleted chat, ...), so the next
+   * piggyback or carrier must resend instead of assuming it landed.
+   * Without this, one failed final answer freezes the keyboard until
+   * something else changes agent/model/context.
+   */
+  public markKeyboardMarkupUnsent(scopeKey: string = "global"): void {
+    this.lastSentMarkupByScope.delete(scopeKey);
+  }
+
   public async sendKeyboardUpdate(
     chatId?: number,
     scopeKey: string = "global",

@@ -158,7 +158,7 @@ describe("pinned manager scoped state", () => {
     // History load only schedules the repaint; the trailing edit paints it.
     await pinnedMessageManager.flush("chat:-1:10");
     expect(api.editMessageText).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.advanceTimersByTimeAsync(61_000);
 
     expect(api.sendMessage).toHaveBeenCalledWith(
       -1,
@@ -207,7 +207,7 @@ describe("pinned manager scoped state", () => {
       expect(api.editMessageText).not.toHaveBeenCalled();
 
       // Past both the debounce delay and the flood-control gap from a cold start.
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(api.editMessageText).toHaveBeenCalledTimes(1);
       expect(api.editMessageText).toHaveBeenCalledWith(
@@ -240,7 +240,7 @@ describe("pinned manager scoped state", () => {
         { input: 100, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
         "chat:-1:10",
       );
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
       expect(api.editMessageText).toHaveBeenCalledTimes(1);
 
       // A second completion right away is throttled, not dropped.
@@ -250,7 +250,7 @@ describe("pinned manager scoped state", () => {
       );
       expect(api.editMessageText).toHaveBeenCalledTimes(1);
 
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(api.editMessageText).toHaveBeenCalledTimes(2);
       expect(api.editMessageText).toHaveBeenLastCalledWith(
@@ -286,7 +286,7 @@ describe("pinned manager scoped state", () => {
       );
       expect(api.editMessageText).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
       expect(api.editMessageText).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
@@ -338,7 +338,7 @@ describe("pinned manager scoped state", () => {
         new Error("Bad Request: message to edit not found"),
       );
       await pinnedMessageManager.flush("chat:-1:10");
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(api.sendMessage).toHaveBeenCalledTimes(1);
       expect(pinnedMessageManager.getState("chat:-1:10").messageId).toBe(101);
@@ -367,7 +367,7 @@ describe("pinned manager scoped state", () => {
         new Error("Bad Request: message can't be edited"),
       );
       await pinnedMessageManager.flush("chat:-1:10");
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(api.sendMessage).toHaveBeenCalledTimes(1);
       expect(pinnedMessageManager.getState("chat:-1:10").messageId).toBe(101);
@@ -461,7 +461,7 @@ describe("pinned manager scoped state", () => {
         "chat:-1:10",
       );
       await pinnedMessageManager.flush("chat:-1:10");
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(api.editMessageText).toHaveBeenCalledWith(
         -1,
@@ -505,7 +505,7 @@ describe("pinned manager scoped state", () => {
     );
   });
 
-  it("includes summary messages when reloading context after compaction", async () => {
+  it("skips summary messages when reloading context after compaction", async () => {
     const api = createApi();
 
     setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
@@ -529,12 +529,113 @@ describe("pinned manager scoped state", () => {
 
     await pinnedMessageManager.onSessionCompacted("s1", "/repo/a", "chat:-1:10");
 
+    // The summary carries the discarded pre-compaction window, so it must
+    // not become the baseline; its cost still counts towards the lifetime.
     expect(pinnedMessageManager.getState("chat:-1:10")).toEqual(
       expect.objectContaining({
-        tokensUsed: 920,
+        tokensUsed: 0,
         assistantCost: expect.closeTo(0.005, 5),
       }),
     );
+  });
+
+  it("prefers the server session cost over the accumulated history slice", async () => {
+    const api = createApi();
+
+    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+    opencodeMocks.messages.mockResolvedValueOnce({
+      data: [
+        {
+          info: {
+            role: "assistant",
+            cost: 0.02,
+            tokens: { input: 5000, cache: { read: 250 } },
+          },
+        },
+      ],
+      error: null,
+    });
+    // The server total also covers subagents and compaction requests that
+    // never appear as root messages in history.
+    opencodeMocks.get.mockResolvedValueOnce({
+      data: { cost: 6.3576 },
+      error: null,
+    });
+
+    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+    await pinnedMessageManager.onSessionCompacted("s1", "/repo/a", "chat:-1:10");
+
+    expect(pinnedMessageManager.getState("chat:-1:10")).toEqual(
+      expect.objectContaining({ assistantCost: expect.closeTo(6.3576, 4) }),
+    );
+  });
+
+  it("baselines on the latest message instead of the historic peak", async () => {
+    const api = createApi();
+
+    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+    opencodeMocks.messages.mockResolvedValueOnce({
+      data: [
+        {
+          info: {
+            role: "assistant",
+            cost: 1.0,
+            tokens: { input: 800000, cache: { read: 117146 } },
+            time: { created: 1000 },
+          },
+        },
+        {
+          info: {
+            role: "assistant",
+            cost: 0.01,
+            tokens: { input: 1000, cache: { read: 127000 } },
+            time: { created: 2000 },
+          },
+        },
+      ],
+      error: null,
+    });
+
+    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+    await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+
+    // Live window is the latest message (128k), never the 917k peak.
+    expect(pinnedMessageManager.getState("chat:-1:10")).toEqual(
+      expect.objectContaining({ tokensUsed: 128000 }),
+    );
+  });
+
+  it("lets a completed message move the dashboard down to the real window", async () => {
+    const api = createApi();
+
+    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+    await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+
+    await pinnedMessageManager.onMessageComplete(
+      { input: 280000, output: 10, reasoning: 0, cacheRead: 20000, cacheWrite: 0, cost: 1.0 },
+      "chat:-1:10",
+      true,
+    );
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(300010);
+
+    // Post-compaction completion with the real (smaller) window resets it.
+    await pinnedMessageManager.onMessageComplete(
+      { input: 1000, output: 10, reasoning: 0, cacheRead: 127000, cacheWrite: 0, cost: 0.01 },
+      "chat:-1:10",
+      true,
+    );
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(128010);
+
+    // Live estimates still only move forward mid-turn, never backwards.
+    await pinnedMessageManager.onMessageComplete(
+      { input: 100, output: 0, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0 },
+      "chat:-1:10",
+    );
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(128010);
   });
 
   it("shows the git branch for linked worktree projects", async () => {
@@ -603,7 +704,7 @@ describe("pinned manager scoped state", () => {
       );
       // Paint the file entry first so clearing it is a visible change.
       await pinnedMessageManager.flush("chat:-1:10");
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
       expect(api.editMessageText).toHaveBeenLastCalledWith(
         -1,
         expect.any(Number),
@@ -614,7 +715,7 @@ describe("pinned manager scoped state", () => {
       await pinnedMessageManager.onSessionDiff([], "chat:-1:10");
       expect(pinnedMessageManager.getState("chat:-1:10").changedFiles).toHaveLength(0);
 
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(61_000);
       expect(api.editMessageText).toHaveBeenCalled();
       expect(api.editMessageText).toHaveBeenLastCalledWith(
         -1,
@@ -624,6 +725,54 @@ describe("pinned manager scoped state", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("re-baselines from the compaction marker instead of the stored history", async () => {
+    const api = createApi();
+
+    setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+    opencodeMocks.messages.mockResolvedValueOnce({
+      data: [
+        {
+          info: {
+            role: "assistant",
+            cost: 5.0,
+            tokens: { input: 900000, cache: { read: 100000 } },
+            time: { created: 1000 },
+          },
+          parts: [{ type: "text", text: "old work" }],
+        },
+        {
+          info: {
+            role: "assistant",
+            summary: true,
+            cost: 0.1,
+            tokens: { input: 5000, cache: { read: 0 } },
+            time: { created: 2000 },
+          },
+          parts: [{ type: "compaction", text: "summary" }],
+        },
+        {
+          info: {
+            role: "assistant",
+            cost: 0.02,
+            tokens: { input: 40000, cache: { read: 10000 } },
+            time: { created: 3000 },
+          },
+          parts: [{ type: "text", text: "new work" }],
+        },
+      ],
+      error: null,
+    });
+
+    pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+    await pinnedMessageManager.onSessionCompacted("s1", "/repo/a", "chat:-1:10");
+
+    // Context drops to the post-compaction window instead of freezing at 1M;
+    // lifetime cost still accumulates.
+    expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(50000);
+    expect(pinnedMessageManager.getState("chat:-1:10").assistantCost).toBeCloseTo(5.12, 5);
   });
 
   it("keeps the history baseline when a live update reports a smaller window", async () => {
@@ -656,5 +805,117 @@ describe("pinned manager scoped state", () => {
 
     expect(pinnedMessageManager.getState("chat:-1:10").tokensUsed).toBe(5000);
     expect(pinnedMessageManager.getState("chat:-1:10").assistantCost).toBeCloseTo(0.025, 5);
+  });
+
+  it("opens a storm cooldown after repeated 429s and repaints once it lapses", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
+
+      setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+      setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+
+      pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+      await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+      api.editMessageText.mockClear();
+
+      // Every dashboard edit now hits flood control.
+      const flood = Object.assign(new Error("Too Many Requests: retry after 1"), {
+        parameters: { retry_after: 1 },
+      });
+      api.editMessageText.mockRejectedValue(flood);
+
+      // A state change arms a repaint; the trailing edit burns its retries
+      // against 429s and the scope goes quiet for 60s.
+      await pinnedMessageManager.onMessageComplete(
+        { input: 100, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
+        "chat:-1:10",
+      );
+      // 60s throttle + the 429 retry sleeps.
+      await vi.advanceTimersByTimeAsync(61_000);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(api.editMessageText.mock.calls.length).toBeGreaterThan(0);
+
+      // Cooldown is open: new triggers (and coordinator-flush retries)
+      // schedule nothing instead of feeding the storm.
+      api.editMessageText.mockClear();
+      await pinnedMessageManager.onMessageComplete(
+        { input: 200, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
+        "chat:-1:10",
+      );
+      await pinnedMessageManager.flush("chat:-1:10");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(api.editMessageText).not.toHaveBeenCalled();
+
+      // Storm over and cooldown lapsed: the next trigger repaints with the
+      // latest state instead of staying frozen.
+      await vi.advanceTimersByTimeAsync(60_000);
+      api.editMessageText.mockResolvedValue(true);
+      await pinnedMessageManager.onMessageComplete(
+        { input: 300, output: 10, reasoning: 0, cacheRead: 20, cacheWrite: 0, cost: 0.01 },
+        "chat:-1:10",
+      );
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(api.editMessageText).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips dashboard creation while the storm cooldown lasts", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
+
+      setCurrentProject({ id: "p1", worktree: "/repo/a" }, "chat:-1:10");
+      setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "chat:-1:10");
+
+      pinnedMessageManager.initialize(api as never, -1, "chat:-1:10", 10);
+      await pinnedMessageManager.onSessionChange("s1", "thread 10", "chat:-1:10");
+      api.sendMessage.mockClear();
+      expect(pinnedMessageManager.getState("chat:-1:10").messageId).not.toBeNull();
+
+      // Lose the dashboard mid-storm (deleted message): the next flush
+      // would recreate it with a send, feeding the flood.
+      const flood = Object.assign(new Error("Too Many Requests: retry after 1"), {
+        parameters: { retry_after: 1 },
+      });
+      api.sendMessage.mockRejectedValue(flood);
+      const contexts = (
+        pinnedMessageManager as unknown as {
+          contexts: Map<string, { state: { messageId: number | null } }>;
+        }
+      ).contexts;
+      contexts.get("chat:-1:10")!.state.messageId = null;
+      // Run the flush concurrently with the fake clock, stepping so each
+      // retry sleep resolves: creation burns its retries against 429s and
+      // opens the cooldown.
+      const failingFlush = pinnedMessageManager.flush("chat:-1:10");
+      let failedSettled = false;
+      void failingFlush.then(
+        () => { failedSettled = true; },
+        () => { failedSettled = true; },
+      );
+      for (let i = 0; i < 30 && !failedSettled; i++) {
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+      await failingFlush;
+      // Cooldown is now open: further flushes must not attempt more sends.
+      expect(api.sendMessage.mock.calls.length).toBeGreaterThan(0);
+      api.sendMessage.mockClear();
+      api.sendMessage.mockRejectedValue(flood);
+      await pinnedMessageManager.flush("chat:-1:10");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(api.sendMessage).not.toHaveBeenCalled();
+
+      // Storm over and cooldown lapsed: the dashboard is recreated.
+      await vi.advanceTimersByTimeAsync(120_000);
+      api.sendMessage.mockResolvedValue({ message_id: 200 });
+      await pinnedMessageManager.flush("chat:-1:10");
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(pinnedMessageManager.getState("chat:-1:10").messageId).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -122,10 +122,8 @@ export class SessionOutputCoordinator {
   private readonly finalDeliveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly pendingFinalDeliveries = new Set<string>();
   /**
-   * Completions waiting for the next final delivery, in arrival order. A
-   * queue (not a single slot): when an SSE gap swallows `session.idle`, the
-   * next idle must deliver every pending turn text, not just the latest —
-   * overwriting the slot silently dropped turns and scrambled message order.
+   * Completions queue up in arrival order. Deliver all pending texts on the
+   * next idle, not just the latest.
    */
   private readonly pendingAssistantCompletions = new Map<string, PendingAssistantCompletion[]>();
   private readonly activityVersions = new Map<string, number>();

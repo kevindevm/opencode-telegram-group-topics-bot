@@ -41,3 +41,60 @@ jobs:
 
       - name: Test
         run: npm run test
+
+  readme-parity:
+    name: README parity (8 locales)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check README parity
+        run: node scripts/check-readme-parity.mjs
+
+  format-new-files:
+    name: Prettier (added files only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting of added files
+        run: |
+          set -euo pipefail
+          # Only files ADDED in this branch/PR: legacy files keep their style
+          # until someone reformats them on purpose (no big-bang reformat).
+          # Empty on main pushes and manual runs: nothing to check, pass.
+          BASE=$(git merge-base origin/main HEAD 2>/dev/null || echo "")
+          if [ -z "$BASE" ]; then
+            echo "No base ref; nothing to check."
+            exit 0
+          fi
+          FILES=$(git diff --name-only --diff-filter=A "$BASE" HEAD -- '*.ts' '*.mjs' '*.cjs' '*.js' || true)
+          if [ -z "$FILES" ]; then
+            echo "No added JS/TS files; nothing to check."
+            exit 0
+          fi
+          echo "$FILES" | xargs npx prettier --check

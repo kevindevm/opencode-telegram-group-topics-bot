@@ -46,7 +46,7 @@ const mocked = vi.hoisted(() => ({
   projectDirectoryExistsMock: vi.fn(() => Promise.resolve(true)),
   syncTopicTitleForSessionMock: vi.fn(),
   formatTopicTitleMock: vi.fn((_topicName: string, sessionTitle: string) => sessionTitle),
-  buildTopicMessageLinkMock: vi.fn(() => "https://t.me/c/123/555"),
+  buildTopicThreadLinkMock: vi.fn(() => "https://t.me/c/123/555"),
   loggerDebugMock: vi.fn(),
   loggerInfoMock: vi.fn(),
   loggerWarnMock: vi.fn(),
@@ -173,7 +173,7 @@ vi.mock("../../../src/topic/title-format.js", () => ({
 }));
 
 vi.mock("../../../src/bot/utils/topic-link.js", () => ({
-  buildTopicMessageLink: mocked.buildTopicMessageLinkMock,
+  buildTopicThreadLink: mocked.buildTopicThreadLinkMock,
 }));
 
 vi.mock("../../../src/utils/logger.js", () => ({
@@ -238,7 +238,7 @@ describe("bot/commands/new", () => {
     mocked.projectDirectoryExistsMock.mockReset();
     mocked.syncTopicTitleForSessionMock.mockReset();
     mocked.formatTopicTitleMock.mockReset();
-    mocked.buildTopicMessageLinkMock.mockReset();
+    mocked.buildTopicThreadLinkMock.mockReset();
     mocked.loggerDebugMock.mockReset();
     mocked.loggerInfoMock.mockReset();
     mocked.loggerWarnMock.mockReset();
@@ -273,7 +273,7 @@ describe("bot/commands/new", () => {
     mocked.formatTopicTitleMock.mockImplementation(
       (_topicName: string, sessionTitle: string) => sessionTitle,
     );
-    mocked.buildTopicMessageLinkMock.mockReturnValue("https://t.me/c/123/555");
+    mocked.buildTopicThreadLinkMock.mockReturnValue("https://t.me/c/123/555");
     mocked.sessionCreateMock.mockResolvedValue({
       data: {
         id: "session-123",

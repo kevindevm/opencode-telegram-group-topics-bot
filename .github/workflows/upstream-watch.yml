@@ -1,0 +1,89 @@
+name: Upstream fork watch
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Check upstream for new commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read last reviewed upstream head
+        id: marker
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(grep -oP '(?<=Last reviewed upstream head: `)[0-9a-f]+' FORK_SYNC.md | head -n 1)
+          if [ -z "$HEAD_SHA" ]; then
+            echo "No upstream marker found in FORK_SYNC.md"
+            exit 1
+          fi
+          echo "sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "Last reviewed: $HEAD_SHA"
+
+      - name: Fetch upstream main
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/grinev/opencode-telegram-bot.git 2>/dev/null || true
+          git fetch upstream main --depth=100
+
+      - name: Compare and notify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          MARKER="${{ steps.marker.outputs.sha }}"
+          UPSTREAM_HEAD=$(git rev-parse upstream/main)
+          echo "Upstream head: $UPSTREAM_HEAD"
+
+          if git merge-base --is-ancestor "$MARKER" upstream/main 2>/dev/null; then
+            AHEAD=$(git rev-list --count "$MARKER..upstream/main")
+          else
+            # Shallow fetch may miss the marker; fall back to listing recent commits.
+            AHEAD=$(git rev-list --count upstream/main)
+          fi
+          echo "New commits since marker: $AHEAD"
+
+          if [ "$AHEAD" = "0" ] || [ "$UPSTREAM_HEAD" = "$MARKER" ]; then
+            echo "Upstream is in sync with the reviewed head."
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor "$MARKER" upstream/main 2>/dev/null; then
+            COMMITS=$(git log --format='- %h %s' "$MARKER..upstream/main" | head -n 30)
+            COMPARE="https://github.com/kevindevm/opencode-telegram-group-topics-bot/compare/${MARKER}...grinev:main"
+          else
+            COMMITS=$(git log --format='- %h %s' upstream/main | head -n 30)
+            COMPARE="https://github.com/grinev/opencode-telegram-bot/commits/main"
+          fi
+
+          BODY=$(cat <<EOF
+          Upstream \`grinev/opencode-telegram-bot\` has $AHEAD new commit(s) since the last reviewed head \`$MARKER\` (see \`FORK_SYNC.md\`).
+
+          Review selectively per the fork rules (no blind merges):
+
+          $COMMITS
+
+          Compare: $COMPARE
+          EOF
+          )
+
+          TITLE="Upstream has new commits to review ($UPSTREAM_HEAD)"
+          EXISTING=$(gh issue list --search "$TITLE in:title" --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+            echo "Updated existing issue #$EXISTING"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+            echo "Created new issue"
+          fi

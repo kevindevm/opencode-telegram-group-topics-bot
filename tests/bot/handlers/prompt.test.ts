@@ -14,6 +14,7 @@ import {
   getQueuedPromptCountForTests,
   handleQueuedPromptCancel,
   handleQueuedPromptFront,
+  handleQueuedPromptInterrupt,
   handleQueuedPromptSteer,
   listQueuedPrompts,
   processUserPrompt,
@@ -29,6 +30,8 @@ const mocked = vi.hoisted(() => ({
   getStoredAgentMock: vi.fn(),
   getStoredModelMock: vi.fn(),
   getTopicBindingByScopeKeyMock: vi.fn(),
+  registerBindingMock: vi.fn(),
+  updateBindingStatusMock: vi.fn(),
   safeBackgroundTaskMock: vi.fn(),
   sessionStatusMock: vi.fn(),
   sessionGetMock: vi.fn(),
@@ -74,6 +77,7 @@ vi.mock("../../../src/settings/manager.js", () => ({
   setCurrentModel: mocked.setCurrentModelMock,
   getPersistedQueuedPrompts: () => mocked.persistedQueue,
   setPersistedQueuedPrompts: mocked.setPersistedQueueMock,
+  TOPIC_SESSION_STATUS: { ACTIVE: "active" },
 }));
 
 vi.mock("../../../src/agent/manager.js", () => ({
@@ -179,6 +183,8 @@ vi.mock("../../../src/interaction/constants.js", () => ({
 
 vi.mock("../../../src/topic/manager.js", () => ({
   getTopicBindingByScopeKey: mocked.getTopicBindingByScopeKeyMock,
+  registerTopicSessionBinding: mocked.registerBindingMock,
+  updateTopicBindingStatus: mocked.updateBindingStatusMock,
 }));
 
 vi.mock("../../../src/scheduled-task/store.js", () => ({
@@ -209,6 +215,8 @@ describe("bot/handlers/prompt", () => {
     mocked.getStoredAgentMock.mockReset();
     mocked.getStoredModelMock.mockReset();
     mocked.getTopicBindingByScopeKeyMock.mockReset();
+    mocked.registerBindingMock.mockReset();
+    mocked.updateBindingStatusMock.mockReset();
     mocked.safeBackgroundTaskMock.mockReset();
     mocked.sessionStatusMock.mockReset();
     mocked.sessionGetMock.mockReset();
@@ -713,7 +721,52 @@ describe("bot/handlers/prompt", () => {
     expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
       expect.objectContaining({ delivery: "steer" }),
     );
-    expect(steerCtx.editMessageText).toHaveBeenCalledWith(expect.stringContaining("⚡"));
+    expect(steerCtx.editMessageText).toHaveBeenCalledWith(expect.stringContaining("🧭"));
+  });
+
+  it("interrupts the running turn and dispatches the queued prompt fresh", async () => {
+    mocked.serverVersion = "v2";
+    mocked.sessionAbortMock.mockResolvedValue({ data: true, error: null });
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.sessionStatusMock.mockResolvedValue({
+      data: { "session-1": { type: "busy" } },
+      error: null,
+    });
+    const bot = {
+      api: { sendMessage: vi.fn().mockResolvedValue(undefined) },
+    } as unknown as Bot<Context>;
+
+    const ctx = createContext();
+    await processUserPrompt(ctx, "Urgent", {
+      bot,
+      ensureEventSubscription: vi.fn(),
+    });
+    expect(getQueuedPromptCountForTests("session-1")).toBe(1);
+
+    const markup = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]?.reply_markup as {
+      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
+    };
+    const interruptCallback = markup?.inline_keyboard
+      ?.flat()
+      .map((button) => button.callback_data ?? "")
+      .find((data) => data.startsWith("queue:interrupt:"));
+    expect(interruptCallback).toBeDefined();
+
+    const interruptCtx = {
+      callbackQuery: { data: interruptCallback },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageText: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Context;
+
+    expect(await handleQueuedPromptInterrupt(interruptCtx)).toBe(true);
+
+    expect(getQueuedPromptCountForTests("session-1")).toBe(0);
+    expect(mocked.sessionAbortMock).toHaveBeenCalled();
+    // Fresh turn, not steer: aborts first, then submits without delivery override.
+    expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ delivery: "steer" }),
+    );
+    expect(interruptCtx.editMessageText).toHaveBeenCalledWith(expect.stringContaining("⏹"));
   });
 
   it("aborts before steering on v1", async () => {
@@ -759,10 +812,11 @@ describe("bot/handlers/prompt", () => {
     mocked.serverVersion = "v2";
   });
 
-  it("answers missing for front and steer on unknown ids", async () => {
+  it("answers missing for front, steer and interrupt on unknown ids", async () => {
     for (const [handler, prefix] of [
       [handleQueuedPromptFront, "queue:front:"],
       [handleQueuedPromptSteer, "queue:steer:"],
+      [handleQueuedPromptInterrupt, "queue:interrupt:"],
     ] as const) {
       const ctx = {
         callbackQuery: { data: `${prefix}nope` },
@@ -777,7 +831,7 @@ describe("bot/handlers/prompt", () => {
     }
   });
 
-  it("ignores unrelated front and steer callbacks", async () => {
+  it("ignores unrelated front, steer and interrupt callbacks", async () => {
     const ctx = {
       callbackQuery: { data: "model:result:0" },
       answerCallbackQuery: vi.fn(),
@@ -785,6 +839,7 @@ describe("bot/handlers/prompt", () => {
 
     expect(await handleQueuedPromptFront(ctx)).toBe(false);
     expect(await handleQueuedPromptSteer(ctx)).toBe(false);
+    expect(await handleQueuedPromptInterrupt(ctx)).toBe(false);
   });
 
   it("persists queued prompts when they are queued and removed", async () => {
@@ -966,5 +1021,88 @@ describe("bot/handlers/prompt", () => {
     expect(getPromptResponseMode("session-1")).toBeNull();
     expect(getQueuedPromptCountForTests("session-1")).toBe(1);
     expect(consumePromptResponseMode("session-1")).toBeNull();
+  });
+
+  it("re-links a topic whose scope kept its session but lost the binding", async () => {
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.getTopicBindingByScopeKeyMock.mockReturnValue(undefined);
+
+    const ctx = createContext();
+    const bot = {
+      api: {
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+      },
+    } as unknown as Bot<Context>;
+
+    const result = await processUserPrompt(ctx, "Test", {
+      bot,
+      ensureEventSubscription: vi.fn(),
+    });
+
+    expect(mocked.registerBindingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "session-1", threadId: 555 }),
+    );
+    expect(ctx.reply).not.toHaveBeenCalledWith(t("topic.unbound"), expect.anything());
+    expect(result).toBe(true);
+  });
+
+  it("reopens an abandoned topic whose session still exists on the server", async () => {
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.getTopicBindingByScopeKeyMock.mockReturnValue({ sessionId: "session-1" });
+    mocked.getCurrentSessionMock.mockReturnValue(null);
+    mocked.sessionGetMock.mockResolvedValue({
+      data: { id: "session-1", title: "Session" },
+      error: null,
+    });
+
+    const ctx = createContext();
+    const bot = {
+      api: {
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+      },
+    } as unknown as Bot<Context>;
+
+    const result = await processUserPrompt(ctx, "Test", {
+      bot,
+      ensureEventSubscription: vi.fn(),
+    });
+
+    expect(mocked.updateBindingStatusMock).toHaveBeenCalledWith(-100123, 555, "active");
+    expect(ctx.reply).not.toHaveBeenCalledWith(t("topic.unbound"), expect.anything());
+    expect(result).toBe(true);
+  });
+
+  it("rejects an abandoned topic whose session is gone from the server", async () => {
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.getTopicBindingByScopeKeyMock.mockReturnValue({ sessionId: "session-1" });
+    mocked.getCurrentSessionMock.mockReturnValue(null);
+    mocked.sessionGetMock.mockResolvedValue({ data: null, error: new Error("gone") });
+
+    const ctx = createContext();
+
+    const result = await processUserPrompt(ctx, "Test", {
+      bot: {} as Bot<Context>,
+      ensureEventSubscription: vi.fn(),
+    });
+
+    expect(result).toBe(false);
+    expect(ctx.reply).toHaveBeenCalledWith(t("topic.unbound"), { message_thread_id: 555 });
+  });
+
+  it("still rejects a topic with neither binding nor session", async () => {
+    mocked.getScheduledTaskTopicByChatAndThreadMock.mockResolvedValue(null);
+    mocked.getTopicBindingByScopeKeyMock.mockReturnValue(undefined);
+    mocked.getCurrentSessionMock.mockReturnValue(null);
+
+    const ctx = createContext();
+
+    const result = await processUserPrompt(ctx, "Test", {
+      bot: {} as Bot<Context>,
+      ensureEventSubscription: vi.fn(),
+    });
+
+    expect(result).toBe(false);
+    expect(ctx.reply).toHaveBeenCalledWith(t("topic.unbound"), { message_thread_id: 555 });
+    expect(mocked.registerBindingMock).not.toHaveBeenCalled();
   });
 });

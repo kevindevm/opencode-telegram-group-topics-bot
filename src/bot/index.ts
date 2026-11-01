@@ -52,9 +52,9 @@ import { permissionManager } from "../permission/manager.js";
 import { handleAgentSelect, showAgentSelectionMenu } from "./handlers/agent.js";
 import { handleModelSelect, handleModelSearchTextAnswer, showModelSelectionMenu } from "./handlers/model.js";
 import { handleVariantSelect, showVariantSelectionMenu } from "./handlers/variant.js";
-import { handleContextButtonPress, handleCompactConfirm } from "./handlers/context.js";
+import { compactCommand, handleContextButtonPress, handleCompactConfirm } from "./handlers/context.js";
 import { handleInlineMenuCancel } from "./handlers/inline-menu.js";
-import { handleQueuedPromptCancel, handleQueuedPromptFront, handleQueuedPromptSteer } from "./handlers/prompt.js";
+import { handleQueuedPromptCancel, handleQueuedPromptFront, handleQueuedPromptInterrupt, handleQueuedPromptSteer } from "./handlers/prompt.js";
 import { displayCommand, handleDisplayCallback } from "./commands/display.js";
 import { queueCommand, handleQueueCallback } from "./commands/queue.js";
 import { trustCommand, handleTrustCallback } from "./commands/trust.js";
@@ -155,6 +155,7 @@ import { contextStateManager } from "../context/manager.js";
 import { formatContextForButton } from "./utils/keyboard.js";
 import { SessionOutputCoordinator } from "./session-output-coordinator.js";
 import { assistantRunState } from "./assistant-run-state.js";
+import { ensureAssistantRunForLiveEvent, ensureAssistantRunForTokens } from "./assistant-run-events.js";
 import { formatAssistantRunFooter } from "./utils/assistant-run-footer.js";
 import { renderAssistantFinalPartsSafe } from "./utils/assistant-rendering.js";
 import { buildCodeBlockMessages } from "./utils/code-block.js";
@@ -243,6 +244,7 @@ function getSharedEventCallback(): (event: OpenCodeEvent) => void {
       mirrorPcPromptOnRunStart(event);
       ensureTopicSessionTracked(event);
       ensureTopicManagersForLiveEvent(event);
+      ensureAssistantRunForLiveEvent(event);
 
       const sessionTitleUpdate = extractSessionTitleUpdate(event);
       if (sessionTitleUpdate && botInstance) {
@@ -1129,6 +1131,9 @@ async function deliverAssistantCompletion(
 
       // Bounded 429 retries: a persistent storm fails this delivery (and the
       // coordinator reschedules) instead of wedging the session chain.
+      // On failure the piggybacked markup (if any) never reached the
+      // client: release the optimistic fingerprint so the retry and the
+      // turn-end carrier resend it instead of assuming it landed.
       await runWithRateLimitRetries(`final:${sessionId}`, () =>
         sendBotRenderedPart({
           api: activeBot.api,
@@ -1151,7 +1156,10 @@ async function deliverAssistantCompletion(
             ...getThreadSendOptions(target.threadId),
           },
         }),
-      );
+      ).catch((error: unknown) => {
+        keyboardManager.markKeyboardMarkupUnsent(target.scopeKey);
+        throw error;
+      });
     }
 
     const ttsSent = await sendTtsResponseForSession({
@@ -1195,13 +1203,9 @@ function syncKeyboardContextFromPinnedState(scopeKey: string): void {
 
 const liveKeyboardRepostByScope = new Map<string, { at: number; percent: number }>();
 /**
- * Standalone reposts are now the fallback, not the main channel: fresh
- * messages (final answers) carry the keyboard via consumeStaleKeyboardMarkup,
- * and edits can never carry it (Telegram: edited messages accept inline
- * keyboards only). So this only fires on long turns with no fresh messages,
- * at most every 60s and only once the percent actually moved.
+ * Fallback only. Fresh turn-end messages already carry the keyboard.
+ * Reposts at most once per pin interval and only if percent moved.
  */
-const LIVE_KEYBOARD_REPOST_MIN_INTERVAL_MS = 60_000;
 const LIVE_KEYBOARD_REPOST_MIN_PERCENT_DELTA = 2;
 const LIVE_KEYBOARD_REPOST_MAX_SCOPES = 200;
 const TYPING_INDICATOR_MIN_INTERVAL_MS = 5_000;
@@ -1220,15 +1224,12 @@ function trackLiveKeyboardRepost(scopeKey: string, at: number, percent: number):
 }
 
 /**
- * Reposts the reply keyboard mid-run so its context button stops lagging a
- * full turn behind. Reply keyboards cannot be edited in place: Telegram only
- * swaps them when a new message carries reply_markup, and stream edits never
- * do (edits accept inline keyboards only). Fresh turn-end messages carry the
- * keyboard via consumeStaleKeyboardMarkup, so this standalone repost is only
- * the fallback for long turns with no fresh messages: at most every 60s, and
- * only once the displayed percent moved by at least 2 points (identical
- * markups are also skipped by the manager fingerprint).
+ * Repost the keyboard mid-run for long turns with no fresh messages.
+ * Same limits: once per pin interval, only if percent moved 2+ points.
  */
+function getLiveKeyboardRepostMinIntervalMs(): number {
+  return Math.max(1000, config.bot.pinEditIntervalSec * 1000);
+}
 async function refreshLiveKeyboardProgress(sessionId: string): Promise<void> {
   const target = getTargetBySessionId(sessionId);
   if (!target || !botInstance) {
@@ -1251,7 +1252,7 @@ async function refreshLiveKeyboardProgress(sessionId: string): Promise<void> {
   const percent = Math.round((contextInfo.tokensUsed / contextInfo.tokensLimit) * 100);
   const now = Date.now();
   const last = liveKeyboardRepostByScope.get(target.scopeKey);
-  if (last && now - last.at < LIVE_KEYBOARD_REPOST_MIN_INTERVAL_MS) {
+  if (last && now - last.at < getLiveKeyboardRepostMinIntervalMs()) {
     return;
   }
   if (last && Math.abs(percent - last.percent) < LIVE_KEYBOARD_REPOST_MIN_PERCENT_DELTA) {
@@ -1868,12 +1869,15 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
     });
   });
 
-  summaryAggregator.setOnTokens(async (sessionId, tokens) => {
+  summaryAggregator.setOnTokens(async (sessionId, tokens, completed) => {
     const target = getTargetBySessionId(sessionId);
     if (!target) {
       logger.debug("[Bot] Ignoring tokens for session without a topic target", { sessionId });
       return;
     }
+
+    // Give restarted turns a clock if the busy event was missed.
+    ensureAssistantRunForTokens(sessionId, target.scopeKey);
 
     try {
       logger.debug(`[Bot] Received tokens: input=${tokens.input}, output=${tokens.output}`);
@@ -1896,15 +1900,13 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
         }
       }
 
-      // Update keyboardManager SYNCHRONOUSLY before any await
-      // This ensures keyboard has correct context when onComplete sends the reply
-      const rawContextSize = tokens.input + tokens.cacheRead;
+      // Update the keyboard synchronously before any await so onComplete
+      // uses fresh context. Same footprint the TUI shows.
+      const rawContextSize =
+        tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead + tokens.cacheWrite;
       let contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
-      // Sanity gate: the live window can never exceed the model limit.
-      // Anything bigger is cumulative accounting leaking into the display, or
-      // a stale cached limit after a model switch — refresh once, then clamp
-      // and keep updating instead of dropping the event (dropping is what
-      // froze the pin and the keyboard at saturation, forever).
+      // Clamp live context to the model limit. Refresh once, then clamp and
+      // keep updating instead of dropping the event.
       if (contextLimit > 0 && rawContextSize > contextLimit) {
         await pinnedMessageManager.refreshContextLimit(target.scopeKey).catch(() => {});
         contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
@@ -1923,7 +1925,7 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
       }
 
       if (pinnedMessageManager.isInitialized(target.scopeKey)) {
-        await pinnedMessageManager.onMessageComplete(tokens, target.scopeKey);
+        await pinnedMessageManager.onMessageComplete(tokens, target.scopeKey, completed);
 
         if (contextLimit <= 0) {
           contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
@@ -2232,6 +2234,7 @@ export function createBot(): Bot<Context> {
   bot.command(BOT_COMMAND.RETRY, createRetryCommand({ bot, ensureEventSubscription }));
   bot.command(BOT_COMMAND.DIFF, diffCommand);
   bot.command(BOT_COMMAND.COMMIT, commitCommand);
+  bot.command(BOT_COMMAND.COMPACT, compactCommand);
   bot.command(BOT_COMMAND.COST, costCommand);
   bot.command(BOT_COMMAND.CLOSE, closeCommand);
   bot.command(BOT_COMMAND.CLEANUP, cleanupCommand);
@@ -2289,6 +2292,7 @@ export function createBot(): Bot<Context> {
       const handledQueuedCancel = await handleQueuedPromptCancel(ctx);
       const handledQueuedFront = await handleQueuedPromptFront(ctx);
       const handledQueuedSteer = await handleQueuedPromptSteer(ctx);
+      const handledQueuedInterrupt = await handleQueuedPromptInterrupt(ctx);
       const handledQueue = await handleQueueCallback(ctx);
       const handledTrust = await handleTrustCallback(ctx);
       const handledSession = await handleSessionSelect(ctx);
@@ -2312,7 +2316,7 @@ export function createBot(): Bot<Context> {
       });
 
       logger.debug(
-        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, queuedCancel=${handledQueuedCancel}, queuedFront=${handledQueuedFront}, queuedSteer=${handledQueuedSteer}, queue=${handledQueue}, trust=${handledTrust}, toolBackground=${handledToolBackground}, display=${handledDisplay}, session=${handledSession}, backgroundSession=${handledBackgroundSession}, recent=${handledRecent}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
+        `[Bot] Callback handled: inlineCancel=${handledInlineCancel}, queuedCancel=${handledQueuedCancel}, queuedFront=${handledQueuedFront}, queuedSteer=${handledQueuedSteer}, queuedInterrupt=${handledQueuedInterrupt}, queue=${handledQueue}, trust=${handledTrust}, toolBackground=${handledToolBackground}, display=${handledDisplay}, session=${handledSession}, backgroundSession=${handledBackgroundSession}, recent=${handledRecent}, project=${handledProject}, open=${handledOpen}, taskList=${handledTaskList}, question=${handledQuestion}, permission=${handledPermission}, agent=${handledAgent}, model=${handledModel}, variant=${handledVariant}, compactConfirm=${handledCompactConfirm}, rename=${handledRenameCancel}, commands=${handledCommands}, skills=${handledSkills}`,
       );
 
       if (

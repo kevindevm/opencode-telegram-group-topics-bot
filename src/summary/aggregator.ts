@@ -67,7 +67,7 @@ export interface TokensInfo {
   cost: number;
 }
 
-type TokensCallback = (sessionId: string, tokens: TokensInfo) => void;
+type TokensCallback = (sessionId: string, tokens: TokensInfo, completed: boolean) => void;
 
 type SessionCompactedCallback = (sessionId: string, directory: string) => void;
 type SessionIdleCallback = (sessionId: string) => void;
@@ -1418,8 +1418,9 @@ class SummaryAggregator {
         logger.debug(
           `[Aggregator] Tokens: input=${tokens.input}, output=${tokens.output}, reasoning=${tokens.reasoning}, cost=${tokens.cost}`,
         );
-        // Call synchronously so keyboardManager is updated before onComplete sends the reply
-        this.onTokensCallback(info.sessionID, tokens);
+        // Call synchronously so the keyboard updates before onComplete.
+        // Completed messages carry the final window.
+        this.onTokensCallback(info.sessionID, tokens, true);
 
         // Anchor for live estimates: the exact context of this completed step.
         this.lastStepTokensBySession.set(info.sessionID, {
@@ -2106,14 +2107,18 @@ class SummaryAggregator {
         sessionId,
       });
       void Promise.resolve(
-        callback(sessionId, {
-          input,
-          output: 0,
-          reasoning: 0,
-          cacheRead,
-          cacheWrite: 0,
-          cost: 0,
-        }),
+        callback(
+          sessionId,
+          {
+            input,
+            output: 0,
+            reasoning: 0,
+            cacheRead,
+            cacheWrite: 0,
+            cost: 0,
+          },
+          false,
+        ),
       ).catch((error) => {
         logger.error("[Aggregator] Tokens callback failed", { sessionId }, error);
       });
@@ -2150,7 +2155,7 @@ class SummaryAggregator {
       return;
     }
 
-    void Promise.resolve(callback(sessionId, liveTokens)).catch((error) => {
+    void Promise.resolve(callback(sessionId, liveTokens, false)).catch((error) => {
       logger.error("[Aggregator] Tokens callback failed", { sessionId }, error);
     });
   }
@@ -2182,6 +2187,13 @@ class SummaryAggregator {
     }
 
     logger.info(`[Aggregator] Session compacted: ${sessionID}`);
+
+    // Live usage anchors describe the pre-compaction window. Drop them so
+    // post-compaction estimates start from fresh server totals instead of
+    // carrying the old peak into the display.
+    this.latestCumulativeUsageBySession.delete(sessionID);
+    this.usageBaselineBySession.delete(sessionID);
+    this.lastStepTokensBySession.delete(sessionID);
 
     // Reload context from history after compaction
     if (this.onSessionCompactedCallback) {

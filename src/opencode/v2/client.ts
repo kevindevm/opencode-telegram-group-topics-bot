@@ -357,10 +357,7 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
     let finished = false;
     let failure: unknown;
     let lastDelivered = Date.now();
-    // The producer runs detached from the consumer: if the consumer stalls
-    // (slow dispatch, blocked session chain), an unbounded queue would grow
-    // into OOM on an event burst. Drop oldest-first past the cap, loudly —
-    // a gap is recoverable, an OOM is not.
+    // Producer runs detached. Cap the queue and drop oldest first to avoid OOM.
     const MAX_STREAM_QUEUE = 1000;
 
     function pushEvent(item: V1GlobalEvent): void {

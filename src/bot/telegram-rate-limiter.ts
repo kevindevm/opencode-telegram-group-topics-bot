@@ -43,9 +43,9 @@ export class RateLimitExceededError extends Error {
 
 /**
  * Runs a Telegram call with the same give-up budget as the queued paths.
- * Use this for direct (non-queued) sends — pin edits, final deliveries,
- * documents — so a persistent 429 storm fails loudly instead of wedging
- * the per-session delivery chain forever.
+ * Use this for direct (non-queued) sends: pin edits, final deliveries,
+ * documents. A persistent 429 storm fails loudly instead of wedging the
+ * per-session delivery chain forever.
  */
 export async function runWithRateLimitRetries<T>(
   label: string,
@@ -78,10 +78,19 @@ interface QueueJob {
   isGroupLike: boolean;
   notBefore: number;
   attempts429: number;
+  /**
+   * Repaints (message edits) lose to user traffic: during a flood the
+   * client's questions, answers and commands must jump ahead of stream
+   * and dashboard repaints instead of queueing behind them.
+   */
+  kind: "user" | "repaint";
   run: () => Promise<unknown>;
   resolves: Array<(value: unknown) => void>;
   rejects: Array<(error: unknown) => void>;
 }
+
+/** Edits re-render what the user already sees; everything else moves the conversation forward. */
+const REPAINT_METHODS = new Set(["editMessageText", "editMessageReplyMarkup"]);
 
 function isEditMessageJob(job: QueueJob): boolean {
   return job.method === "editMessageText";
@@ -271,6 +280,7 @@ export class TelegramRateLimiter {
         isGroupLike: isGroupLikeChat(chatId),
         notBefore: 0,
         attempts429: 0,
+        kind: REPAINT_METHODS.has(method) ? "repaint" : "user",
         run: run as () => Promise<unknown>,
         resolves: [resolve],
         rejects: [reject],
@@ -296,8 +306,7 @@ export class TelegramRateLimiter {
   }
 
   private findNextIndex(now: number): { index: number; waitMs: number } {
-    let prioritizedReadyIndex = -1;
-    let firstReadyIndex = -1;
+    let best: { index: number; waitMs: number; tier: number } | null = null;
     let minWaitMs = Number.POSITIVE_INFINITY;
     let minWaitIndex = 0;
     const seenScopeKeys = new Set<string>();
@@ -319,16 +328,13 @@ export class TelegramRateLimiter {
       const waitMs = this.getWaitMs(job, now);
 
       if (waitMs <= 0) {
-        if (
-          this.activeScopeKey &&
-          prioritizedReadyIndex < 0 &&
-          job.scopeKey === this.activeScopeKey
-        ) {
-          prioritizedReadyIndex = index;
-        }
-
-        if (firstReadyIndex < 0) {
-          firstReadyIndex = index;
+        // Lower tier runs first: user traffic before repaints, active scope
+        // first within the tier. FIFO breaks remaining ties.
+        const tier =
+          (job.kind === "user" ? 0 : 2) +
+          (this.activeScopeKey && job.scopeKey === this.activeScopeKey ? 0 : 1);
+        if (!best || tier < best.tier || (tier === best.tier && index < best.index)) {
+          best = { index, waitMs: 0, tier };
         }
 
         continue;
@@ -340,12 +346,8 @@ export class TelegramRateLimiter {
       }
     }
 
-    if (prioritizedReadyIndex >= 0) {
-      return { index: prioritizedReadyIndex, waitMs: 0 };
-    }
-
-    if (firstReadyIndex >= 0) {
-      return { index: firstReadyIndex, waitMs: 0 };
+    if (best) {
+      return { index: best.index, waitMs: 0 };
     }
 
     return {
@@ -435,6 +437,22 @@ export class TelegramRateLimiter {
   }
 
   private requeueRetryJob(job: QueueJob): void {
+    if (isEditMessageJob(job)) {
+      // A newer edit for the same message makes this retry stale: drop the
+      // old text instead of resending it ahead of the fresh one. The old
+      // waiters join the newer job so they resolve with the latest repaint.
+      const newerIndex = this.findCoalescibleEditIndex(job.payload);
+      if (newerIndex >= 0) {
+        const newer = this.queue[newerIndex];
+        newer.resolves.push(...job.resolves);
+        newer.rejects.push(...job.rejects);
+        logger.debug(
+          `[RateLimiter] Dropping stale ${job.method} retry; newer edit already queued`,
+        );
+        return;
+      }
+    }
+
     if (!job.scopeKey) {
       this.queue.push(job);
       return;

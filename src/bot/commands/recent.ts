@@ -30,25 +30,52 @@ import {
 import { CHAT_TYPE } from "../constants.js";
 
 export const RECENT_CALLBACK_PREFIX = "recent:";
+const RECENT_PAGE_CALLBACK_PREFIX = "recent:page:";
+/** How many pages deep a tap can resolve a session from. */
+const RECENT_SELECT_SCAN_PAGES = 5;
 
 const STATUS_DOT: Record<RecentSessionEntry["status"], string> = {
   running: "🔴",
   idle: "⚪",
 };
 
-function buildRecentKeyboard(entries: RecentSessionEntry[]): InlineKeyboard {
+function buildRecentKeyboard(
+  entries: RecentSessionEntry[],
+  page: number,
+  pageSize: number,
+  hasNext: boolean,
+): InlineKeyboard {
   const keyboard = new InlineKeyboard();
+  const pageStartIndex = page * pageSize;
   entries.forEach((entry, index) => {
     const folder = getProjectFolderName(entry.directory);
     const title = entry.title?.trim() ? entry.title : folder;
     keyboard
       .text(
-        `${index + 1}. ${title} · ${folder} ${STATUS_DOT[entry.status]}`,
+        `${pageStartIndex + index + 1}. ${title} · ${folder} ${STATUS_DOT[entry.status]}`,
         `${RECENT_CALLBACK_PREFIX}${entry.id}`,
       )
       .row();
   });
+  if (page > 0) {
+    keyboard.text(t("sessions.button.prev_page"), `${RECENT_PAGE_CALLBACK_PREFIX}${page - 1}`);
+  }
+  if (hasNext) {
+    keyboard.text(t("sessions.button.next_page"), `${RECENT_PAGE_CALLBACK_PREFIX}${page + 1}`);
+  }
+  if (page > 0 || hasNext) {
+    keyboard.row();
+  }
   return keyboard;
+}
+
+function parseRecentPageCallback(data: string): number | null {
+  if (!data.startsWith(RECENT_PAGE_CALLBACK_PREFIX)) {
+    return null;
+  }
+  const rawPage = data.slice(RECENT_PAGE_CALLBACK_PREFIX.length);
+  const page = Number(rawPage);
+  return Number.isInteger(page) && page >= 0 ? page : null;
 }
 
 function parseRecentIdCallback(data: string): string | null {
@@ -57,6 +84,19 @@ function parseRecentIdCallback(data: string): string | null {
   }
   const sessionId = data.slice(RECENT_CALLBACK_PREFIX.length);
   return sessionId.length > 0 ? sessionId : null;
+}
+
+async function loadRecentPage(
+  page: number,
+  pageSize: number,
+): Promise<{ entries: RecentSessionEntry[]; hasNext: boolean; page: number }> {
+  const endExclusive = (page + 1) * pageSize;
+  const entries = await loadRecentSessions(endExclusive + 1);
+  return {
+    entries: entries.slice(page * pageSize, endExclusive),
+    hasNext: entries.length > endExclusive,
+    page,
+  };
 }
 
 export async function recentCommand(ctx: CommandContext<Context>): Promise<void> {
@@ -70,9 +110,10 @@ export async function recentCommand(ctx: CommandContext<Context>): Promise<void>
       return;
     }
 
-    const entries = await loadRecentSessions(config.bot.sessionsListLimit);
+    const pageSize = config.bot.sessionsListLimit;
+    const pageData = await loadRecentPage(0, pageSize);
 
-    if (entries.length === 0) {
+    if (pageData.entries.length === 0) {
       await ctx.reply(t("recent.empty"), getThreadSendOptions(scope?.threadId ?? null));
       return;
     }
@@ -80,7 +121,7 @@ export async function recentCommand(ctx: CommandContext<Context>): Promise<void>
     await replyWithInlineMenu(ctx, {
       menuKind: "recent",
       text: t("recent.heading"),
-      keyboard: buildRecentKeyboard(entries),
+      keyboard: buildRecentKeyboard(pageData.entries, pageData.page, pageSize, pageData.hasNext),
     });
   } catch (error) {
     logger.error("[Recent] Error fetching recent sessions:", error);
@@ -96,18 +137,44 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
     return false;
   }
 
-  const sessionId = parseRecentIdCallback(callbackQuery.data);
-  if (sessionId === null) {
-    return false;
-  }
-
   const isActiveMenu = await ensureActiveInlineMenu(ctx, "recent");
   if (!isActiveMenu) {
     return true;
   }
 
+  const page = parseRecentPageCallback(callbackQuery.data);
+  if (page !== null) {
+    try {
+      const pageSize = config.bot.sessionsListLimit;
+      const pageData = await loadRecentPage(page, pageSize);
+      if (pageData.entries.length === 0) {
+        await ctx.answerCallbackQuery({ text: t("sessions.page_empty_callback") });
+        return true;
+      }
+      await ctx.editMessageText(t("recent.heading"), {
+        reply_markup: buildRecentKeyboard(
+          pageData.entries,
+          pageData.page,
+          pageSize,
+          pageData.hasNext,
+        ),
+      });
+      await ctx.answerCallbackQuery();
+    } catch (error) {
+      logger.error("[Recent] Error loading recent sessions page:", error);
+      await ctx.answerCallbackQuery({ text: t("sessions.page_load_error_callback") });
+    }
+    return true;
+  }
+
+  const sessionId = parseRecentIdCallback(callbackQuery.data);
+  if (sessionId === null) {
+    return false;
+  }
+
   try {
-    const entries = await loadRecentSessions(config.bot.sessionsListLimit);
+    // Selections can arrive from any page, so scan deeper than one page.
+    const entries = await loadRecentSessions(config.bot.sessionsListLimit * RECENT_SELECT_SCAN_PAGES);
     const entry = entries.find((candidate) => candidate.id === sessionId);
 
     if (!entry) {
@@ -163,7 +230,7 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
       project = entry.project;
     }
 
-    if (await openSessionInNewTopic(ctx, session, project, scopeKey, scope)) {
+    if (await openSessionInNewTopic(ctx, session, project, scopeKey, scope, { keepMenu: true })) {
       return true;
     }
 
@@ -194,4 +261,5 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
 export const __recentTestHooks = {
   buildRecentKeyboard,
   parseRecentIdCallback,
+  parseRecentPageCallback,
 };

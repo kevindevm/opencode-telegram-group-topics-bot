@@ -1,0 +1,121 @@
+name: Server smoke (v1+v2)
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      server_v1:
+        description: "OpenCode server version for the v1 API job"
+        default: "1.19.5"
+      server_v2:
+        description: "OpenCode server version for the v2 API job"
+        default: "2.0.24"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke against OpenCode ${{ matrix.api }} (server ${{ matrix.server }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api: v1
+            server: "1.19.5"
+            port: 4101
+            probe_path: global/health
+          - api: v2
+            server: "2.0.24"
+            port: 4102
+            probe_path: api/info
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download OpenCode server
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.api }}" = "v1" ]; then
+            SERVER_VERSION="${{ inputs.server_v1 }}"
+          else
+            SERVER_VERSION="${{ inputs.server_v2 }}"
+          fi
+          # Scheduled runs have no inputs: fall back to the matrix pin.
+          if [ -z "$SERVER_VERSION" ]; then
+            SERVER_VERSION="${{ matrix.server }}"
+          fi
+          echo "Using OpenCode server v$SERVER_VERSION for API ${{ matrix.api }}"
+          echo "SERVER_VERSION=$SERVER_VERSION" >> "$GITHUB_ENV"
+          curl -fsSL -o opencode.tar.gz \
+            "https://github.com/anomalyco/opencode/releases/download/v${SERVER_VERSION}/opencode-linux-x64.tar.gz"
+          mkdir -p .smoke-server
+          tar -xzf opencode.tar.gz -C .smoke-server
+          chmod +x .smoke-server/opencode
+          ./.smoke-server/opencode --version
+
+      - name: Start server
+        env:
+          OPENCODE_SERVER_PASSWORD: ci-smoke-test-pw
+        run: |
+          set -euo pipefail
+          mkdir -p .smoke-workdir
+          cd .smoke-workdir
+          OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" \
+            "$GITHUB_WORKSPACE/.smoke-server/opencode" serve \
+            --port "${{ matrix.port }}" --hostname 127.0.0.1 \
+            > "$GITHUB_WORKSPACE/server.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/server.pid"
+
+      - name: Wait for health
+        env:
+          OPENCODE_SERVER_PASSWORD: ci-smoke-test-pw
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -fsS -u "opencode:$OPENCODE_SERVER_PASSWORD" \
+              "http://127.0.0.1:${{ matrix.port }}/${{ matrix.probe_path }}" > /dev/null; then
+              echo "server healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "server never became healthy"
+          tail -n 50 "$GITHUB_WORKSPACE/server.log" || true
+          exit 1
+
+      - name: Run smoke tests
+        env:
+          OPENCODE_API_URL: http://127.0.0.1:${{ matrix.port }}
+          OPENCODE_SERVER_VERSION: ${{ matrix.api }}
+          OPENCODE_SERVER_USERNAME: opencode
+          OPENCODE_SERVER_PASSWORD: ci-smoke-test-pw
+          OPENCODE_SMOKE_URL: http://127.0.0.1:${{ matrix.port }}
+          OPENCODE_SMOKE_VERSION: ${{ matrix.api }}
+          OPENCODE_SMOKE_USER: opencode
+          OPENCODE_SMOKE_PASS: ci-smoke-test-pw
+        run: npx vitest run tests/integration/opencode-server.test.ts
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/server.pid" ]; then
+            kill "$(cat "$GITHUB_WORKSPACE/server.pid")" 2>/dev/null || true
+          fi
+
+      - name: Server log on failure
+        if: failure()
+        run: tail -n 100 "$GITHUB_WORKSPACE/server.log" || true

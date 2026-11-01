@@ -1,0 +1,33 @@
+name: Dependency audit
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: npm audit (high and above)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # High/critical only: the known moderate base (vitest/tinypool, npm
+      # audit without --force would demand Node 22) is tracked, not gated.
+      - name: Audit
+        run: npm audit --audit-level=high

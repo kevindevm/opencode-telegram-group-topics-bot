@@ -28,8 +28,11 @@ export interface SessionInfo {
 }
 
 export interface ServerProcessInfo {
-  pid: number;
+  /** Null when the server runs as the v2 background service (no child PID). */
+  pid: number | null;
   startTime: string;
+  /** True when managed through `opencode service` instead of a spawned `serve`. */
+  viaService?: boolean;
 }
 
 export interface SessionDirectoryCacheInfo {
@@ -380,11 +383,12 @@ function sanitizeServerProcessInfo(value: unknown): ServerProcessInfo | undefine
 
   const pid = typeof value.pid === "number" ? value.pid : null;
   const startTime = typeof value.startTime === "string" ? value.startTime : "";
-  if (pid === null || !startTime) {
+  const viaService = value.viaService === true;
+  if ((!viaService && pid === null) || !startTime) {
     return undefined;
   }
 
-  return { pid, startTime };
+  return { pid, startTime, viaService };
 }
 
 function isValidIsoDatetime(value: unknown): value is string {
@@ -1265,18 +1269,22 @@ async function readSettingsFile(): Promise<unknown> {
     try {
       return JSON.parse(content) as unknown;
     } catch (parseError) {
-      // Never silently reset to empty: back the corrupt file up so the
-      // bindings/projects can be recovered instead of starting blank.
+      // Never silently reset to empty: keep a forensic copy, then try the
+      // last-known-good backup chain before giving up and starting blank.
       const backupPath = `${filePath}.corrupt-${Date.now()}`;
       try {
         await fs.writeFile(backupPath, content, "utf-8");
-        logger.error(
-          `[SettingsManager] Settings file is corrupt; backed up to ${backupPath} and starting empty:`,
-          parseError,
-        );
       } catch {
-        logger.error("[SettingsManager] Error reading settings file:", parseError);
+        // Forensics are best-effort; the restore below matters more.
       }
+      const restored = await tryRestoreSettingsBackup(fs, filePath, backupPath);
+      if (restored !== undefined) {
+        return restored;
+      }
+      logger.error(
+        `[SettingsManager] Settings file is corrupt and no backup is usable; backed up to ${backupPath} and starting empty:`,
+        parseError,
+      );
       return createEmptySettings();
     }
   } catch (error) {
@@ -1285,6 +1293,44 @@ async function readSettingsFile(): Promise<unknown> {
     }
     return createEmptySettings();
   }
+}
+
+/**
+ * Last-known-good copies next to settings.json, newest first. Rotated after
+ * every verified write; read when the main file fails to parse.
+ */
+function settingsBackupPaths(filePath: string): string[] {
+  return [`${filePath}.bak`, `${filePath}.bak-1`];
+}
+
+/**
+ * Returns the first backup that parses, and heals the main file from it so
+ * the next boot is clean even with zero further mutations. Returns
+ * undefined when no generation is usable.
+ */
+async function tryRestoreSettingsBackup(
+  fs: typeof import("fs/promises"),
+  filePath: string,
+  corruptBackupPath: string,
+): Promise<unknown | undefined> {
+  for (const candidate of settingsBackupPaths(filePath)) {
+    try {
+      const backupContent = await fs.readFile(candidate, "utf-8");
+      const parsed = JSON.parse(backupContent) as unknown;
+      logger.warn(
+        `[SettingsManager] Settings file is corrupt; restored from ${candidate} (forensic copy at ${corruptBackupPath})`,
+      );
+      try {
+        await fs.copyFile(candidate, filePath);
+      } catch (copyError) {
+        logger.warn("[SettingsManager] Restored settings in memory but could not heal the file:", copyError);
+      }
+      return parsed;
+    } catch {
+      // Try the older generation.
+    }
+  }
+  return undefined;
 }
 
 let settingsWriteQueue: Promise<void> = Promise.resolve();
@@ -1299,6 +1345,38 @@ const MAX_LOGGED_WRITE_FAILURES_BEFORE_ERROR = 3;
 // writes never catch up and memory diverges from disk.
 let pendingSettingsWrites = 0;
 const SETTINGS_WRITE_DEPTH_WARN_AT = 50;
+
+/**
+ * Change → verify → backup: after an atomic write lands, read it back to
+ * prove it is alive, then rotate it into the last-known-good chain. A bad
+ * write never touches the backups, so there is always something to restore.
+ * Best-effort only; write success itself is never revoked.
+ */
+async function verifyAndRotateBackup(
+  fs: typeof import("fs/promises"),
+  settingsFilePath: string,
+): Promise<void> {
+  try {
+    const written = await fs.readFile(settingsFilePath, "utf-8");
+    JSON.parse(written);
+  } catch (err) {
+    logger.warn("[SettingsManager] Wrote settings.json but it failed verification; keeping previous backup:", err);
+    return;
+  }
+
+  try {
+    const [newest, older] = settingsBackupPaths(settingsFilePath);
+    await fs.rm(older, { force: true });
+    try {
+      await fs.rename(newest, older);
+    } catch {
+      // No previous backup yet; nothing to shift.
+    }
+    await fs.copyFile(settingsFilePath, newest);
+  } catch (err) {
+    logger.debug("[SettingsManager] Could not rotate settings backup:", err);
+  }
+}
 
 function writeSettingsFile(settings: Settings): Promise<void> {
   // Capture the path synchronously at enqueue time: the write itself runs
@@ -1331,6 +1409,7 @@ function writeSettingsFile(settings: Settings): Promise<void> {
           // settings.json behind (the next read would reset to empty state).
           await fs.writeFile(tmpPath, JSON.stringify(settings, null, 2));
           await fs.rename(tmpPath, settingsFilePath);
+          await verifyAndRotateBackup(fs, settingsFilePath);
           if (consecutiveWriteFailures > 0) {
             logger.info("[SettingsManager] Settings writes recovered after failures");
             consecutiveWriteFailures = 0;

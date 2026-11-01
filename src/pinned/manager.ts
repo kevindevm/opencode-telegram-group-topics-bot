@@ -1,6 +1,7 @@
 import type { Api } from "grammy";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { config } from "../config.js";
 import { logger } from "../utils/logger.js";
 import { opencodeClient } from "../opencode/client.js";
 import {
@@ -14,7 +15,7 @@ import type { FileChange, PinnedMessageState, TokensInfo } from "./types.js";
 import { t } from "../i18n/index.js";
 import { getThreadIdFromScopeKey, getThreadSendOptions } from "../bot/scope.js";
 import { getScopeFromKey, SCOPE_CONTEXT } from "../bot/scope.js";
-import { runWithRateLimitRetries } from "../bot/telegram-rate-limiter.js";
+import { runWithRateLimitRetries, RateLimitExceededError } from "../bot/telegram-rate-limiter.js";
 import { contextStateManager } from "../context/manager.js";
 
 interface ScopeContext {
@@ -25,6 +26,11 @@ interface ScopeContext {
   debounceTimer: ReturnType<typeof setTimeout> | null;
   lastRenderedText: string | null;
   lastEditAt: number;
+  /**
+   * Drop repaints while in cooldown. Set after a 429 so retries do not
+   * feed the flood.
+   */
+  cooldownUntil: number;
 }
 
 /**
@@ -32,6 +38,50 @@ interface ScopeContext {
  */
 function isControlScope(scopeKey: string): boolean {
   return getScopeFromKey(scopeKey)?.context === SCOPE_CONTEXT.GROUP_GENERAL;
+}
+
+type HistoryEntry = {
+  info?: {
+    role?: unknown;
+    summary?: unknown;
+    time?: { created?: unknown };
+    tokens?: { input?: unknown; cache?: { read?: unknown } };
+    cost?: unknown;
+  } | null;
+  parts?: Array<{ type?: unknown } | null> | null;
+};
+
+/**
+ * Drops pre-compaction messages from a baseline computation: the server
+ * keeps them stored, but the model only sees what came after the latest
+ * compaction marker, so max() must run on that tail.
+ */
+function onlyPostCompactionMessages<TEntry extends HistoryEntry>(entries: TEntry[]): TEntry[] {
+  let markerCreated = -1;
+  let found = false;
+  for (const entry of entries) {
+    const parts = entry?.parts;
+    // A compaction marker is either an explicit compaction part or a
+    // summary message (summaries only exist because of a compaction).
+    const isMarker =
+      Boolean(entry?.info?.summary) ||
+      (Array.isArray(parts) && parts.some((part) => part?.type === "compaction"));
+    if (!isMarker) {
+      continue;
+    }
+    found = true;
+    const created = entry?.info?.time?.created;
+    if (typeof created === "number" && created > markerCreated) {
+      markerCreated = created;
+    }
+  }
+  if (!found) {
+    return entries;
+  }
+  return entries.filter((entry) => {
+    const created = entry?.info?.time?.created;
+    return typeof created !== "number" || created >= markerCreated;
+  });
 }
 
 class PinnedMessageManager {
@@ -83,6 +133,7 @@ class PinnedMessageManager {
       debounceTimer: null,
       lastRenderedText: null,
       lastEditAt: 0,
+      cooldownUntil: 0,
     };
     this.contexts.set(scopeKey, context);
     return context;
@@ -223,7 +274,6 @@ class PinnedMessageManager {
     sessionId: string,
     directory: string,
     scopeKey: string = "global",
-    options: { includeSummaries?: boolean } = {},
   ): Promise<void> {
     const context = this.getContext(scopeKey);
     try {
@@ -235,32 +285,86 @@ class PinnedMessageManager {
         return;
       }
 
-      let maxContextSize = 0;
       let totalAssistantCost = 0;
-      messagesData.forEach(({ info }) => {
-        if (info.role !== "assistant") {
-          return;
+      // Cost totals use full history. Context uses only the latest live
+      // message, not the historic peak. Summaries never count.
+      const baseline = onlyPostCompactionMessages(messagesData);
+      const windowSizeOf = (entry: unknown): { created: number; size: number } | null => {
+        const { info } = entry as { info?: unknown };
+        if (!info || (info as { role?: unknown }).role !== "assistant") {
+          return null;
         }
-
         const assistantInfo = info as {
           summary?: boolean;
-          cost?: number;
-          tokens?: { input: number; cache?: { read: number } };
+          tokens?: {
+            input: number;
+            output: number;
+            reasoning: number;
+            cache?: { read: number; write: number };
+          };
+          time?: { created?: number };
         };
-        if (assistantInfo.summary && !options.includeSummaries) {
-          return;
+        if (assistantInfo.summary) {
+          return null;
         }
-
-        const contextSize =
-          (assistantInfo.tokens?.input || 0) + (assistantInfo.tokens?.cache?.read || 0);
-        if (contextSize > maxContextSize) {
-          maxContextSize = contextSize;
+        // Same window the TUI shows: the whole message footprint, not just
+        // the fresh input plus cache reads.
+        const tokens = assistantInfo.tokens;
+        const size =
+          (tokens?.input || 0) +
+          (tokens?.output || 0) +
+          (tokens?.reasoning || 0) +
+          (tokens?.cache?.read || 0) +
+          (tokens?.cache?.write || 0);
+        // Messages without a timestamp sort as oldest; the API always sends
+        // created, this only covers hand-built shapes.
+        const created =
+          typeof assistantInfo.time?.created === "number" ? assistantInfo.time.created : 0;
+        return size > 0 ? { created, size } : null;
+      };
+      for (const entry of messagesData) {
+        const { info } = entry as { info?: unknown };
+        const cost = (info as { cost?: unknown })?.cost;
+        if (typeof cost === "number") {
+          totalAssistantCost += cost;
         }
+      }
+      // Prefer the server session cost when available. It covers turns
+      // missing from history.
+      try {
+        const { data: sessionData } = await opencodeClient.session.get({
+          sessionID: sessionId,
+          directory,
+        });
+        const serverCost = (sessionData as { cost?: unknown } | null)?.cost;
+        if (typeof serverCost === "number" && Number.isFinite(serverCost)) {
+          totalAssistantCost = serverCost;
+        }
+      } catch {
+        // Keep the accumulated history cost.
+      }
+      const pickLatest = (entries: unknown[]): number => {
+        let latestSize = 0;
+        let latestCreated = -1;
+        for (const entry of entries) {
+          const window = windowSizeOf(entry);
+          // Strictly greater: entries arrive oldest-first, so ties keep the
+          // first (earliest) one and real timestamps still resolve to latest.
+          if (window && window.created > latestCreated) {
+            latestCreated = window.created;
+            latestSize = window.size;
+          }
+        }
+        return latestCreated < 0 ? -1 : latestSize;
+      };
+      let picked = pickLatest(baseline);
+      if (picked < 0) {
+        // No usable post-marker message yet (fresh compaction): fall back to
+        // the latest pre-marker window instead of showing zero.
+        picked = pickLatest(messagesData);
+      }
 
-        totalAssistantCost += assistantInfo.cost || 0;
-      });
-
-      context.state.tokensUsed = maxContextSize;
+      context.state.tokensUsed = Math.max(0, picked);
       context.state.assistantCost = totalAssistantCost;
       context.state.sessionId = sessionId;
       this.syncSharedContext(scopeKey);
@@ -275,24 +379,29 @@ class PinnedMessageManager {
     directory: string,
     scopeKey: string = "global",
   ): Promise<void> {
-    await this.loadContextFromHistory(sessionId, directory, scopeKey, {
-      includeSummaries: true,
-    });
+    await this.loadContextFromHistory(sessionId, directory, scopeKey);
   }
 
-  async onMessageComplete(tokens: TokensInfo, scopeKey: string = "global"): Promise<void> {
+  async onMessageComplete(
+    tokens: TokensInfo,
+    scopeKey: string = "global",
+    completed: boolean = false,
+  ): Promise<void> {
     if (this.getContextLimit(scopeKey) === 0) {
       await this.fetchContextLimit(scopeKey);
     }
 
     const context = this.getContext(scopeKey);
-    // Preserve the history baseline: the live window must never move the
-    // dashboard backwards (history load races message events on reopen).
-    // Compaction re-baselines explicitly via loadContextFromHistory.
-    const rawUsed = tokens.input + tokens.cacheRead;
+    // Live estimates only move the dashboard forward. Completed messages
+    // set it outright, so it can drop after compaction.
+    // Same footprint the TUI shows: input + output + reasoning + cache.
+    const rawUsed =
+      tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead + tokens.cacheWrite;
     const limit = context.state.tokensLimit > 0 ? context.state.tokensLimit : 0;
-    const highWater = Math.max(context.state.tokensUsed, rawUsed);
-    context.state.tokensUsed = limit > 0 ? Math.min(highWater, limit) : highWater;
+    const nextUsed = completed
+      ? rawUsed
+      : Math.max(context.state.tokensUsed, rawUsed);
+    context.state.tokensUsed = limit > 0 ? Math.min(nextUsed, limit) : nextUsed;
     context.state.assistantCost += tokens.cost;
     await this.refreshSessionTitle(scopeKey);
     this.syncSharedContext(scopeKey);
@@ -353,13 +462,8 @@ class PinnedMessageManager {
   }
 
   async flush(scopeKey: string = "global"): Promise<void> {
-    // Pin failures must never break message delivery. Repaints go through
-    // the throttle like every other trigger: flush runs on every
-    // final-delivery attempt (including coordinator retries), and a direct
-    // edit here would turn each retry into fresh flood-control ammunition.
-    // The trailing edit still carries the latest state. Only a missing
-    // dashboard is created immediately — a topic must never be left without
-    // one while its session is active.
+    // Pin failures must never break delivery. Flush only schedules a
+    // throttled repaint.
     try {
       await this.refreshProjectMetadata(scopeKey);
 
@@ -369,7 +473,11 @@ class PinnedMessageManager {
         context.state.sessionId &&
         !isControlScope(scopeKey)
       ) {
-        await this.updatePinnedMessage(scopeKey);
+        // Storm guard applies to creation too: a missing dashboard during
+        // a flood waits instead of adding send attempts to it.
+        if (Date.now() >= context.cooldownUntil) {
+          await this.updatePinnedMessage(scopeKey);
+        }
         return;
       }
 
@@ -402,11 +510,18 @@ class PinnedMessageManager {
       context.debounceTimer = null;
     }
 
+    // Storm guard: a scope in cooldown drops repaints instead of queueing
+    // another edit Telegram will reject. The dirty state stays and the
+    // next post-cooldown trigger repaints it.
+    if (Date.now() < context.cooldownUntil) {
+      return;
+    }
+
     // Flood control: at most one edit per interval; bursts collapse into a
     // single trailing edit with the latest state.
     const waitMs = Math.max(
       0,
-      PinnedMessageManager.PIN_EDIT_MIN_INTERVAL_MS - (Date.now() - context.lastEditAt),
+      this.getPinEditMinIntervalMs() - (Date.now() - context.lastEditAt),
     );
     const effectiveDelayMs = Math.max(delayMs, waitMs);
 
@@ -675,8 +790,25 @@ class PinnedMessageManager {
     return lines.join("\n");
   }
 
-  /** Minimum gap between two Telegram edits of the same dashboard (flood control). */
-  private static readonly PIN_EDIT_MIN_INTERVAL_MS = 15_000;
+  private getPinEditMinIntervalMs(): number {
+    // Configurable so flood pressure can be tuned per deployment without a
+    // code change; floor at 1s to keep the throttle meaningful.
+    return Math.max(1000, config.bot.pinEditIntervalSec * 1000);
+  }
+  /**
+   * Cooldown after a 429. Kept long so it does not sync with delivery retries.
+   */
+  private static readonly PIN_STORM_COOLDOWN_MS = 60_000;
+
+  /** Opens the circuit breaker after a flood-control rejection. */
+  private openStormCooldown(context: ScopeContext): void {
+    context.cooldownUntil = Date.now() + PinnedMessageManager.PIN_STORM_COOLDOWN_MS;
+    context.lastEditAt = Date.now();
+    if (context.debounceTimer) {
+      clearTimeout(context.debounceTimer);
+      context.debounceTimer = null;
+    }
+  }
 
   private bumpGeneration(scopeKey: string): void {
     this.generations.set(scopeKey, (this.generations.get(scopeKey) ?? 0) + 1);
@@ -790,7 +922,22 @@ class PinnedMessageManager {
         return;
       }
 
-      await this.createPinnedMessageOnce(scopeKey);
+      // ...unless Telegram is flood-controlling us: creation sends would
+      // only extend the storm. scheduleThrottledUpdate already drops
+      // repaints while the cooldown lasts; the next post-cooldown trigger
+      // recreates the dashboard.
+      if (Date.now() < context.cooldownUntil) {
+        return;
+      }
+
+      try {
+        await this.createPinnedMessageOnce(scopeKey);
+      } catch (err) {
+        if (err instanceof RateLimitExceededError) {
+          this.openStormCooldown(context);
+        }
+        throw err;
+      }
       return;
     }
 
@@ -836,6 +983,12 @@ class PinnedMessageManager {
       }
 
       logger.error("[PinnedManager] Error updating pinned message:", err);
+      if (err instanceof RateLimitExceededError) {
+        // Flood control rejected us repeatedly: stop repainting for a
+        // while instead of feeding the storm with a trailing edit on
+        // every coordinator retry.
+        this.openStormCooldown(context);
+      }
     }
   }
 
@@ -890,6 +1043,7 @@ class PinnedMessageManager {
     context.state = this.createDefaultState(scopeKey);
     context.lastRenderedText = null;
     context.lastEditAt = 0;
+    context.cooldownUntil = 0;
     this.clearPersistedPinnedId(scopeKey);
   }
 }

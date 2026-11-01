@@ -38,6 +38,7 @@ const COMMAND_DEFINITIONS: BotCommandI18nDefinition[] = [
   { command: BOT_COMMAND.RETRY, descriptionKey: "cmd.description.retry" },
   { command: BOT_COMMAND.DIFF, descriptionKey: "cmd.description.diff" },
   { command: BOT_COMMAND.COMMIT, descriptionKey: "cmd.description.commit" },
+  { command: BOT_COMMAND.COMPACT, descriptionKey: "cmd.description.compact" },
   { command: BOT_COMMAND.COST, descriptionKey: "cmd.description.cost" },
   { command: BOT_COMMAND.CLOSE, descriptionKey: "cmd.description.close" },
   { command: BOT_COMMAND.CLEANUP, descriptionKey: "cmd.description.cleanup" },

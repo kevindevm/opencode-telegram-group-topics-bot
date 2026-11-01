@@ -40,7 +40,18 @@ export function buildTopicThreadLink(
   chat: Context["chat"] | undefined,
   threadId: number,
 ): string | null {
-  if (!chat || chat.type !== CHAT_TYPE.SUPERGROUP) {
+  if (!chat) {
+    return null;
+  }
+
+  // Public chats resolve by username; the topic root message id opens the
+  // topic view instead of highlighting a single message inside it.
+  const username = Reflect.get(chat, TELEGRAM_CHAT_FIELD.USERNAME);
+  if (typeof username === "string" && username.length > 0) {
+    return `${TELEGRAM_URL.BASE}/${username}/${threadId}`;
+  }
+
+  if (chat.type !== CHAT_TYPE.SUPERGROUP) {
     return null;
   }
 

@@ -9,6 +9,11 @@ This fork is optimized for Telegram forum topics: the General topic is the contr
 
 Functional requirements, features, and development status are in [PRODUCT.md](./PRODUCT.md).
 This repo is a fork of `grinev/opencode-telegram-bot` with group-topics support added; if you need to review or port upstream changes, read [FORK_SYNC.md](./FORK_SYNC.md).
+## Rules from the owner
+- Commits, PRs and issue comments read like a person wrote them: short, plain, no em dashes in new text.
+- GitHub issue comments are short and non-technical. Fix things properly instead of documenting a partial fix.
+- Do not publish a release or push without the user asking for it.
+
 
 ## Technology stack
 
@@ -80,6 +85,7 @@ OpenCode Server
 ### Git
 
 - **Commits:** Commit every finished change automatically once it is verified (`npm run build`, `npm run lint`, `npm test` all green). Commit locally only — never push without an explicit request.
+
 - **Versions:** Never bump `package.json` versions in change commits. Version bumps happen only at release time (manual or release workflow).
 - **Push/restart/publish:** Only on explicit user request. This includes `git push`, service restarts, and npm/GitHub releases.
 
@@ -96,6 +102,34 @@ OpenCode Server
 - Code, identifiers, comments, and in-code documentation must be in English.
 - User-facing Telegram messages should be localized through i18n.
 
+## Documentation
+- Do not create documentation for obvious code.
+- Update existing documentation when behavior changes.
+- Prefer fixing the implementation over documenting a known issue.
+- README changes must be mirrored in all 8 supported locales (en, es, de, fr, id, ru, tr, zh): every user-facing string added in English needs its translation (or the English fallback where a locale inherits it), and `I18nKey` coverage must stay complete or `tsc` fails.
+- The repo keeps one README per locale (English master plus translations). Any content change to one README must be ported to the other 7 — never leave a translated README behind the English one.
+
+## Before coding
+- Search the repository for an existing implementation first.
+- Follow existing project patterns before introducing a new one.
+
+## OpenCode integration
+- Prefer existing SDK capabilities before implementing custom API wrappers.
+- Check how similar functionality is already implemented elsewhere in the project before adding new client logic.
+
+## Scope control
+- Solve the requested problem only.
+- Avoid opportunistic refactoring unrelated to the task.
+- Avoid touching unrelated files.
+
+## Do not
+- Do not add dependencies unless they are necessary for the requested task.
+- Do not rewrite existing code just to match a preferred style.
+- Do not rename files, exports, variables, or commands without a functional reason.
+- Do not replace working code with a larger abstraction unless it solves a real problem.
+- Do not create duplicate implementations when an existing component can be extended.
+
+
 ### Code style
 
 - Use TypeScript strict mode.
@@ -104,6 +138,13 @@ OpenCode Server
 - Use clear names and avoid unnecessary abbreviations.
 - Keep functions small and focused.
 - Prefer `async/await` over chained `.then()`.
+
+### Comments
+
+- Read like a person wrote them: short, plain, no rambling.
+- Explain the why, not the what. Never narrate history or past bugs.
+- No em dashes in new text (code, comments, commits, PRs).
+- Fix the implementation instead of documenting a workaround.
 
 ### Error handling
 
