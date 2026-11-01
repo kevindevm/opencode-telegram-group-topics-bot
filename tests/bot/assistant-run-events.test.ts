@@ -4,10 +4,7 @@ import {
   ensureAssistantRunForLiveEvent,
   ensureAssistantRunForTokens,
 } from "../../src/bot/assistant-run-events.js";
-import {
-  __resetSettingsForTests,
-  setCurrentModel,
-} from "../../src/settings/manager.js";
+import { __resetSettingsForTests, setCurrentModel } from "../../src/settings/manager.js";
 
 const mocked = vi.hoisted(() => ({
   getTopicBindingBySessionIdMock: vi.fn(),
@@ -39,10 +36,7 @@ describe("bot/assistant-run-events", () => {
     assistantRunState.__resetForTests();
     mocked.getTopicBindingBySessionIdMock.mockReset();
     mocked.getTopicBindingBySessionIdMock.mockReturnValue(undefined);
-    setCurrentModel(
-      { providerID: "openai", modelID: "gpt-5", variant: "default" },
-      "-100:178",
-    );
+    setCurrentModel({ providerID: "openai", modelID: "gpt-5", variant: "default" }, "-100:178");
   });
 
   it("opens a run clock when a bound session goes busy without one", () => {
