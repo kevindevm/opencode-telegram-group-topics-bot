@@ -10,7 +10,7 @@ on:
         default: "1.19.5"
       server_v2:
         description: "OpenCode server version for the v2 API job"
-        default: "2.0.24"
+        default: "2.2.6"
 
 permissions:
   contents: read
@@ -29,7 +29,7 @@ jobs:
             port: 4101
             probe_path: global/health
           - api: v2
-            server: "2.0.24"
+            server: "2.2.6"
             port: 4102
             probe_path: api/info
 
