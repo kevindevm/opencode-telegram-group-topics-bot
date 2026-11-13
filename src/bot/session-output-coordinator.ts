@@ -1,5 +1,6 @@
 import { logger } from "../utils/logger.js";
 import { RateLimitExceededError } from "./telegram-rate-limiter.js";
+import { ChainStallWatch } from "./utils/chain-stall-watch.js";
 import type { Question } from "../question/types.js";
 import type { PermissionRequest } from "../permission/types.js";
 import type {
@@ -266,7 +267,14 @@ export class SessionOutputCoordinator {
     const previousTask: Promise<unknown> = this.sessionTasks.get(sessionId) ?? Promise.resolve();
     const nextTask = previousTask
       .catch(() => undefined)
-      .then(() => task())
+      .then(async () => {
+        this.stallWatch.markStart(sessionId);
+        try {
+          return await task();
+        } finally {
+          this.stallWatch.markDone(sessionId);
+        }
+      })
       .catch((error) => {
         logger.error("[Bot] Session delivery task failed", {
           sessionId,
@@ -458,6 +466,13 @@ export class SessionOutputCoordinator {
   private readonly rateLimitStreakStartedAt = new Map<string, number>();
   /** Dropped completion counts pending a gap marker on the next tracked text. */
   private readonly completionOverflowDrops = new Map<string, number>();
+  /** Watchdog: a hung delivery task wedges the whole session silently. */
+  private readonly stallWatch = new ChainStallWatch("Bot/FinalDelivery");
+
+  /** Starts the stuck-chain watchdog. Idempotent; call once at startup. */
+  startStallWatchdog(): void {
+    this.stallWatch.start();
+  }
   /**
    * Whether the pending round was requested by session idle. Only those
    * rounds attach the turn footer; any new activity clears it so mid-turn

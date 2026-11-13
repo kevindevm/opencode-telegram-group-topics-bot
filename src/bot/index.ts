@@ -1769,6 +1769,10 @@ const liveStream = new LiveStream({
   deleteText: deleteSessionMessage,
 });
 
+// Watchdogs for silently wedged per-session chains (no 429 involved).
+sessionOutputCoordinator.startStallWatchdog();
+liveStream.startStallWatchdog();
+
 async function ensureCommandsInitialized(ctx: Context, next: NextFunction): Promise<void> {
   if (!ctx.from || ctx.from.id !== config.telegram.allowedUserId) {
     await next();

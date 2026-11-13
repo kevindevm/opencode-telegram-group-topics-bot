@@ -6,6 +6,7 @@ import {
   getTelegramRetryAfterMs,
   isTelegramMessageNotModifiedError,
 } from "../utils/send-with-markdown-fallback.js";
+import { ChainStallWatch } from "../utils/chain-stall-watch.js";
 import { RateLimitExceededError, runWithRateLimitRetries } from "../telegram-rate-limiter.js";
 
 const DEFAULT_THROTTLE_MS = 1000;
@@ -242,6 +243,13 @@ export class LiveStream {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly sessionTasks = new Map<string, Promise<void>>();
   private readonly retryFlushAttempts = new Map<string, number>();
+  /** Watchdog: a hung stream task wedges the whole session silently. */
+  private readonly stallWatch = new ChainStallWatch("Bot/LiveStream");
+
+  /** Starts the stuck-chain watchdog. Idempotent; call once at startup. */
+  startStallWatchdog(): void {
+    this.stallWatch.start();
+  }
 
   constructor(options: LiveStreamOptions) {
     this.sendText = options.sendText;
@@ -974,7 +982,14 @@ export class LiveStream {
     // settles, and cleanup compares against the exact stored reference.
     const nextTask: Promise<T> = previousTask
       .catch(() => undefined)
-      .then(task)
+      .then(async () => {
+        this.stallWatch.markStart(sessionId);
+        try {
+          return await task();
+        } finally {
+          this.stallWatch.markDone(sessionId);
+        }
+      })
       .finally(() => {
         if (this.sessionTasks.get(sessionId) === trackedTask) {
           this.sessionTasks.delete(sessionId);
