@@ -28,6 +28,17 @@ const mirroredPcTexts = new Map<string, number>();
 const MIRRORED_TEXT_TTL_MS = 90 * 1000;
 const MAX_MIRRORED_TEXTS = 500;
 
+/**
+ * Forwarded prompts seen back through the inbox. The inbox path consumes
+ * the mark and the mirror claim lapses after 90s, but a busy event from the
+ * same long turn can arrive minutes later: without this record the
+ * run-start fallback would echo the user's own prompt as if typed on PC.
+ * Same horizon as the marks themselves.
+ */
+const consumedForwardedTexts = new Map<string, number>();
+const CONSUMED_TTL_MS = 10 * 60 * 1000;
+const MAX_CONSUMED_TEXTS = 500;
+
 function mirroredTextKey(sessionId: string, text: string): string {
   return `${sessionId}:${text}`;
 }
@@ -45,6 +56,22 @@ function pruneMirroredTexts(now: number): void {
       return;
     }
     mirroredPcTexts.delete(oldest.value);
+  }
+}
+
+function pruneConsumedTexts(now: number): void {
+  for (const [key, at] of consumedForwardedTexts) {
+    if (now - at >= CONSUMED_TTL_MS) {
+      consumedForwardedTexts.delete(key);
+    }
+  }
+
+  while (consumedForwardedTexts.size > MAX_CONSUMED_TEXTS) {
+    const oldest = consumedForwardedTexts.keys().next();
+    if (oldest.done) {
+      return;
+    }
+    consumedForwardedTexts.delete(oldest.value);
   }
 }
 
@@ -111,6 +138,11 @@ export function clearForwardedPromptsForSession(sessionId: string): void {
       mirroredPcTexts.delete(key);
     }
   }
+  for (const key of consumedForwardedTexts.keys()) {
+    if (key.startsWith(prefix)) {
+      consumedForwardedTexts.delete(key);
+    }
+  }
 }
 
 function findForwardedEntry(sessionId: string, text: string): number {
@@ -142,7 +174,8 @@ function findForwardedEntry(sessionId: string, text: string): number {
 }
 
 export function consumeForwardedPrompt(sessionId: string, text: string): boolean {
-  const index = findForwardedEntry(sessionId, text);
+  const normalized = text.trim();
+  const index = findForwardedEntry(sessionId, normalized);
   if (index === -1) {
     return false;
   }
@@ -151,6 +184,32 @@ export function consumeForwardedPrompt(sessionId: string, text: string): boolean
   if (forwardedBySession.get(sessionId)?.length === 0) {
     forwardedBySession.delete(sessionId);
   }
+
+  const now = Date.now();
+  pruneConsumedTexts(now);
+  consumedForwardedTexts.set(mirroredTextKey(sessionId, normalized), now);
+  return true;
+}
+
+/** Seen back through the inbox: a late busy from the same turn must not echo it. */
+export function wasForwardedPromptConsumedRecently(sessionId: string, text: string): boolean {
+  const normalized = text.trim();
+  if (!sessionId || !normalized) {
+    return false;
+  }
+
+  const now = Date.now();
+  const key = mirroredTextKey(sessionId, normalized);
+  const at = consumedForwardedTexts.get(key);
+  if (at === undefined) {
+    return false;
+  }
+
+  if (now - at >= CONSUMED_TTL_MS) {
+    consumedForwardedTexts.delete(key);
+    return false;
+  }
+
   return true;
 }
 
@@ -174,4 +233,5 @@ export function unmarkForwardedPrompt(sessionId: string, text: string): void {
 export function __resetForwardedPromptsForTests(): void {
   forwardedBySession.clear();
   mirroredPcTexts.clear();
+  consumedForwardedTexts.clear();
 }

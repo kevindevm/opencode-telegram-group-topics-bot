@@ -94,6 +94,69 @@ describe("interaction guard", () => {
     expect(decision.inputType).toBe("text");
   });
 
+  it("lets prompts through while the display menu is open", () => {
+    interactionManager.start({
+      kind: "inline",
+      expectedInput: "callback",
+      metadata: { menuKind: "display", messageId: 5 },
+    });
+
+    const decision = resolveInteractionGuardDecision(createContext({ text: "hello" }));
+
+    expect(decision.allow).toBe(true);
+    expect(decision.inputType).toBe("text");
+    expect(interactionManager.isActive()).toBe(true);
+  });
+
+  it("lets voice and photo prompts through while the display menu is open", () => {
+    interactionManager.start({
+      kind: "inline",
+      expectedInput: "callback",
+      metadata: { menuKind: "display", messageId: 5 },
+    });
+
+    expect(
+      resolveInteractionGuardDecision(createContext({ voice: true })).allow,
+    ).toBe(true);
+    expect(
+      resolveInteractionGuardDecision(createContext({ photo: true })).allow,
+    ).toBe(true);
+  });
+
+  it("releases an expired display menu instead of blocking the prompt", () => {
+    interactionManager.start({
+      kind: "inline",
+      expectedInput: "callback",
+      metadata: { menuKind: "display", messageId: 5 },
+      expiresInMs: 1,
+    });
+    vi.useFakeTimers().setSystemTime(Date.now() + 60_000);
+
+    try {
+      const decision = resolveInteractionGuardDecision(createContext({ text: "hello" }));
+
+      expect(decision.allow).toBe(true);
+      expect(interactionManager.isActive()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still gates callbacks through the active menu check", () => {
+    interactionManager.start({
+      kind: "inline",
+      expectedInput: "callback",
+      metadata: { menuKind: "display", messageId: 5 },
+    });
+
+    const decision = resolveInteractionGuardDecision(
+      createContext({ callbackData: "display:toggle:thinking" }),
+    );
+
+    expect(decision.allow).toBe(true);
+    expect(decision.inputType).toBe("callback");
+  });
+
   it("allows callback when callback input is expected", () => {
     interactionManager.start({
       kind: "inline",

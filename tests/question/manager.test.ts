@@ -120,4 +120,13 @@ describe("questionManager", () => {
     expect(questionManager.getRequestID()).toBeNull();
     expect(questionManager.getCurrentQuestion()).toBeNull();
   });
+
+  it("remembers requests settled outside Telegram", () => {
+    expect(questionManager.wasSettledRecently("req-settled-unknown")).toBe(false);
+
+    questionManager.markSettled("req-settled-q1");
+
+    expect(questionManager.wasSettledRecently("req-settled-q1")).toBe(true);
+    expect(questionManager.wasSettledRecently("req-settled-q1", 0)).toBe(false);
+  });
 });

@@ -309,4 +309,60 @@ describe("bot/commands/recent", () => {
       interactionManager.clear("test", scopeKey);
     }
   });
+
+  it("slides the menu window on every successful select", async () => {
+    const ctx = createCallbackContext("recent:s1");
+    const scopeKey = getScopeKeyFromContext(ctx as never);
+
+    interactionManager.start(
+      {
+        kind: "inline",
+        expectedInput: "callback",
+        metadata: { menuKind: "recent", messageId: 456 },
+        expiresInMs: 2000,
+      },
+      scopeKey,
+    );
+
+    try {
+      await expect(handleRecentSelect(ctx as never)).resolves.toBe(true);
+
+      const state = interactionManager.getSnapshot(scopeKey);
+      expect(state).toMatchObject({ kind: "inline" });
+      expect(state?.metadata).toMatchObject({ menuKind: "recent", messageId: 456 });
+      expect((state?.expiresAt ?? 0) - Date.now()).toBeGreaterThan(20 * 60 * 1000);
+    } finally {
+      interactionManager.clear("test", scopeKey);
+    }
+  });
+
+  it("slides the menu window on page turns", async () => {
+    const many = Array.from({ length: 11 }, (_, index) => entry(`s${index + 1}`));
+    mocked.loadRecentSessionsMock.mockResolvedValue(many);
+    const ctx = createCallbackContext("recent:page:1");
+    (ctx as { editMessageText?: unknown }).editMessageText = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const scopeKey = getScopeKeyFromContext(ctx as never);
+
+    interactionManager.start(
+      {
+        kind: "inline",
+        expectedInput: "callback",
+        metadata: { menuKind: "recent", messageId: 456 },
+        expiresInMs: 2000,
+      },
+      scopeKey,
+    );
+
+    try {
+      await expect(handleRecentSelect(ctx as never)).resolves.toBe(true);
+
+      const state = interactionManager.getSnapshot(scopeKey);
+      expect(state).toMatchObject({ kind: "inline" });
+      expect((state?.expiresAt ?? 0) - Date.now()).toBeGreaterThan(20 * 60 * 1000);
+    } finally {
+      interactionManager.clear("test", scopeKey);
+    }
+  });
 });

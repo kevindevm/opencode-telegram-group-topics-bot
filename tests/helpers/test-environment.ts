@@ -32,7 +32,13 @@ const TEST_ENV_DEFAULTS: Record<string, string> = {
 };
 
 export function ensureTestEnvironment(): void {
+  // Always isolate: the outer shell may carry a real OPENCODE_TELEGRAM_HOME
+  // (service profile) and setup must never let tests touch real user data.
+  process.env.OPENCODE_TELEGRAM_HOME = getDefaultTestHome();
   for (const [key, value] of Object.entries(TEST_ENV_DEFAULTS)) {
+    if (key === "OPENCODE_TELEGRAM_HOME") {
+      continue;
+    }
     if (!process.env[key]) {
       process.env[key] = value;
     }

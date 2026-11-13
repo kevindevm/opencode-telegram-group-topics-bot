@@ -7,6 +7,7 @@ const mocked = vi.hoisted(() => ({
   parseCallbackMock: vi.fn(),
   toggleFlagMock: vi.fn(),
   replyWithInlineMenuMock: vi.fn().mockResolvedValue(42),
+  appendCancelMock: vi.fn((keyboard) => keyboard),
   ensureActiveInlineMenuMock: vi.fn().mockResolvedValue(true),
   showAgentSelectionMenuMock: vi.fn().mockResolvedValue(undefined),
   fetchCurrentAgentMock: vi.fn().mockResolvedValue("build"),
@@ -24,6 +25,7 @@ vi.mock("../../../src/display/manager.js", () => ({
 vi.mock("../../../src/bot/handlers/inline-menu.js", () => ({
   ensureActiveInlineMenu: mocked.ensureActiveInlineMenuMock,
   replyWithInlineMenu: mocked.replyWithInlineMenuMock,
+  appendInlineMenuCancelButton: mocked.appendCancelMock,
 }));
 
 vi.mock("../../../src/bot/handlers/agent.js", () => ({
@@ -68,6 +70,7 @@ describe("bot/commands/display", () => {
     mocked.parseCallbackMock.mockReset();
     mocked.toggleFlagMock.mockReset();
     mocked.replyWithInlineMenuMock.mockClear().mockResolvedValue(42);
+    mocked.appendCancelMock.mockReset().mockImplementation((keyboard) => keyboard);
     mocked.ensureActiveInlineMenuMock.mockReset().mockResolvedValue(true);
     mocked.showAgentSelectionMenuMock.mockReset().mockResolvedValue(undefined);
     mocked.fetchCurrentAgentMock.mockReset().mockResolvedValue("build");
@@ -82,7 +85,12 @@ describe("bot/commands/display", () => {
     expect(mocked.buildKeyboardMock).toHaveBeenCalled();
     expect(mocked.replyWithInlineMenuMock).toHaveBeenCalledWith(
       ctx,
-      expect.objectContaining({ menuKind: "display", text: "menu", keyboard: "keyboard" }),
+      expect.objectContaining({
+        menuKind: "display",
+        text: "menu",
+        keyboard: "keyboard",
+        expiresInMs: 60_000,
+      }),
     );
   });
 
@@ -96,7 +104,21 @@ describe("bot/commands/display", () => {
     expect(mocked.ensureActiveInlineMenuMock).toHaveBeenCalledWith(ctx, "display");
     expect(mocked.toggleFlagMock).toHaveBeenCalledWith("thinking", expect.any(String));
     expect(ctx.answerCallbackQuery).toHaveBeenCalled();
+    expect(mocked.appendCancelMock).toHaveBeenCalledWith("keyboard", "display");
     expect(ctx.editMessageText).toHaveBeenCalledWith("menu", { reply_markup: "keyboard" });
+  });
+
+  it("keeps the cancel button after toggling", async () => {
+    mocked.parseCallbackMock.mockReturnValue("thinking");
+    mocked.toggleFlagMock.mockReturnValue(true);
+    mocked.appendCancelMock.mockReturnValue("keyboard-with-cancel");
+    const ctx = createCallbackContext("display:toggle:thinking");
+
+    expect(await handleDisplayCallback(ctx)).toBe(true);
+
+    expect(ctx.editMessageText).toHaveBeenCalledWith("menu", {
+      reply_markup: "keyboard-with-cancel",
+    });
   });
 
   it("opens the agent picker from the agent shortcut", async () => {

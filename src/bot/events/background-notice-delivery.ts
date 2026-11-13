@@ -1,6 +1,8 @@
 import { t } from "../../i18n/index.js";
 import type { BackgroundSessionNotification } from "../../app/managers/background-session-manager.js";
 import { getTopicBindingBySessionId } from "../../topic/manager.js";
+import { permissionManager } from "../../permission/manager.js";
+import { questionManager } from "../../question/manager.js";
 import { buildBackgroundSessionOpenKeyboard } from "../menus/session-selection-menu.js";
 import type { SessionTargetPolicy, TelegramEventDelivery } from "./telegram-event-delivery.js";
 import { DISPLAY_FLAG, isDisplayVisible } from "../../display/manager.js";
@@ -67,6 +69,46 @@ export function __resetBackgroundNoticesForTests(): void {
   liveNotices.clear();
 }
 
+/**
+ * Auto-resolved requests (opencode trust, PC answers) settle in
+ * milliseconds; prompts answered in-topic settle in seconds. Waiting a
+ * beat before notifying means only requests still needing the user survive.
+ */
+let noticeGraceMs = 3000;
+
+export function __setBackgroundNoticeGraceMsForTests(ms: number): void {
+  noticeGraceMs = ms;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * True when the prompt is already visible in the destination topic: the
+ * foreground posted it there, so a notice in the same thread only doubles
+ * the noise. True as well when the request settled anywhere meanwhile.
+ */
+function isAlreadySurfaced(notification: BackgroundSessionNotification, scopeKey: string): boolean {
+  if (notification.kind === "permission_asked") {
+    return (
+      (notification.requestId != null &&
+        permissionManager.wasSettledRecently(notification.requestId)) ||
+      permissionManager.isActive(scopeKey)
+    );
+  }
+
+  if (notification.kind === "question_asked") {
+    return (
+      (notification.requestId != null &&
+        questionManager.wasSettledRecently(notification.requestId)) ||
+      questionManager.isActive(scopeKey)
+    );
+  }
+
+  return false;
+}
+
 function formatBackgroundSessionNotification(notification: BackgroundSessionNotification): string {
   const session = getBackgroundSessionLabel(notification);
 
@@ -101,6 +143,26 @@ export function createBackgroundNoticeDelivery(
         kind: notification.kind,
       });
       return;
+    }
+
+    const scopeKey = getTopicBindingBySessionId(notification.sessionId)?.scopeKey;
+    if (
+      (notification.kind === "permission_asked" || notification.kind === "question_asked") &&
+      scopeKey
+    ) {
+      await sleep(noticeGraceMs);
+      if (isAlreadySurfaced(notification, scopeKey)) {
+        logger.debug("[BackgroundNotice] Skipping already surfaced request", {
+          sessionId: notification.sessionId,
+          kind: notification.kind,
+        });
+        return;
+      }
+      // Re-check the dedup after the wait: the same request fans out over
+      // several SSE deliveries and the first one may have notified meanwhile.
+      if (hasLiveNotice(notification.sessionId, notification.kind)) {
+        return;
+      }
     }
 
     await delivery.sendText(destination, formatBackgroundSessionNotification(notification), {

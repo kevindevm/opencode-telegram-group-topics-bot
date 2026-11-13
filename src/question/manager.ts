@@ -1,8 +1,12 @@
 import { Question, QuestionState, QuestionAnswer } from "./types.js";
 import { logger } from "../utils/logger.js";
 
+const SETTLED_TTL_MS = 5 * 60 * 1000;
+const MAX_SETTLED_REQUEST_IDS = 200;
+
 class QuestionManager {
   private stateByScope: Map<string, QuestionState> = new Map();
+  private settledRequestIds: Map<string, number> = new Map();
 
   private createDefaultState(): QuestionState {
     return {
@@ -230,6 +234,56 @@ class QuestionManager {
       `[QuestionManager] isActive check: ${state?.isActive ?? false}, questions=${state?.questions.length ?? 0}, currentIndex=${state?.currentIndex ?? 0}`,
     );
     return state?.isActive ?? false;
+  }
+
+  /**
+   * Remembers a request settled outside Telegram (answered on PC, expired
+   * server-side) so late background notices are never sent for it. Same
+   * sticky-with-TTL shape as the permission manager.
+   */
+  markSettled(requestID: string): void {
+    if (!requestID) {
+      return;
+    }
+
+    this.settledRequestIds.set(requestID, Date.now());
+    this.pruneSettled();
+  }
+
+  wasSettledRecently(requestID: string, ttlMs: number = SETTLED_TTL_MS): boolean {
+    if (!requestID) {
+      return false;
+    }
+
+    const settledAt = this.settledRequestIds.get(requestID);
+    if (settledAt === undefined) {
+      return false;
+    }
+
+    if (Date.now() - settledAt >= ttlMs) {
+      this.settledRequestIds.delete(requestID);
+      return false;
+    }
+
+    return true;
+  }
+
+  private pruneSettled(): void {
+    const now = Date.now();
+    for (const [requestID, settledAt] of this.settledRequestIds) {
+      if (now - settledAt >= SETTLED_TTL_MS) {
+        this.settledRequestIds.delete(requestID);
+      }
+    }
+
+    while (this.settledRequestIds.size > MAX_SETTLED_REQUEST_IDS) {
+      const oldest = this.settledRequestIds.keys().next();
+      if (oldest.done) {
+        return;
+      }
+
+      this.settledRequestIds.delete(oldest.value);
+    }
   }
 
   cancel(scopeKey: string = "global"): void {

@@ -142,6 +142,18 @@ export function resolveInteractionGuardDecision(ctx: Context): GuardDecision {
     return createAllowDecision(inputType, state, command);
   }
 
+  // The display menu is a non-modal settings panel: prompts (text, voice,
+  // photos) always go through and the menu stays open for further toggles.
+  // Callbacks and commands keep the existing gating below.
+  if (state.kind === "inline" && state.metadata?.menuKind === "display") {
+    if (interactionManager.isExpired(scopeKey)) {
+      interactionManager.clear(INTERACTION_CLEAR_REASON.EXPIRED, scopeKey);
+    }
+    if (inputType === "text" || inputType === "other") {
+      return createAllowDecision(inputType, state, command);
+    }
+  }
+
   if (interactionManager.isExpired(scopeKey)) {
     interactionManager.clear(INTERACTION_CLEAR_REASON.EXPIRED, scopeKey);
     return createBlockDecision(inputType, state, "expired", command);

@@ -164,6 +164,7 @@ import { registerPcUserMessage, takePcUserText } from "./pc-user-mirror.js";
 import {
   claimPcTextMirror,
   isForwardedPrompt,
+  wasForwardedPromptConsumedRecently,
 } from "../session/forwarded-prompts.js";
 import { loadLastUserMessage, truncateText } from "../session/history.js";
 import { getTopicBindingBySessionId } from "../topic/manager.js";
@@ -520,6 +521,12 @@ function mirrorPcPromptOnRunStart(event: OpenCodeEvent): void {
       }
 
       if (isForwardedPrompt(sessionId, text)) {
+        return;
+      }
+
+      // Same turn, late busy: the inbox already consumed the forwarded mark
+      // and the 90s mirror claim lapsed, but the text is still ours.
+      if (wasForwardedPromptConsumedRecently(sessionId, text)) {
         return;
       }
 
@@ -1715,6 +1722,7 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
       return;
     }
 
+    questionManager.markSettled(requestID);
     const target = getTargetBySessionId(sessionId);
     if (!target) {
       return;

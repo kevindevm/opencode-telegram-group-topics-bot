@@ -45,6 +45,7 @@ interface InlineMenuReplyOptions {
   text: string;
   keyboard: InlineKeyboard;
   parseMode?: "Markdown" | "HTML";
+  expiresInMs?: number;
 }
 
 function isInlineMenuKind(value: string): value is InlineMenuKind {
@@ -182,7 +183,7 @@ export async function replyWithInlineMenu(
     {
       kind: "inline",
       expectedInput: "callback",
-      expiresInMs: INLINE_MENU_TTL_MS,
+      expiresInMs: options.expiresInMs ?? INLINE_MENU_TTL_MS,
       metadata: {
         menuKind: options.menuKind,
         messageId: message.message_id,

@@ -35,6 +35,8 @@ export const RECENT_CALLBACK_PREFIX = "recent:";
 const RECENT_PAGE_CALLBACK_PREFIX = "recent:page:";
 /** How many pages deep a tap can resolve a session from. */
 const RECENT_SELECT_SCAN_PAGES = 5;
+/** Recents stay usable for slow re-linking; every tap slides this window. */
+const RECENT_MENU_TTL_MS = 30 * 60 * 1000;
 
 const STATUS_DOT: Record<RecentSessionEntry["status"], string> = {
   running: "🔴",
@@ -92,7 +94,8 @@ function parseRecentIdCallback(data: string): string | null {
  * Re-registers the /recent menu after an out-of-band interaction clear
  * (e.g. a project switch on the way to opening the topic). Only restores
  * the exact menu that was open, never over a newer interaction, and never
- * past its original expiry.
+ * an already expired one. Each restore grants a fresh window, so a menu
+ * in active use stays alive while an ignored one still dies on its own.
  */
 function restoreRecentMenu(scopeKey: string, snapshot: InteractionState | null): void {
   if (
@@ -113,10 +116,34 @@ function restoreRecentMenu(scopeKey: string, snapshot: InteractionState | null):
       expectedInput: "callback",
       allowedCommands: snapshot.allowedCommands,
       metadata: snapshot.metadata,
-      expiresInMs:
-        typeof snapshot.expiresAt === "number"
-          ? Math.max(1000, snapshot.expiresAt - Date.now())
-          : undefined,
+      expiresInMs: RECENT_MENU_TTL_MS,
+    },
+    scopeKey,
+  );
+}
+
+/**
+ * Slides the /recent window on every successful tap, so slow re-linking
+ * never hits an inactive menu. Ignored menus still expire by themselves.
+ */
+function refreshRecentMenu(scopeKey: string): void {
+  const snapshot = interactionManager.getSnapshot(scopeKey);
+  if (
+    !snapshot ||
+    snapshot.kind !== "inline" ||
+    snapshot.metadata?.menuKind !== "recent" ||
+    typeof snapshot.metadata?.messageId !== "number" ||
+    (typeof snapshot.expiresAt === "number" && snapshot.expiresAt <= Date.now())
+  ) {
+    return;
+  }
+  interactionManager.start(
+    {
+      kind: "inline",
+      expectedInput: "callback",
+      allowedCommands: snapshot.allowedCommands,
+      metadata: snapshot.metadata,
+      expiresInMs: RECENT_MENU_TTL_MS,
     },
     scopeKey,
   );
@@ -201,6 +228,7 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
         ),
       });
       await ctx.answerCallbackQuery();
+      refreshRecentMenu(scopeKey);
     } catch (error) {
       logger.error("[Recent] Error loading recent sessions page:", error);
       await ctx.answerCallbackQuery({ text: t("sessions.page_load_error_callback") });
@@ -273,6 +301,7 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
 
     if (await openSessionInNewTopic(ctx, session, project, scopeKey, scope, { keepMenu: true })) {
       restoreRecentMenu(scopeKey, menuSnapshot);
+      refreshRecentMenu(scopeKey);
       return true;
     }
 

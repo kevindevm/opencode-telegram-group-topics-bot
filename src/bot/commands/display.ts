@@ -9,6 +9,7 @@ import {
 import { t } from "../../i18n/index.js";
 import { getScopeFromContext, getScopeKeyFromContext } from "../scope.js";
 import {
+  appendInlineMenuCancelButton,
   ensureActiveInlineMenu,
   replyWithInlineMenu,
 } from "../handlers/inline-menu.js";
@@ -26,6 +27,8 @@ export async function displayCommand(ctx: CommandContext<Context>): Promise<void
       menuKind: "display",
       text: formatDisplayMenu(scopeKey),
       keyboard: buildDisplayKeyboard(scopeKey, currentAgent),
+      // Settings panel, not a flow: taps die fast, prompts never block.
+      expiresInMs: 60_000,
     });
   } catch (error) {
     logger.error("[Display] Failed to open display menu:", error);
@@ -70,7 +73,7 @@ export async function handleDisplayCallback(ctx: Context): Promise<boolean> {
     : undefined;
   await ctx
     .editMessageText(formatDisplayMenu(scopeKey), {
-      reply_markup: buildDisplayKeyboard(scopeKey, currentAgent),
+      reply_markup: appendInlineMenuCancelButton(buildDisplayKeyboard(scopeKey, currentAgent), "display"),
     })
     .catch(() => {});
   return true;
