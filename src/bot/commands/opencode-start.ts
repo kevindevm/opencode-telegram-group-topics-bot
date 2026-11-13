@@ -37,18 +37,28 @@ async function waitForServerReady(maxWaitMs: number = 10000): Promise<boolean> {
  */
 export async function opencodeStartCommand(ctx: CommandContext<Context>) {
   try {
-    // 1. Check if process is already running under our management
+    // 1. Check if process is already running under our management.
+    // State can go stale (server killed externally): confirm it answers
+    // before refusing, or a dead server blocks every start attempt.
     if (processManager.isRunning()) {
-      const uptime = processManager.getUptime();
-      const uptimeStr = uptime ? Math.floor(uptime / 1000) : 0;
+      try {
+        const { data: liveData, error: liveError } = await opencodeClient.global.health();
+        if (!liveError && liveData?.healthy) {
+          const uptime = processManager.getUptime();
+          const uptimeStr = uptime ? Math.floor(uptime / 1000) : 0;
 
-      await ctx.reply(
-        t("opencode_start.already_running_managed", {
-          pid: processManager.getPID() ?? "-",
-          seconds: uptimeStr,
-        }),
-      );
-      return;
+          await ctx.reply(
+            t("opencode_start.already_running_managed", {
+              pid: processManager.getPID() ?? "-",
+              seconds: uptimeStr,
+            }),
+          );
+          return;
+        }
+      } catch {
+        // Unreachable: fall through to start below.
+      }
+      logger.warn("[Bot] Managed server state is stale (unreachable), starting it");
     }
 
     // 2. Check if server is accessible (external process)

@@ -45,13 +45,23 @@ class ProcessManager implements ProcessManagerInterface {
         const { data, error } = await opencodeClient.global.health();
         if (!error && data?.healthy) {
           logger.info("[ProcessManager] Restored managed background service (v2)");
+          // Re-anchor the clock: the saved stamp predates external restarts
+          // (service restarts, reboots) that never update settings, so a
+          // stale stamp would report an impossible uptime. From here uptime
+          // means continuously healthy under this bot session.
+          const restoredAt = new Date();
           this.state = {
             process: null,
             pid: null,
-            startTime: new Date(savedProcess.startTime),
+            startTime: restoredAt,
             isRunning: true,
             viaService: true,
           };
+          setServerProcess({
+            pid: null,
+            startTime: restoredAt.toISOString(),
+            viaService: true,
+          });
           return;
         }
       } catch {
@@ -92,6 +102,19 @@ class ProcessManager implements ProcessManagerInterface {
   private transitionInProgress: Promise<ProcessOperationResult> | null = null;
 
   /**
+   * Single health probe: true when the server answers with the configured
+   * credentials, false on any failure. Never throws.
+   */
+  private async isServerReachable(): Promise<boolean> {
+    try {
+      const { data, error } = await opencodeClient.global.health();
+      return !error && !!data?.healthy;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Start the OpenCode server process
    */
   async start(): Promise<ProcessOperationResult> {
@@ -101,10 +124,16 @@ class ProcessManager implements ProcessManagerInterface {
     }
 
     if (this.state.isRunning) {
-      return {
-        success: false,
-        error: "Process already running",
-      };
+      // State can go stale (server killed externally, reboot): confirm it
+      // still answers before refusing, or a dead server blocks every start.
+      if (await this.isServerReachable()) {
+        return {
+          success: false,
+          error: "Process already running",
+        };
+      }
+      logger.warn("[ProcessManager] Managed server is unreachable, dropping stale state and starting");
+      this.cleanup();
     }
 
     this.transitionInProgress = this.doStart();
@@ -116,7 +145,7 @@ class ProcessManager implements ProcessManagerInterface {
   }
 
   private async doStart(): Promise<ProcessOperationResult> {
-    // V2 boots through the background service (`opencode service start`):
+    // V2 boots through the background service, ensured via `opencode pair`:
     // a bare `opencode serve` binds a random port with a random password,
     // so the bot could never reach it at the configured URL.
     if (config.opencode.serverVersion === "v2") {
@@ -197,22 +226,24 @@ class ProcessManager implements ProcessManagerInterface {
   }
 
   /**
-   * Start the v2 background service (`opencode service start`) and wait
-   * until it answers health at the configured URL. The service owns its
-   * process (stable port from its own config), so there is no child PID
-   * to track — `service stop` tears it down.
+   * Bring the v2 background service up via `opencode pair` and wait until
+   * it answers health at the configured URL. Pair ensures a server is
+   * running to mint its one-time link, so this also covers a cold boot.
+   * The service owns its process (stable port from its own config), so
+   * there is no child PID to track — `service stop` tears it down.
    */
   private async startViaService(): Promise<ProcessOperationResult> {
     try {
-      logger.info("[ProcessManager] Starting OpenCode background service (v2)...");
+      logger.info("[ProcessManager] Ensuring OpenCode background service via pair (v2)...");
       // exec runs through the shell, which resolves npm-installed shims
       // on both Windows (cmd.exe) and Unix-like systems.
-      const { stdout, stderr } = await execAsync("opencode service start", {
+      // NOTE: pair prints a one-time auth link; never log stdout.
+      const { stderr } = await execAsync("opencode pair", {
         timeout: 30_000,
       });
-      const output = `${stdout ?? ""}\n${stderr ?? ""}`.trim();
-      if (output) {
-        logger.debug(`[ProcessManager] service start output: ${output}`);
+      const errOutput = `${stderr ?? ""}`.trim();
+      if (errOutput) {
+        logger.debug(`[ProcessManager] pair stderr: ${errOutput}`);
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);

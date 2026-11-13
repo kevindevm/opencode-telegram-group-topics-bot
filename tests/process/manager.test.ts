@@ -13,6 +13,10 @@ const { getServerProcessMock, setServerProcessMock, clearServerProcessMock } = v
   clearServerProcessMock: vi.fn(),
 }));
 
+const { healthMock } = vi.hoisted(() => ({
+  healthMock: vi.fn(),
+}));
+
 vi.mock("child_process", () => ({
   spawn: spawnMock,
   exec: execMock,
@@ -22,6 +26,10 @@ vi.mock("../../src/settings/manager.js", () => ({
   getServerProcess: getServerProcessMock,
   setServerProcess: setServerProcessMock,
   clearServerProcess: clearServerProcessMock,
+}));
+
+vi.mock("../../src/opencode/client.js", () => ({
+  opencodeClient: { global: { health: healthMock } },
 }));
 
 import { processManager } from "../../src/process/manager.js";
@@ -55,8 +63,13 @@ describe("process/manager", () => {
     getServerProcessMock.mockReset();
     setServerProcessMock.mockReset();
     clearServerProcessMock.mockReset();
+    healthMock.mockReset();
+    healthMock.mockResolvedValue({ data: null, error: new Error("down") });
 
-    execMock.mockImplementation((_command: string, callback?: (...args: unknown[]) => void) => {
+    execMock.mockImplementation((...args: unknown[]) => {
+      const callback = args.find((arg) => typeof arg === "function") as
+        | ((...cbArgs: unknown[]) => void)
+        | undefined;
       if (callback) {
         callback(null, "", "");
       }
@@ -90,10 +103,33 @@ describe("process/manager", () => {
     });
 
     await processManager.initialize();
-
     expect(clearServerProcessMock).toHaveBeenCalledTimes(1);
     expect(processManager.isRunning()).toBe(false);
     expect(processManager.getPID()).toBeNull();
+  });
+
+  it("re-anchors stale viaService startTime on initialize", async () => {
+    getServerProcessMock.mockReturnValue({
+      pid: null,
+      startTime: new Date(Date.now() - 184_265_000).toISOString(),
+      viaService: true,
+    });
+    healthMock.mockResolvedValue({ data: { healthy: true }, error: null });
+
+    await processManager.initialize();
+
+    expect(processManager.isRunning()).toBe(true);
+    const uptime = processManager.getUptime();
+    expect(uptime).toBeTypeOf("number");
+    expect(uptime as number).toBeLessThan(60_000);
+    expect(setServerProcessMock).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: null, viaService: true, startTime: expect.any(String) }),
+    );
+    const savedStamp = new Date(setServerProcessMock.mock.calls[0][0].startTime).getTime();
+    expect(Date.now() - savedStamp).toBeLessThan(60_000);
+
+    await processManager.stop();
+    expect(processManager.isRunning()).toBe(false);
   });
 
   it("starts process and persists PID", async () => {
@@ -123,6 +159,8 @@ describe("process/manager", () => {
       expect(processManager.getPID()).toBe(456);
       expect(processManager.isRunning()).toBe(true);
 
+      // A second start while the server answers health still refuses.
+      healthMock.mockResolvedValue({ data: { healthy: true }, error: null });
       const alreadyRunning = await processManager.start();
       expect(alreadyRunning).toEqual({ success: false, error: "Process already running" });
     } finally {

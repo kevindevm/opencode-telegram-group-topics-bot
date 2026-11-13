@@ -58,12 +58,12 @@ describe("process/manager v2 background service", () => {
     mockExecSuccess();
   });
 
-  it("starts the background service instead of spawning serve", async () => {
+  it("starts the background service via pair instead of spawning serve", async () => {
     const result = await processManager.start();
 
     expect(result).toEqual({ success: true });
     expect(execMock).toHaveBeenCalledWith(
-      "opencode service start",
+      "opencode pair",
       expect.anything(),
       expect.anything(),
     );
@@ -121,5 +121,29 @@ describe("process/manager v2 background service", () => {
 
     expect(processManager.isRunning()).toBe(false);
     expect(clearServerProcessMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts instead of refusing when saved state is stale and server is down", async () => {
+    getServerProcessMock.mockReturnValue({
+      pid: null,
+      startTime: new Date(Date.now() - 184_265_000).toISOString(),
+      viaService: true,
+    });
+
+    await processManager.initialize();
+    expect(processManager.isRunning()).toBe(true);
+
+    // Server died after the restore: start must not deadlock on stale state.
+    healthMock.mockReset();
+    healthMock.mockResolvedValueOnce({ data: null, error: new Error("down") });
+    healthMock.mockResolvedValue({ data: { healthy: true }, error: null });
+
+    const result = await processManager.start();
+
+    expect(result).toEqual({ success: true });
+    expect(execMock).toHaveBeenCalledWith("opencode pair", expect.anything(), expect.anything());
+
+    await processManager.stop();
+    expect(processManager.isRunning()).toBe(false);
   });
 });

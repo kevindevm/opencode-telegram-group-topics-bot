@@ -15,6 +15,7 @@ This repo is a fork of `grinev/opencode-telegram-bot` with group-topics support 
 - GitHub issue comments are short and non-technical. Fix things properly instead of documenting a partial fix.
 - Do not publish a release or push without the user asking for it.
 - Before pushing or opening a PR, show the commit list and offer to rebase into few short commits.
+- The v2 OpenCode server is always brought up via `opencode pair`, never via `opencode service start`.
 
 
 ## Technology stack
