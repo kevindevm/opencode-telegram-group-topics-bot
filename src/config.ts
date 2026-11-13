@@ -3,6 +3,7 @@ import { getRuntimePaths } from "./runtime/paths.js";
 import { isContainerRuntime } from "./runtime/container.js";
 import { BOT_HEALTH_PORT_ENV, resolveHealthPort } from "./runtime/health-port.js";
 import { normalizeLocale, type Locale } from "./i18n/index.js";
+import type { LiveProvisionalMode } from "./bot/streaming/live-stream.js";
 
 const runtimePaths = getRuntimePaths();
 dotenv.config({ path: runtimePaths.envFilePath, quiet: true });
@@ -87,6 +88,14 @@ function getOptionalOpencodeServerVersionEnvVar(
   }
 
   return value.trim().toLowerCase() === "v2" ? "v2" : "v1";
+}
+
+function parseLiveProvisionalMode(value: string | undefined): LiveProvisionalMode {
+  const normalized = (value || "full").trim().toLowerCase();
+  if (normalized === "off" || normalized === "activity") {
+    return normalized;
+  }
+  return "full";
 }
 
 function getOptionalBooleanEnvVar(key: string, defaultValue: boolean): boolean {
@@ -178,6 +187,7 @@ export const config = {
       5,
     ),
     hideThinkingMessages: getOptionalBooleanEnvVar("HIDE_THINKING_MESSAGES", false),
+    liveProvisionalMessages: parseLiveProvisionalMode(getEnvVar("BOT_LIVE_PROVISIONAL", false)),
     hideToolCallMessages: getOptionalBooleanEnvVar("HIDE_TOOL_CALL_MESSAGES", false),
     hideToolFileMessages: getOptionalBooleanEnvVar("HIDE_TOOL_FILE_MESSAGES", false),
     codeBlocksInText: getOptionalBooleanEnvVar("CODE_BLOCKS_IN_TEXT", true),

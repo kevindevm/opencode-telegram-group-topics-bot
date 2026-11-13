@@ -21,6 +21,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export type LiveProvisionalMode = "full" | "off" | "activity";
+
 interface LiveStreamOptions {
   sendText: (
     sessionId: string,
@@ -44,6 +46,14 @@ interface LiveStreamOptions {
   ) => Promise<void>;
   deleteText?: (sessionId: string, messageId: number) => Promise<void>;
   throttleMs?: number;
+  /**
+   * Pilot gate: "full" streams everything, "off" sends no provisional
+   * message at all, "activity" streams service entries (thinking status,
+   * tool progress) but never the raw assistant text. State still
+   * accumulates so seal/finalize bookkeeping stays consistent.
+   * Defaults to "full" (current behavior).
+   */
+  provisionalMode?: LiveProvisionalMode;
 }
 
 interface AssistantEntry {
@@ -227,6 +237,7 @@ export class LiveStream {
   private readonly editRenderedPart;
   private readonly deleteText;
   private readonly throttleMs: number;
+  private readonly provisionalMode: LiveProvisionalMode;
   private readonly states = new Map<string, SessionState>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly sessionTasks = new Map<string, Promise<void>>();
@@ -238,6 +249,14 @@ export class LiveStream {
     this.editRenderedPart = options.editRenderedPart;
     this.deleteText = options.deleteText;
     this.throttleMs = options.throttleMs ?? DEFAULT_THROTTLE_MS;
+    this.provisionalMode = options.provisionalMode ?? "full";
+  }
+
+  private renderProvisional(entries: StreamEntry[]): string {
+    if (this.provisionalMode === "activity") {
+      return renderEntries(entries.filter((entry) => entry.kind !== "assistant"));
+    }
+    return renderEntries(entries);
   }
 
   async updateAssistant(
@@ -475,6 +494,13 @@ export class LiveStream {
       return false;
     }
 
+    if (this.provisionalMode === "activity") {
+      // Pilot: the activity lane stays as history; the final goes out as
+      // a fresh message instead of overwriting the tool trail.
+      this.clearTimer(sessionId);
+      return false;
+    }
+
     this.clearTimer(sessionId);
     return await this.enqueueTask(sessionId, async () => {
       await this.flushSessionState(sessionId);
@@ -644,6 +670,17 @@ export class LiveStream {
     await this.enqueueTask(sessionId, async () => {
       const latestState = this.states.get(sessionId);
       if (!latestState || latestState.messageId === null || !this.deleteText) {
+        return;
+      }
+
+      if (this.provisionalMode === "activity") {
+        // Pilot: keep the activity lane as visible history. Clear the
+        // bookkeeping without deleting the message.
+        latestState.messageId = null;
+        latestState.lastSentText = "";
+        latestState.assistant.committedLength = latestState.assistant.fullText.length;
+        latestState.entries = [];
+        latestState.service = { thinkingText: null, updates: [] };
         return;
       }
 
@@ -980,8 +1017,16 @@ export class LiveStream {
       return;
     }
 
+    if (this.provisionalMode === "off") {
+      // Pilot: no provisional traffic. Entries stay buffered for the
+      // seal/finalize bookkeeping; the turn goes out only as the final
+      // formatted delivery.
+      this.resetRetryFlushAttempts(sessionId);
+      return;
+    }
+
     while (true) {
-      const text = renderEntries(state.entries);
+      const text = this.renderProvisional(state.entries);
       if (!text) {
         this.resetRetryFlushAttempts(sessionId);
         return;
@@ -1070,7 +1115,7 @@ export class LiveStream {
       }
 
       const { sentEntries, remainingEntries } = splitEntriesForLimit(state.entries);
-      const prefixText = renderEntries(sentEntries);
+      const prefixText = this.renderProvisional(sentEntries);
       if (!prefixText) {
         return;
       }

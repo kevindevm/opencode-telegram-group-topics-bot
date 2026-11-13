@@ -163,6 +163,10 @@ export class SessionOutputCoordinator {
         this.enqueue(action.sessionId, async () => {
           await this.handlers.onAssistantComplete(action);
         });
+        // Pilot (no provisional): deliver every finished message promptly
+        // instead of batching everything at turn end. The footer still
+        // attaches only on idle-triggered rounds (see idleRequested).
+        this.scheduleFinalDelivery(action.sessionId);
         return;
       case "tool":
         this.enqueue(action.sessionId, async () => {
@@ -195,6 +199,9 @@ export class SessionOutputCoordinator {
         });
         return;
       case "session_idle":
+        // Only idle-triggered rounds carry the turn footer. Activity clears
+        // the flag (see markActivity), so mid-turn rounds go out plain.
+        this.idleRequested.set(action.sessionId, true);
         this.scheduleFinalDelivery(action.sessionId);
         return;
       case "session_error":
@@ -226,6 +233,10 @@ export class SessionOutputCoordinator {
     if (!hasScheduledDelivery && !hasQueuedCompletions) {
       return false;
     }
+
+    // A flush only runs for an incoming prompt: the previous turn is over,
+    // so its last delivery earns the footer like an idle round would.
+    this.idleRequested.set(sessionId, true);
 
     if (this.finalDeliveryInFlight.has(sessionId)) {
       return true;
@@ -278,6 +289,10 @@ export class SessionOutputCoordinator {
     if (!sessionId) {
       return;
     }
+
+    // New activity means the turn is still going: the footer waits for
+    // the idle round.
+    this.idleRequested.set(sessionId, false);
 
     const nextVersion = (this.activityVersions.get(sessionId) ?? 0) + 1;
     this.activityVersions.set(sessionId, nextVersion);
@@ -342,6 +357,7 @@ export class SessionOutputCoordinator {
     this.rateLimitStreaks.delete(sessionId);
     this.rateLimitStreakStartedAt.delete(sessionId);
     this.completionOverflowDrops.delete(sessionId);
+    this.idleRequested.delete(sessionId);
     this.finalDeliveryInFlight.delete(sessionId);
     this.rescheduleAfterFlight.delete(sessionId);
   }
@@ -368,6 +384,7 @@ export class SessionOutputCoordinator {
     this.rateLimitStreakStartedAt.clear();
     this.finalDeliveryAttempts.clear();
     this.completionOverflowDrops.clear();
+    this.idleRequested.clear();
     this.lastDeliveredBySession.clear();
     this.finalDeliveryInFlight.clear();
     this.rescheduleAfterFlight.clear();
@@ -441,6 +458,12 @@ export class SessionOutputCoordinator {
   private readonly rateLimitStreakStartedAt = new Map<string, number>();
   /** Dropped completion counts pending a gap marker on the next tracked text. */
   private readonly completionOverflowDrops = new Map<string, number>();
+  /**
+   * Whether the pending round was requested by session idle. Only those
+   * rounds attach the turn footer; any new activity clears it so mid-turn
+   * per-message deliveries go out plain.
+   */
+  private readonly idleRequested = new Map<string, boolean>();
   /**
    * Last text actually delivered per session. Reconnect replays and late
    * flushes can re-queue an already delivered turn after the queue was
@@ -544,12 +567,15 @@ export class SessionOutputCoordinator {
       }
     } else {
       for (let index = 0; index < snapshot.length; index++) {
-        // Only the very last message of the turn carries any footer;
-        // earlier ones go out plain. Arrivals queued mid-delivery mean
-        // this batch is not the last, so none of them takes the footer.
+        // Only the very last message of an idle-triggered round carries
+        // any footer; earlier ones go out plain. Arrivals queued
+        // mid-delivery mean this batch is not the last, so none of them
+        // takes the footer.
         const arrivalsPending = (this.pendingAssistantCompletions.get(sessionId)?.length ?? 0) > 0;
         const isLast =
-          index === snapshot.length - 1 && !arrivalsPending;
+          index === snapshot.length - 1 &&
+          !arrivalsPending &&
+          this.idleRequested.get(sessionId) === true;
         const itemText = snapshot[index]?.text ?? null;
         if (itemText && this.wasRecentlyDelivered(sessionId, itemText)) {
           // Late flush of a turn that already went out (see track path):

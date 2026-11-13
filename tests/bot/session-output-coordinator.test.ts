@@ -233,6 +233,24 @@ describe("bot/session-output-coordinator", () => {
     expect(onFinalizeSession).toHaveBeenNthCalledWith(2, "s1", "Second", true);
   });
 
+  it("delivers finished messages mid-turn without the footer", async () => {
+    const onFinalizeSession = vi.fn().mockResolvedValue(true);
+    const coordinator = createCoordinator({ onFinalizeSession });
+
+    coordinator.dispatch({
+      kind: "assistant_complete",
+      sessionId: "s1",
+      messageId: "m1",
+      text: "Mid-turn answer",
+    });
+    await vi.runAllTimersAsync();
+
+    // No idle yet: the message goes out promptly but plain, like the
+    // opencode chat timeline.
+    expect(onFinalizeSession).toHaveBeenCalledTimes(1);
+    expect(onFinalizeSession).toHaveBeenLastCalledWith("s1", "Mid-turn answer", false);
+  });
+
   it("keeps the pending completion when finalization reports failure", async () => {
     const onFinalizeSession = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     const coordinator = createCoordinator({ onFinalizeSession });
@@ -363,6 +381,8 @@ describe("bot/session-output-coordinator", () => {
       messageId: "m2",
       text: "New",
     });
+    // The turn ends after the late arrival: idle re-arms the footer for it.
+    coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
     releaseFirstFinalize?.();
     await Promise.resolve();
 

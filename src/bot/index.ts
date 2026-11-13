@@ -937,6 +937,32 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
 
         await liveStream.breakServiceBoundary(sessionId);
 
+        // Pilot (no provisional): the live lane is disabled, so tool
+        // activity would vanish silently. Completed/errored calls go out
+        // as their own quiet messages instead; running ones are skipped
+        // to avoid doubling every call (the completion lands seconds later).
+        if (config.bot.liveProvisionalMessages === "off") {
+          if (status === "running" || !target) {
+            return;
+          }
+          await sendBotText({
+            api: botInstance.api,
+            chatId: target.chatId,
+            text: `${status === "error" ? "❌" : "✅"} ${message}`,
+            options: {
+              disable_notification: true,
+              ...getThreadSendOptions(target.threadId),
+            },
+            format: "raw",
+          }).catch((error: unknown) => {
+            logger.error("[Bot] Failed to send off-mode tool notification:", {
+              sessionId,
+              error,
+            });
+          });
+          return;
+        }
+
         if (status === "running") {
           liveStream.replaceServiceByPrefix(sessionId, streamKey, `⏳ ${message}`);
           return;
@@ -1700,6 +1726,7 @@ async function sendSessionDocumentMessage(
 
 const liveStream = new LiveStream({
   throttleMs: config.bot.responseStreamThrottleMs,
+  provisionalMode: config.bot.liveProvisionalMessages,
   sendText: async (
     sessionId: string,
     text: string,

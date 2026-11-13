@@ -27,6 +27,41 @@ describe("bot/streaming/live-stream", () => {
     expect(editText).not.toHaveBeenCalled();
   });
 
+  it("sends nothing provisional when provisionalMode is off", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(103);
+    const editText = vi.fn().mockResolvedValue(undefined);
+    const stream = new LiveStream({ sendText, editText, throttleMs: 50, provisionalMode: "off" });
+
+    await stream.updateAssistant("s1", "m1", "Assistant start");
+    stream.pushServiceUpdate("s1", "⏳ bash npm test");
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(sendText).not.toHaveBeenCalled();
+    expect(editText).not.toHaveBeenCalled();
+
+    // No live message exists, so finalize reports nothing to finalize in
+    // place and the turn can go out as fresh formatted messages.
+    await expect(stream.finalizeCurrentMessage("s1", { format: "raw" })).resolves.toBe(false);
+  });
+
+  it("streams activity without raw assistant text in activity mode", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(104);
+    const editText = vi.fn().mockResolvedValue(undefined);
+    const stream = new LiveStream({ sendText, editText, throttleMs: 50, provisionalMode: "activity" });
+
+    await stream.updateAssistant("s1", "m1", "Assistant start");
+    stream.pushServiceUpdate("s1", "⏳ bash npm test");
+    await vi.advanceTimersByTimeAsync(200);
+
+    // Only the service entry goes out; the raw answer stays hidden.
+    expect(sendText).toHaveBeenCalledWith("s1", "⏳ bash npm test", "raw", false);
+    expect(editText).not.toHaveBeenCalled();
+  });
+
   it("keeps the thinking line and appends assistant text below it", async () => {
     vi.useFakeTimers();
 
