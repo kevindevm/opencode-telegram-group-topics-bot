@@ -112,9 +112,10 @@ function getPerChatIntervalMs(job: QueueJob): number {
 }
 
 function countsTowardsGroupWindow(job: QueueJob): boolean {
-  // Stream text edits can self-induce floods, so they share the group
-  // window. Markup-only edits stay exempt.
-  return job.method !== "editMessageReplyMarkup";
+  // Pilot smart-queue: every outbound call counts towards the 20/60 window,
+  // including markup-only edits. No exempt path.
+  void job;
+  return true;
 }
 
 function parseMessageId(payload: unknown): number | null {

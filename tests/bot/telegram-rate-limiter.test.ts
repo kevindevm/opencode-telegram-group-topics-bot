@@ -790,7 +790,7 @@ describe("bot/telegram-rate-limiter hardening", () => {
     }
   });
 
-  it("keeps markup edits out of the group window", async () => {
+  it("counts markup edits towards the group window (pilot)", async () => {
     vi.useFakeTimers();
     try {
       const limiter = new TelegramRateLimiter();
@@ -801,12 +801,21 @@ describe("bot/telegram-rate-limiter hardening", () => {
           async () => `markup-${index}`,
         );
       }
-      const finalSend = limiter.enqueue(
-        "sendMessage",
-        { chat_id: -1001, message_thread_id: 77 },
-        async () => "final-ok",
-      );
-      await vi.advanceTimersByTimeAsync(15_000);
+      let sendDone = false;
+      const finalSend = limiter
+        .enqueue(
+          "sendMessage",
+          { chat_id: -1001, message_thread_id: 77 },
+          async () => "final-ok",
+        )
+        .then((value) => {
+          sendDone = true;
+          return value;
+        });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(sendDone).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(60_000);
       await expect(finalSend).resolves.toBe("final-ok");
     } finally {
       vi.useRealTimers();

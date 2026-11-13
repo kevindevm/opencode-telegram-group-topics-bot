@@ -349,6 +349,7 @@ export class SessionOutputCoordinator {
   clearSession(sessionId: string): void {
     this.cancelFinalDelivery(sessionId);
     this.pendingAssistantCompletions.delete(sessionId);
+    this.lastDeliveredBySession.delete(sessionId);
     // Drop the delivery chain so post-clear work never waits behind a
     // stale (possibly hung) task from before the reset.
     this.sessionTasks.delete(sessionId);
@@ -367,6 +368,7 @@ export class SessionOutputCoordinator {
     this.rateLimitStreakStartedAt.clear();
     this.finalDeliveryAttempts.clear();
     this.completionOverflowDrops.clear();
+    this.lastDeliveredBySession.clear();
     this.finalDeliveryInFlight.clear();
     this.rescheduleAfterFlight.clear();
     this.sessionTasks.clear();
@@ -383,13 +385,25 @@ export class SessionOutputCoordinator {
   }
 
   private trackAssistantCompletion(sessionId: string, text: string): void {
-    let normalizedText = text.trim();
+    const normalizedText = text.trim();
     if (!sessionId || !normalizedText) {
       return;
     }
 
     let dropped = this.completionOverflowDrops.get(sessionId) ?? 0;
     const queue = this.pendingAssistantCompletions.get(sessionId) ?? [];
+    const lastQueued = queue.length > 0 ? queue[queue.length - 1]?.text : undefined;
+    if (lastQueued === normalizedText) {
+      logger.debug(`[Bot] Dropping consecutive duplicate completion for ${sessionId}`);
+      return;
+    }
+    if (this.wasRecentlyDelivered(sessionId, normalizedText)) {
+      // Replay or late flush of an already delivered turn: the queue is
+      // empty so the consecutive check above cannot see it. Drop loudly
+      // enough to trace, quietly enough to not spam the topic.
+      logger.warn(`[Bot] Dropping re-delivery of already delivered completion for ${sessionId}`);
+      return;
+    }
     queue.push({ text: normalizedText });
     // Bound the queue so a session that never idles cannot grow it without
     // end; oldest-first is dropped loudly, newest work is preserved.
@@ -403,14 +417,14 @@ export class SessionOutputCoordinator {
     if (dropped > 0) {
       const shown = Math.min(dropped, SessionOutputCoordinator.MAX_OVERFLOW_MARKER_COUNT);
       const suffix = dropped > SessionOutputCoordinator.MAX_OVERFLOW_MARKER_COUNT ? "+" : "";
-      normalizedText = `[system notice: ${shown}${suffix} earlier updates dropped] ${normalizedText}`;
-      queue[queue.length - 1] = { text: normalizedText };
+      const markedText = `[system notice: ${shown}${suffix} earlier updates dropped] ${normalizedText}`;
+      queue[queue.length - 1] = { text: markedText };
       this.completionOverflowDrops.set(sessionId, dropped);
     }
     this.pendingAssistantCompletions.set(sessionId, queue);
   }
 
-  private static readonly MAX_QUEUED_COMPLETIONS = 20;
+  private static readonly MAX_QUEUED_COMPLETIONS = 200;
   private static readonly MAX_OVERFLOW_MARKER_COUNT = 99;
 
   private readonly finalDeliveryAttempts = new Map<string, number>();
@@ -427,6 +441,15 @@ export class SessionOutputCoordinator {
   private readonly rateLimitStreakStartedAt = new Map<string, number>();
   /** Dropped completion counts pending a gap marker on the next tracked text. */
   private readonly completionOverflowDrops = new Map<string, number>();
+  /**
+   * Last text actually delivered per session. Reconnect replays and late
+   * flushes can re-queue an already delivered turn after the queue was
+   * committed, so neither the consecutive check nor the overflow marker
+   * can see it. Remembering one delivery per session closes that hole
+   * without ever suppressing an A,B,A sequence.
+   */
+  private readonly lastDeliveredBySession = new Map<string, { text: string; at: number }>();
+  private static readonly DELIVERY_DEDUP_WINDOW_MS = 10 * 60 * 1000;
   /**
    * Wall-clock cap for consecutive rate limits: rounds vary wildly in
    * length (each already includes the queue's own backoff), so counting
@@ -508,6 +531,9 @@ export class SessionOutputCoordinator {
       // without this reset a later 429 would inherit a stale start time.
       this.rateLimitStreaks.delete(sessionId);
       this.rateLimitStreakStartedAt.delete(sessionId);
+      if (text && text.trim().length > 0) {
+        this.noteDelivered(sessionId, text);
+      }
       return true;
     };
 
@@ -524,7 +550,14 @@ export class SessionOutputCoordinator {
         const arrivalsPending = (this.pendingAssistantCompletions.get(sessionId)?.length ?? 0) > 0;
         const isLast =
           index === snapshot.length - 1 && !arrivalsPending;
-        if (!(await deliverNext(snapshot[index]?.text ?? null, isLast))) {
+        const itemText = snapshot[index]?.text ?? null;
+        if (itemText && this.wasRecentlyDelivered(sessionId, itemText)) {
+          // Late flush of a turn that already went out (see track path):
+          // skip it instead of doubling the topic.
+          logger.warn(`[Bot] Skipping re-delivery of already delivered completion for ${sessionId}`);
+          continue;
+        }
+        if (!(await deliverNext(itemText, isLast))) {
           if (!this.pendingFinalDeliveries.has(sessionId)) {
             return false;
           }
@@ -552,6 +585,22 @@ export class SessionOutputCoordinator {
     this.pendingAssistantCompletions.delete(sessionId);
     this.completionOverflowDrops.delete(sessionId);
     await this.onFinalDeliveryCommitted(sessionId);
+    return true;
+  }
+
+  private noteDelivered(sessionId: string, text: string): void {
+    this.lastDeliveredBySession.set(sessionId, { text, at: Date.now() });
+  }
+
+  private wasRecentlyDelivered(sessionId: string, text: string): boolean {
+    const last = this.lastDeliveredBySession.get(sessionId);
+    if (!last || last.text !== text) {
+      return false;
+    }
+    if (Date.now() - last.at >= SessionOutputCoordinator.DELIVERY_DEDUP_WINDOW_MS) {
+      this.lastDeliveredBySession.delete(sessionId);
+      return false;
+    }
     return true;
   }
 

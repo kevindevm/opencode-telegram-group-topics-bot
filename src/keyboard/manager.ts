@@ -302,6 +302,31 @@ class KeyboardManager {
     }
   }
 
+  /**
+   * Removes the current carrier message once the turn is over. The reply
+   * keyboard persists in the client after its carrier is gone, so leaving
+   * the "keyboard updated" notice behind is pure clutter. Loud on
+   * failure: a silent catch here is how stale carriers went unnoticed.
+   */
+  public async removeCarrier(chatId?: number, scopeKey: string = "global"): Promise<void> {
+    const targetChatId = chatId ?? this.chatId;
+    const carrierId = this.carrierMessageIdByScope.get(scopeKey);
+    if (!this.api || !targetChatId || carrierId === undefined) {
+      return;
+    }
+    try {
+      await this.api.deleteMessage(targetChatId, carrierId);
+      this.carrierMessageIdByScope.delete(scopeKey);
+    } catch (error) {
+      logger.error("[KeyboardManager] Failed to delete keyboard carrier message:", {
+        scopeKey,
+        chatId: targetChatId,
+        messageId: carrierId,
+        error,
+      });
+    }
+  }
+
   public getKeyboard(scopeKey: string = "global") {
     if (!this.stateByScope.has(scopeKey)) {
       return undefined;

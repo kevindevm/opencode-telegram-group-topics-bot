@@ -351,4 +351,57 @@ describe("keyboard/manager", () => {
 
     keyboardManager.clearScope(scopeKey);
   });
+
+  it("removes the current carrier at turn end instead of leaving it behind", async () => {
+    const scopeKey = "-100123:64";
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 80 });
+    const deleteMessage = vi.fn().mockResolvedValue(true);
+    keyboardManager.initialize({ sendMessage, deleteMessage } as never, -100123, scopeKey);
+    keyboardManager.updateAgent("build", scopeKey);
+    keyboardManager.updateModel(
+      { providerID: "openai", modelID: "gpt-5.4", variant: "default" },
+      scopeKey,
+    );
+    contextStateManager.update(1_000, 100_000, scopeKey);
+
+    await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    await keyboardManager.removeCarrier(-100123, scopeKey);
+    expect(deleteMessage).toHaveBeenCalledWith(-100123, 80);
+
+    // Second call is a no-op: the carrier is already gone.
+    await keyboardManager.removeCarrier(-100123, scopeKey);
+    expect(deleteMessage).toHaveBeenCalledTimes(1);
+
+    keyboardManager.clearScope(scopeKey);
+  });
+
+  it("keeps the carrier id when its turn-end delete fails", async () => {
+    const scopeKey = "-100123:65";
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 81 });
+    const deleteMessage = vi.fn().mockRejectedValueOnce(new Error("gone"));
+    keyboardManager.initialize({ sendMessage, deleteMessage } as never, -100123, scopeKey);
+    keyboardManager.updateAgent("build", scopeKey);
+    keyboardManager.updateModel(
+      { providerID: "openai", modelID: "gpt-5.4", variant: "default" },
+      scopeKey,
+    );
+    contextStateManager.update(1_000, 100_000, scopeKey);
+
+    await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
+
+    // Loud failure instead of a silent catch, and the id stays so the
+    // next repaint still replaces it.
+    await keyboardManager.removeCarrier(-100123, scopeKey);
+    expect(deleteMessage).toHaveBeenCalledWith(-100123, 81);
+
+    deleteMessage.mockResolvedValue(true);
+    sendMessage.mockResolvedValue({ message_id: 82 });
+    contextStateManager.update(9_000, 100_000, scopeKey);
+    await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
+    expect(deleteMessage).toHaveBeenCalledWith(-100123, 81);
+
+    keyboardManager.clearScope(scopeKey);
+  });
 });

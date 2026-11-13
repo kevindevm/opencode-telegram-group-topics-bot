@@ -869,6 +869,12 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
   onFinalDeliveryCommitted: async (sessionId) => {
     summaryAggregator.stopTypingIndicator(sessionId);
     await liveStream.sealCurrentMessage(sessionId, true);
+    const target = getTargetBySessionId(sessionId);
+    if (target && keyboardManager.isInitialized(target.scopeKey)) {
+      // The turn-end carrier replaced its predecessor but nothing removes
+      // the last one: drop it so no "keyboard updated" notice lingers.
+      await keyboardManager.removeCarrier(target.chatId, target.scopeKey);
+    }
     await dispatchNextQueuedPrompt(sessionId);
   },
   onFinalDeliveryGiveUp: (sessionId) => {

@@ -594,13 +594,88 @@ describe("bot/session-output-coordinator", () => {
     }
   });
 
+  it("drops consecutive duplicate completions instead of delivering twice", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi.fn().mockResolvedValue(true);
+      const coordinator = createCoordinator({ onFinalizeSession });
+
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m1",
+        text: "Same answer",
+      });
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m2",
+        text: "Same answer",
+      });
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+      await vi.runAllTimersAsync();
+
+      expect(onFinalizeSession).toHaveBeenCalledTimes(1);
+      expect(onFinalizeSession).toHaveBeenLastCalledWith("s1", "Same answer", true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops a re-delivery of an already delivered completion in a later turn", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi.fn().mockResolvedValue(true);
+      const coordinator = createCoordinator({ onFinalizeSession });
+
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m1",
+        text: "Panorama answer",
+      });
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+      await vi.runAllTimersAsync();
+      expect(onFinalizeSession).toHaveBeenCalledTimes(1);
+
+      // Replay with a new message id after the queue was committed: the
+      // consecutive check cannot see it, the delivered memory must.
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m2",
+        text: "Panorama answer",
+      });
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+      await vi.runAllTimersAsync();
+      // Only the empty repaint round ran (null text): the answer text went
+      // out exactly once across both turns.
+      expect(
+        onFinalizeSession.mock.calls.filter((call) => call[1] === "Panorama answer"),
+      ).toHaveLength(1);
+
+      // A different answer still goes out, and the repeated one after it too.
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m3",
+        text: "Other answer",
+      });
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+      await vi.runAllTimersAsync();
+      expect(onFinalizeSession).toHaveBeenLastCalledWith("s1", "Other answer", true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks dropped completions with a gap marker instead of losing them silently", async () => {
     vi.useFakeTimers();
     try {
       const onFinalizeSession = vi.fn().mockResolvedValue(true);
       const coordinator = createCoordinator({ onFinalizeSession });
 
-      for (let index = 1; index <= 22; index++) {
+      for (let index = 1; index <= 202; index++) {
         coordinator.dispatch({
           kind: "assistant_complete",
           sessionId: "s1",
@@ -611,11 +686,11 @@ describe("bot/session-output-coordinator", () => {
       coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
       await vi.runAllTimersAsync();
 
-      expect(onFinalizeSession).toHaveBeenCalledTimes(20);
+      expect(onFinalizeSession).toHaveBeenCalledTimes(200);
       expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "Update 3", false);
       expect(onFinalizeSession).toHaveBeenLastCalledWith(
         "s1",
-        "[system notice: 2 earlier updates dropped] Update 22",
+        "[system notice: 2 earlier updates dropped] Update 202",
         true,
       );
     } finally {
@@ -629,7 +704,7 @@ describe("bot/session-output-coordinator", () => {
       const onFinalizeSession = vi.fn().mockResolvedValue(true);
       const coordinator = createCoordinator({ onFinalizeSession });
 
-      for (let index = 1; index <= 150; index++) {
+      for (let index = 1; index <= 350; index++) {
         coordinator.dispatch({
           kind: "assistant_complete",
           sessionId: "s1",
@@ -642,7 +717,7 @@ describe("bot/session-output-coordinator", () => {
 
       expect(onFinalizeSession).toHaveBeenLastCalledWith(
         "s1",
-        "[system notice: 99+ earlier updates dropped] Update 150",
+        "[system notice: 99+ earlier updates dropped] Update 350",
         true,
       );
     } finally {
