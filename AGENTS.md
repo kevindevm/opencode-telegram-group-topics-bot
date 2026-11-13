@@ -14,6 +14,7 @@ This repo is a fork of `grinev/opencode-telegram-bot` with group-topics support 
 - Everything is written in English: PR titles and descriptions, issue comments, code and code comments. User-facing Telegram strings stay localized through i18n.
 - GitHub issue comments are short and non-technical. Fix things properly instead of documenting a partial fix.
 - Do not publish a release or push without the user asking for it.
+- Before pushing or opening a PR, show the commit list and offer to rebase into few short commits.
 
 
 ## Technology stack

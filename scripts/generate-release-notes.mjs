@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const SECTION_ORDER = ["Major Changes", "Changes", "Fixes", "Technical", "Documentation", "Other"];
+const SECTION_ORDER = ["Major Changes", "Changes", "Fixes", "Technical", "Other"];
 
 const TECHNICAL_TYPES = new Set(["refactor", "chore", "ci", "build", "test", "style"]);
 
@@ -107,8 +109,9 @@ function classifyCommit(subject) {
     return { section: "Technical", text: description };
   }
 
+  // Docs-only commits never reach the release notes.
   if (type === "docs") {
-    return { section: "Documentation", text: description };
+    return null;
   }
 
   return { section: "Other", text: description };
@@ -211,26 +214,43 @@ async function main() {
 
   const ownerLogin = repository.split("/")[0];
 
+  // A curated, human-polished note wins over the generated one: write it
+  // with scripts/polish-release-notes.mjs, review it, and commit it as
+  // docs/releases/vX.Y.Z.md before tagging the release.
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const curatedPath = join(repoRoot, "docs", "releases", `v${version}.md`);
+  if (existsSync(curatedPath)) {
+    copyFileSync(curatedPath, outputPath);
+    console.log(`Using curated release notes: ${curatedPath}`);
+    return;
+  }
+
   const lastTag = runGit(["describe", "--tags", "--abbrev=0", "HEAD^"], true);
   const range = lastTag ? `${lastTag}..HEAD` : "HEAD";
-  const logOutput = runGit(["log", "--no-merges", "--pretty=format:%ct%x09%s", range], true);
+  const logOutput = runGit(["log", "--no-merges", "--pretty=format:%H%x09%ct%x09%s", range], true);
 
   const commits = logOutput
     ? logOutput
         .split(/\r?\n/)
         .map((line) => {
-          const tabIndex = line.indexOf("\t");
-
-          if (tabIndex === -1) {
+          const firstTab = line.indexOf("\t");
+          if (firstTab === -1) {
             const { subject, prNumber } = extractPrNumber(line.trim());
-            return { timestamp: 0, subject, prNumber };
+            return { sha: null, timestamp: 0, subject, prNumber };
+          }
+          const secondTab = line.indexOf("\t", firstTab + 1);
+          if (secondTab === -1) {
+            const { subject, prNumber } = extractPrNumber(line.slice(firstTab + 1).trim());
+            return { sha: null, timestamp: 0, subject, prNumber };
           }
 
-          const timestamp = Number.parseInt(line.slice(0, tabIndex), 10);
-          const rawSubject = line.slice(tabIndex + 1).trim();
+          const sha = line.slice(0, firstTab).trim() || null;
+          const timestamp = Number.parseInt(line.slice(firstTab + 1, secondTab), 10);
+          const rawSubject = line.slice(secondTab + 1).trim();
           const { subject, prNumber } = extractPrNumber(rawSubject);
 
           return {
+            sha,
             timestamp: Number.isNaN(timestamp) ? 0 : timestamp,
             subject,
             prNumber,
@@ -246,16 +266,44 @@ async function main() {
     commits.map((c) => c.prNumber),
   );
 
+  // A command added and dropped within the same range must not be advertised:
+  // collect /command tokens from "drop the /x" style commits and skip other
+  // entries mentioning them (e.g. an "add /restore" cancelled by a commit
+  // that drops the /restore experiment). Plain words like "restore" never
+  // match, only /commands.
+  const dropTokenOf = (subject) => {
+    const match = subject.match(/\b(?:drop|remove|delete)\s+(?:the\s+)?(\/[\w-]+)/i);
+    return match ? match[1].toLowerCase() : null;
+  };
+  const droppedCommands = new Set();
+  for (const commit of commits) {
+    const token = dropTokenOf(commit.subject);
+    if (token) {
+      droppedCommands.add(token);
+    }
+  }
+
   const sections = createEmptySections();
 
   commits.forEach((commit, index) => {
-    const { section, text } = classifyCommit(commit.subject);
+    const classified = classifyCommit(commit.subject);
+    if (!classified) {
+      return;
+    }
+    if (
+      !dropTokenOf(commit.subject) &&
+      [...droppedCommands].some((token) => classified.text.toLowerCase().includes(token))
+    ) {
+      return;
+    }
+    const { section, text } = classified;
     const authorLogin = commit.prNumber !== null ? authorCache.get(commit.prNumber) : undefined;
 
     sections[section].push({
       text,
       timestamp: commit.timestamp,
       order: index,
+      sha: commit.sha,
       authorLogin: authorLogin ?? null,
     });
   });
@@ -274,10 +322,13 @@ async function main() {
     lines.push(`### ${section}`);
 
     for (const item of sortByCommitTime(items)) {
-      const attribution = item.authorLogin
-        ? ` ([@${item.authorLogin}](https://github.com/${item.authorLogin}))`
+      const commitLink = item.sha
+        ? ` ([${item.sha.slice(0, 7)}](https://github.com/${repository}/commit/${item.sha}))`
         : "";
-      lines.push(`- ${item.text}${attribution}`);
+      const attribution = item.authorLogin
+        ? ` by [@${item.authorLogin}](https://github.com/${item.authorLogin})`
+        : "";
+      lines.push(`- ${item.text}${commitLink}${attribution}`);
     }
 
     lines.push("");

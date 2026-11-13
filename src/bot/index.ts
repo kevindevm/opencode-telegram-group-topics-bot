@@ -1900,37 +1900,43 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
         }
       }
 
-      // Update the keyboard synchronously before any await so onComplete
-      // uses fresh context. Same footprint the TUI shows.
-      const rawContextSize =
-        tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead + tokens.cacheWrite;
-      let contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
-      // Clamp live context to the model limit. Refresh once, then clamp and
-      // keep updating instead of dropping the event.
-      if (contextLimit > 0 && rawContextSize > contextLimit) {
-        await pinnedMessageManager.refreshContextLimit(target.scopeKey).catch(() => {});
-        contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
-      }
-      if (contextLimit > 0 && rawContextSize > contextLimit) {
-        logger.warn("[Bot] Clamping implausible context size to the model limit", {
-          sessionId,
-          contextSize: rawContextSize,
-          contextLimit,
-        });
-      }
-      const contextSize =
-        contextLimit > 0 ? Math.min(rawContextSize, contextLimit) : rawContextSize;
-      if (contextLimit > 0) {
-        keyboardManager.updateContext(contextSize, contextLimit, target.scopeKey);
-      }
-
-      if (pinnedMessageManager.isInitialized(target.scopeKey)) {
-        await pinnedMessageManager.onMessageComplete(tokens, target.scopeKey, completed);
-
-        if (contextLimit <= 0) {
+      // Context numbers only move on completed messages, like the TUI:
+      // the server's live usage totals are unreliable for display (seen
+      // reporting exactly double the per-message window), and max() would
+      // freeze the dashboard on the inflated peak.
+      if (completed) {
+        // Update the keyboard synchronously before any await so onComplete
+        // uses fresh context. Same footprint the TUI shows.
+        const rawContextSize =
+          tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead + tokens.cacheWrite;
+        let contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
+        // Clamp live context to the model limit. Refresh once, then clamp and
+        // keep updating instead of dropping the event.
+        if (contextLimit > 0 && rawContextSize > contextLimit) {
+          await pinnedMessageManager.refreshContextLimit(target.scopeKey).catch(() => {});
           contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
-          if (contextLimit > 0) {
-            keyboardManager.updateContext(contextSize, contextLimit, target.scopeKey);
+        }
+        if (contextLimit > 0 && rawContextSize > contextLimit) {
+          logger.warn("[Bot] Clamping implausible context size to the model limit", {
+            sessionId,
+            contextSize: rawContextSize,
+            contextLimit,
+          });
+        }
+        const contextSize =
+          contextLimit > 0 ? Math.min(rawContextSize, contextLimit) : rawContextSize;
+        if (contextLimit > 0) {
+          keyboardManager.updateContext(contextSize, contextLimit, target.scopeKey);
+        }
+
+        if (pinnedMessageManager.isInitialized(target.scopeKey)) {
+          await pinnedMessageManager.onMessageComplete(tokens, target.scopeKey, completed);
+
+          if (contextLimit <= 0) {
+            contextLimit = pinnedMessageManager.getContextLimit(target.scopeKey);
+            if (contextLimit > 0) {
+              keyboardManager.updateContext(contextSize, contextLimit, target.scopeKey);
+            }
           }
         }
       }
