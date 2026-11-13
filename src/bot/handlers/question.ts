@@ -19,6 +19,118 @@ import {
 
 const QUESTION_ALLOWED_COMMANDS = [...DEFAULT_ALLOWED_INTERACTION_COMMANDS, "/last"];
 
+/**
+ * One-shot retry for polls killed by a 429. The agent stays blocked with no
+ * way to answer, so one delayed attempt runs after the storm window instead
+ * of dropping the poll silently. Never re-arms: one attempt max per request.
+ */
+const QUESTION_POLL_RETRY_DELAY_MS = 60_000;
+const MAX_TRACKED_QUESTION_RETRIES = 500;
+const pendingQuestionPollRetries = new Map<string, { timer: ReturnType<typeof setTimeout>; scopeKey: string }>();
+const retriedQuestionPolls = new Set<string>();
+/** Monotonic clock telling a poll shown after a retry was scheduled. */
+let shownQuestionPollEpoch = 0;
+const shownQuestionPolls = new Map<string, { requestId: string; epoch: number }>();
+
+function trackBoundedSet<T>(set: Set<T>): void {
+  if (set.size <= MAX_TRACKED_QUESTION_RETRIES) {
+    return;
+  }
+  const oldest = set.values().next();
+  if (!oldest.done) {
+    set.delete(oldest.value);
+  }
+}
+
+export function cancelPendingQuestionPollRetries(scopeKey?: string, requestId?: string): void {
+  for (const [id, pending] of Array.from(pendingQuestionPollRetries)) {
+    if (
+      (scopeKey !== undefined && pending.scopeKey !== scopeKey) ||
+      (requestId !== undefined && id !== requestId)
+    ) {
+      continue;
+    }
+    clearTimeout(pending.timer);
+    pendingQuestionPollRetries.delete(id);
+  }
+}
+
+/**
+ * Cancels pending retries in a scope except for one request. A fresh poll
+ * supersedes stale retries, but a duplicate SSE delivery of the same
+ * request must not cancel its own retry.
+ */
+export function cancelPendingQuestionPollRetriesExcept(scopeKey: string, keepRequestId: string): void {
+  for (const [id, pending] of Array.from(pendingQuestionPollRetries)) {
+    if (pending.scopeKey !== scopeKey || id === keepRequestId) {
+      continue;
+    }
+    clearTimeout(pending.timer);
+    pendingQuestionPollRetries.delete(id);
+  }
+}
+
+export function __resetQuestionPollRetriesForTests(): void {
+  for (const pending of pendingQuestionPollRetries.values()) {
+    clearTimeout(pending.timer);
+  }
+  pendingQuestionPollRetries.clear();
+  retriedQuestionPolls.clear();
+  shownQuestionPolls.clear();
+  shownQuestionPollEpoch = 0;
+}
+
+/**
+ * Remembers which poll was last shown per scope, with a monotonic epoch.
+ * A retry scheduled earlier must not replay over anything shown later.
+ */
+export function noteQuestionPollShown(scopeKey: string, requestId: string): void {
+  shownQuestionPollEpoch += 1;
+  shownQuestionPolls.set(scopeKey, { requestId, epoch: shownQuestionPollEpoch });
+  if (shownQuestionPolls.size > MAX_TRACKED_QUESTION_RETRIES) {
+    const oldest = shownQuestionPolls.keys().next();
+    if (!oldest.done) {
+      shownQuestionPolls.delete(oldest.value);
+    }
+  }
+}
+
+export function getShownQuestionPoll(scopeKey: string): { requestId: string; epoch: number } | undefined {
+  return shownQuestionPolls.get(scopeKey);
+}
+
+export function getQuestionPollEpoch(): number {
+  return shownQuestionPollEpoch;
+}
+
+export function scheduleQuestionPollRetry(input: {
+  requestId: string;
+  scopeKey: string;
+  sessionId: string;
+  reshow: () => Promise<void>;
+  shouldProceed: () => boolean;
+}): void {
+  if (retriedQuestionPolls.has(input.requestId) || pendingQuestionPollRetries.has(input.requestId)) {
+    return;
+  }
+  retriedQuestionPolls.add(input.requestId);
+  trackBoundedSet(retriedQuestionPolls);
+  const timer = setTimeout(() => {
+    pendingQuestionPollRetries.delete(input.requestId);
+    if (!input.shouldProceed()) {
+      return;
+    }
+    void input.reshow().catch((retryError: unknown) => {
+      logger.error("[Bot] Scheduled question poll retry failed:", {
+        sessionId: input.sessionId,
+        requestId: input.requestId,
+        retryError,
+      });
+    });
+  }, QUESTION_POLL_RETRY_DELAY_MS);
+  timer.unref?.();
+  pendingQuestionPollRetries.set(input.requestId, { timer, scopeKey: input.scopeKey });
+}
 function getCallbackMessageId(ctx: Context): number | null {
   const message = ctx.callbackQuery?.message;
   if (!message || !("message_id" in message)) {

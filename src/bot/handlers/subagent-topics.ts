@@ -93,6 +93,13 @@ async function createSubagentTopic(
     return true;
   }
 
+  // Persistent non-429 failures (no permission, bad topic) must not hammer
+  // Telegram on every emission: cool down before trying again.
+  const cooledUntil = createNon429CooldownUntil.get(childSessionId);
+  if (cooledUntil !== undefined && Date.now() < cooledUntil) {
+    return false;
+  }
+
   const parentTarget = getSessionRouteTarget(parentSessionId);
   const parentBinding = getTopicBindingBySessionId(parentSessionId);
   if (!parentTarget || !parentBinding || parentBinding.ephemeral) {
@@ -131,10 +138,18 @@ async function createSubagentTopic(
     // A 429 here gets one delayed retry: the transcript would otherwise be
     // lost silently if this was the subagent's only emission.
     if (error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null) {
-      if (!pendingFinalizeRetries.has(childSessionId)) {
-        pendingFinalizeRetries.add(childSessionId);
+      if (!pendingCreateRetries.has(childSessionId) && !retriedCreateSubagents.has(childSessionId)) {
+        retriedCreateSubagents.add(childSessionId);
+        trackBoundedSubagentSet(retriedCreateSubagents);
+        pendingCreateRetries.add(childSessionId);
+        if (pendingCreateRetries.size > MAX_PENDING_SUBAGENT_RETRIES) {
+          const oldest = pendingCreateRetries.values().next();
+          if (!oldest.done) {
+            pendingCreateRetries.delete(oldest.value);
+          }
+        }
         setTimeout(() => {
-          pendingFinalizeRetries.delete(childSessionId);
+          pendingCreateRetries.delete(childSessionId);
           if (!getTopicBindingBySessionId(childSessionId)) {
             void ensureSubagentTopic(api, parentSessionId, info).catch((retryError) => {
               logger.warn("[SubagentTopic] Scheduled create retry failed:", {
@@ -146,6 +161,7 @@ async function createSubagentTopic(
         }, FINALIZE_RETRY_DELAY_MS).unref?.();
       }
     } else {
+      createNon429CooldownUntil.set(childSessionId, Date.now() + CREATE_NON_429_COOLDOWN_MS);
       logger.error("[SubagentTopic] Failed to create subagent topic:", error);
     }
     return false;
@@ -233,6 +249,33 @@ export async function finalizeSubagentTopic(
  */
 const FINALIZE_RETRY_DELAY_MS = 60_000;
 const pendingFinalizeRetries = new Set<string>();
+const pendingCreateRetries = new Set<string>();
+const MAX_PENDING_SUBAGENT_RETRIES = 200;
+/** One-shot memory surviving eviction: evicted ids must not re-arm. */
+const MAX_RETRIED_SUBAGENTS = 500;
+const retriedCreateSubagents = new Set<string>();
+const retriedFinalizeSubagents = new Set<string>();
+/** Backoff for persistent non-429 create failures (no permission, bad topic). */
+const CREATE_NON_429_COOLDOWN_MS = 5 * 60_000;
+const createNon429CooldownUntil = new Map<string, number>();
+
+function trackBoundedSubagentSet(set: Set<string>): void {
+  if (set.size <= MAX_RETRIED_SUBAGENTS) {
+    return;
+  }
+  const oldest = set.values().next();
+  if (!oldest.done) {
+    set.delete(oldest.value);
+  }
+}
+
+export function __resetSubagentTopicRetriesForTests(): void {
+  pendingFinalizeRetries.clear();
+  pendingCreateRetries.clear();
+  retriedCreateSubagents.clear();
+  retriedFinalizeSubagents.clear();
+  createNon429CooldownUntil.clear();
+}
 
 function scheduleFinalizeRetry(
   api: ForumTopicApi,
@@ -240,9 +283,11 @@ function scheduleFinalizeRetry(
   status: "completed" | "error",
   description: string,
 ): void {
-  if (pendingFinalizeRetries.has(childSessionId)) {
+  if (pendingFinalizeRetries.has(childSessionId) || retriedFinalizeSubagents.has(childSessionId)) {
     return;
   }
+  retriedFinalizeSubagents.add(childSessionId);
+  trackBoundedSubagentSet(retriedFinalizeSubagents);
   pendingFinalizeRetries.add(childSessionId);
   if (pendingFinalizeRetries.size > 200) {
     const oldest = pendingFinalizeRetries.values().next();

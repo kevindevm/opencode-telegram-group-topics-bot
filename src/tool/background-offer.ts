@@ -95,16 +95,27 @@ const sentOffers = new Map<string, PendingOffer>();
  */
 const OFFER_RETRY_DELAY_MS = 60_000;
 const offerRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Storm cap: per-call keys could pile up with many tools failing at once. */
+const MAX_OFFER_RETRY_TIMERS = 20;
 
 function isRateLimitFailure(error: unknown): boolean {
   return error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null;
 }
 
-function clearOfferRetryTimer(sessionId: string): void {
-  const timer = offerRetryTimers.get(sessionId);
-  if (timer) {
-    clearTimeout(timer);
-    offerRetryTimers.delete(sessionId);
+function clearOfferRetryTimer(sessionId: string, callId?: string): void {
+  if (callId !== undefined) {
+    const timer = offerRetryTimers.get(pendingKey(sessionId, callId));
+    if (timer) {
+      clearTimeout(timer);
+      offerRetryTimers.delete(pendingKey(sessionId, callId));
+    }
+    return;
+  }
+  for (const key of Array.from(offerRetryTimers.keys())) {
+    if (key === sessionId || key.startsWith(`${sessionId}:`)) {
+      clearTimeout(offerRetryTimers.get(key));
+      offerRetryTimers.delete(key);
+    }
   }
 }
 
@@ -239,6 +250,7 @@ async function sendOfferMessage(
         runningCallIds.delete(sessionId);
         retireOffer(sessionId, true);
       }, OFFER_TTL_MS);
+      offer.expiresTimer.unref?.();
     }
     logger.info("[BackgroundOffer] Offered background move", {
       sessionId,
@@ -252,19 +264,30 @@ async function sendOfferMessage(
       error,
     });
 
-    if (!isRetry && isRateLimitFailure(error) && !offerRetryTimers.has(sessionId)) {
+    if (!isRetry && isRateLimitFailure(error) && !offerRetryTimers.has(pendingKey(sessionId, callId))) {
       // The tool is still running but the storm burned the shared budget:
       // try once more a minute later instead of dropping the offer. No
       // loop: the retry below never schedules another one.
+      const retryKey = pendingKey(sessionId, callId);
       const timer = setTimeout(() => {
-        offerRetryTimers.delete(sessionId);
-        if (!runningCallIds.has(sessionId)) {
+        offerRetryTimers.delete(retryKey);
+        if (!runningCallIds.has(sessionId) || sentOffers.has(sessionId)) {
           return;
         }
         void sendOfferMessage(input, true);
       }, OFFER_RETRY_DELAY_MS);
       timer.unref?.();
-      offerRetryTimers.set(sessionId, timer);
+      offerRetryTimers.set(retryKey, timer);
+      // Cap the storm: too many tools failing at once must not arm
+      // dozens of retries that all fire together when the storm passes.
+      while (offerRetryTimers.size > MAX_OFFER_RETRY_TIMERS) {
+        const oldest = offerRetryTimers.keys().next();
+        if (oldest.done) {
+          break;
+        }
+        clearTimeout(offerRetryTimers.get(oldest.value));
+        offerRetryTimers.delete(oldest.value);
+      }
     }
   }
 }
@@ -302,6 +325,7 @@ export function noteToolBackgroundState(input: NoteToolBackgroundStateInput): vo
 
   if (status === "completed" || status === "error") {
     clearPendingTimer(sessionId, callId);
+    clearOfferRetryTimer(sessionId, callId);
     const noRunningLeft = untrackRunningCall(sessionId, callId);
     // Drop the offer as soon as nothing is still running in the session,
     // regardless of which call raised it: with overlapping long tools the
@@ -347,6 +371,7 @@ export const __backgroundOfferTestHooks = {
     pendingTimers: pendingTimers.size,
     runningCalls: runningCallIds.size,
     sentOffers: sentOffers.size,
+    offerRetries: offerRetryTimers.size,
   }),
 };
 

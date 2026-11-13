@@ -45,6 +45,12 @@ import {
   handleQuestionTextAnswer,
   closeQuestionSettledOutside,
   isDuplicateQuestionDelivery,
+  scheduleQuestionPollRetry,
+  cancelPendingQuestionPollRetries,
+  cancelPendingQuestionPollRetriesExcept,
+  noteQuestionPollShown,
+  getShownQuestionPoll,
+  getQuestionPollEpoch,
 } from "./handlers/question.js";
 import { handleRefreshCommand } from "./commands/refresh.js";
 import { handlePermissionCallback, syncPermissionInteractionState, buildPermissionOutcomeText, cancelScheduledPermissionPoll, schedulePermissionPoll } from "./handlers/permission.js";
@@ -737,69 +743,12 @@ async function finalizeSessionDelivery(
 }
 
 /**
- * Shows a question poll with one best-effort retry. A poll killed by a
- * 429 leaves the agent blocked with no way to answer, so one delayed
- * attempt runs after the storm window instead of dropping it silently.
+ * One failure pointer per poll: fanout SSE duplicates of the same dead
+ * request must not each send another notice for a turn that is already gone.
  */
-const pendingQuestionPollRetries = new Map<string, { timer: ReturnType<typeof setTimeout>; scopeKey: string }>();
-const retriedQuestionPolls = new Set<string>();
+const notifiedPollFailures = new Set<string>();
 
-function cancelPendingQuestionPollRetries(scopeKey?: string, requestId?: string): void {
-  for (const [id, pending] of Array.from(pendingQuestionPollRetries)) {
-    if ((scopeKey !== undefined && pending.scopeKey !== scopeKey) || (requestId !== undefined && id !== requestId)) {
-      continue;
-    }
-    clearTimeout(pending.timer);
-    pendingQuestionPollRetries.delete(id);
-  }
-}
-
-function scheduleQuestionPollRetry(input: {
-  api: Bot<Context>["api"];
-  sessionId: string;
-  questions: import("../question/types.js").Question[];
-  requestId: string;
-  chatId: number;
-  scopeKey: string;
-  threadId: number | null;
-}): void {
-  if (retriedQuestionPolls.has(input.requestId) || pendingQuestionPollRetries.has(input.requestId)) {
-    return;
-  }
-  retriedQuestionPolls.add(input.requestId);
-  // Bounded: request ids are unique per question event, but never let the
-  // set grow without limit in a pathological storm.
-  if (retriedQuestionPolls.size > 500) {
-    const oldest = retriedQuestionPolls.values().next();
-    if (!oldest.done) {
-      retriedQuestionPolls.delete(oldest.value);
-    }
-  }
-  const timer = setTimeout(() => {
-    pendingQuestionPollRetries.delete(input.requestId);
-    // Never resurrect over a healthy poll: a newer question, an answer
-    // from elsewhere, or a reused scope must win over this stale retry.
-    // Settled and active both mean do not touch.
-    if (
-      questionManager.wasSettledRecently(input.requestId) ||
-      questionManager.isActive(input.scopeKey) ||
-      (getTopicBindingBySessionId(input.sessionId)?.scopeKey ?? null) !== input.scopeKey
-    ) {
-      return;
-    }
-    void showQuestionPollWithRetry(input).catch((retryError: unknown) => {
-      logger.error("[Bot] Scheduled question poll retry failed:", {
-        sessionId: input.sessionId,
-        requestId: input.requestId,
-        retryError,
-      });
-    });
-  }, 60_000);
-  pendingQuestionPollRetries.set(input.requestId, { timer, scopeKey: input.scopeKey });
-}
-
-async function showQuestionPollWithRetry(input: {
-  api: Bot<Context>["api"];
+async function showQuestionPollWithRetry(input: {  api: Bot<Context>["api"];
   sessionId: string;
   questions: import("../question/types.js").Question[];
   requestId: string;
@@ -821,66 +770,97 @@ async function showQuestionPollWithRetry(input: {
     return;
   }
 
-  // A fresh poll supersedes any pending retry for this scope: the retry
-  // targets a stale turn and must never clobber the live one.
-  cancelPendingQuestionPollRetries(target.scopeKey);
+  // A fresh poll supersedes stale retries for this scope, except its own
+  // pending retry (duplicate SSE deliveries must not disarm it).
+  cancelPendingQuestionPollRetriesExcept(target.scopeKey, requestId);
 
   await liveStream.sealCurrentMessage(sessionId, true);
 
-if (questionManager.isActive(target.scopeKey)) {
-        logger.warn("[Bot] Replacing active poll with a new one");
+  if (questionManager.isActive(target.scopeKey)) {
+    logger.warn("[Bot] Replacing active poll with a new one");
 
-        const previousMessageIds = questionManager.getMessageIds(target.scopeKey);
-        for (const messageId of previousMessageIds) {
-          await activeBot.api.deleteMessage(target.chatId, messageId).catch(() => {});
+    const previousMessageIds = questionManager.getMessageIds(target.scopeKey);
+    for (const messageId of previousMessageIds) {
+      await activeBot.api.deleteMessage(target.chatId, messageId).catch(() => {});
+    }
+
+    clearAllInteractionState(
+      INTERACTION_CLEAR_REASON.QUESTION_REPLACED_BY_NEW_POLL,
+      target.scopeKey,
+    );
+  }
+
+  logger.info(
+    `[Bot] Received ${questions.length} questions from agent, requestID=${requestId}`,
+  );
+  questionManager.startQuestions(questions, requestId, target.scopeKey);
+  try {
+    await showCurrentQuestion(activeBot.api, target.chatId, target.scopeKey, target.threadId);
+    noteQuestionPollShown(target.scopeKey, requestId);
+  } catch (error) {
+    logger.error("[Bot] Failed to show question poll:", {
+      sessionId,
+      requestId,
+      error,
+    });
+    // The poll never reached Telegram: drop the orphaned local state so
+    // a later question starts clean instead of stacking on a ghost poll.
+    questionManager.clear(target.scopeKey);
+    summaryAggregator.stopTypingIndicator(sessionId);
+    // The agent is blocked waiting; without a poll the user never
+    // knows. Best effort: a one-line pointer, then release the error
+    // so the coordinator logs it like any other delivery failure.
+    // Sent once per request: fanout duplicates of the same dead turn
+    // must not each add another notice.
+    if (!notifiedPollFailures.has(requestId)) {
+      notifiedPollFailures.add(requestId);
+      if (notifiedPollFailures.size > 500) {
+        const oldest = notifiedPollFailures.values().next();
+        if (!oldest.done) {
+          notifiedPollFailures.delete(oldest.value);
         }
-
-        clearAllInteractionState(
-          INTERACTION_CLEAR_REASON.QUESTION_REPLACED_BY_NEW_POLL,
-          target.scopeKey,
-        );
       }
-
-      logger.info(
-        `[Bot] Received ${questions.length} questions from agent, requestID=${requestId}`,
-      );
-      questionManager.startQuestions(questions, requestId, target.scopeKey);
-      try {
-        await showCurrentQuestion(activeBot.api, target.chatId, target.scopeKey, target.threadId);
-      } catch (error) {
-        logger.error("[Bot] Failed to show question poll:", {
-          sessionId,
-          requestId,
-          error,
-        });
-        // The poll never reached Telegram: drop the orphaned local state so
-        // a later question starts clean instead of stacking on a ghost poll.
-        questionManager.clear(target.scopeKey);
-        summaryAggregator.stopTypingIndicator(sessionId);
-        // The agent is blocked waiting; without a poll the user never
-        // knows. Best effort: a one-line pointer, then release the error
-        // so the coordinator logs it like any other delivery failure.
-        await activeBot.api
-          .sendMessage(target.chatId, t("question.poll_failed_notice"), {
-            ...getThreadSendOptions(target.threadId),
-          })
-          .catch(() => {});
-        // Only 429s earn a retry: permanent failures would just fail again.
-        // isRetry callers never re-arm (single attempt by design).
-        const rateLimited = error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null;
-        if (rateLimited) {
-          scheduleQuestionPollRetry({
-            api: activeBot.api,
-            sessionId,
-            requestId,
-            questions,
-            chatId: target.chatId,
-            scopeKey: target.scopeKey,
-            threadId: target.threadId,
-          });
-        }
-        throw error;
-      }
+      await activeBot.api
+        .sendMessage(target.chatId, t("question.poll_failed_notice"), {
+          ...getThreadSendOptions(target.threadId),
+        })
+        .catch(() => {});
+    }
+    // Only 429s earn a retry: permanent failures would just fail again.
+    // A single delayed attempt runs instead of dropping the turn silently;
+    // the guard re-checks liveness at fire time.
+    const rateLimited = error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null;
+    if (rateLimited) {
+      const scheduledEpoch = getQuestionPollEpoch();
+      scheduleQuestionPollRetry({
+        requestId,
+        scopeKey: target.scopeKey,
+        sessionId,
+        reshow: () =>
+          showQuestionPollWithRetry({ api: activeBot.api, sessionId, questions, requestId }),
+        shouldProceed: () => {
+          const freshBinding = getTopicBindingBySessionId(sessionId);
+          if (!freshBinding) {
+            return false;
+          }
+          if (questionManager.wasSettledRecently(requestId)) {
+            return false;
+          }
+          if (questionManager.isActive(freshBinding.scopeKey)) {
+            return false;
+          }
+          // A poll shown after this retry was scheduled wins, even if it has
+          // since been answered: replaying the older one would confuse the user.
+          const shown = getShownQuestionPoll(freshBinding.scopeKey);
+          if (shown && (shown.requestId !== requestId || shown.epoch > scheduledEpoch)) {
+            return false;
+          }
+          return true;
+        },
+      });
+    }
+    throw error;
+  }
 }
 
 const sessionOutputCoordinator = new SessionOutputCoordinator({

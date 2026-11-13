@@ -240,4 +240,30 @@ describe("bot/events/background-notice-delivery", () => {
       vi.useRealTimers();
     }
   });
+
+  it("sends once when a second delivery arrives while the first is in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sendText = vi.fn().mockReturnValue(gate);
+    const send = createBackgroundNoticeDelivery(
+      {
+        getDestination: () => ({ api: {} as never, chatId: -1001, threadId: 42 }),
+      },
+      { sendText } as unknown as TelegramEventDelivery,
+    );
+
+    const first = send({ kind: "assistant_response", sessionId: "ses-race" });
+    // Let the first delivery reach the in-flight send before racing it.
+    await Promise.resolve();
+    await Promise.resolve();
+    const second = send({ kind: "assistant_response", sessionId: "ses-race" });
+    await second;
+    expect(sendText).toHaveBeenCalledTimes(1);
+
+    release();
+    await first;
+    expect(sendText).toHaveBeenCalledTimes(1);
+  });
 });

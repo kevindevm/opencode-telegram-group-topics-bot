@@ -46,6 +46,12 @@ const liveNotices = new Map<string, number>();
  */
 const FAILED_NOTICE_TTL_MS = 60_000;
 const failedNotices = new Map<string, number>();
+/**
+ * Sends currently in flight: the optimistic failedNotices reservation
+ * expires after 60s, but a queued send can take longer. While a send is
+ * in flight the key counts as covered regardless of the clock.
+ */
+const pendingNoticeSends = new Set<string>();
 
 function liveNoticeKey(sessionId: string, kind: BackgroundSessionNotification["kind"]): string {
   return `${sessionId}:${kind}`;
@@ -53,6 +59,9 @@ function liveNoticeKey(sessionId: string, kind: BackgroundSessionNotification["k
 
 function hasLiveNotice(sessionId: string, kind: BackgroundSessionNotification["kind"]): boolean {
   const key = liveNoticeKey(sessionId, kind);
+  if (pendingNoticeSends.has(key)) {
+    return true;
+  }
   const sentAt = liveNotices.get(key);
   if (sentAt !== undefined) {
     if (Date.now() - sentAt >= LIVE_NOTICE_TTL_MS) {
@@ -86,6 +95,7 @@ export function clearBackgroundNoticesForSession(sessionId: string): void {
 export function __resetBackgroundNoticesForTests(): void {
   liveNotices.clear();
   failedNotices.clear();
+  pendingNoticeSends.clear();
 }
 
 /**
@@ -184,11 +194,17 @@ export function createBackgroundNoticeDelivery(
       }
     }
 
+    // Reserve first: two deliveries racing the same event would both pass
+    // hasLiveNotice and double-send, since JS awaits yield between check and set.
+    // The pending set covers sends that outlast the 60s failed window.
+    failedNotices.set(liveNoticeKey(notification.sessionId, notification.kind), Date.now());
+    pendingNoticeSends.add(liveNoticeKey(notification.sessionId, notification.kind));
     try {
       await delivery.sendText(destination, formatBackgroundSessionNotification(notification), {
         reply_markup: buildBackgroundSessionOpenKeyboard(notification.sessionId, notification.kind),
         ...getThreadSendOptions(destination.threadId ?? null),
       });
+      failedNotices.delete(liveNoticeKey(notification.sessionId, notification.kind));
       liveNotices.set(liveNoticeKey(notification.sessionId, notification.kind), Date.now());
     } catch (error) {
       // A failed send still suppresses immediate repeats (no hammering),
@@ -201,6 +217,8 @@ export function createBackgroundNoticeDelivery(
         kind: notification.kind,
         error,
       });
+    } finally {
+      pendingNoticeSends.delete(liveNoticeKey(notification.sessionId, notification.kind));
     }
   };
 }

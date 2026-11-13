@@ -32,6 +32,7 @@ import {
   ensureSubagentTopic,
   finalizeSubagentTopic,
   isEphemeralTopicScope,
+  __resetSubagentTopicRetriesForTests,
 } from "../../../src/bot/handlers/subagent-topics.js";
 
 describe("bot/handlers/subagent-topics", () => {
@@ -39,6 +40,7 @@ describe("bot/handlers/subagent-topics", () => {
     mocked.bindingsBySession.clear();
     mocked.registered.length = 0;
     mocked.routeTarget = null;
+    __resetSubagentTopicRetriesForTests();
     vi.clearAllMocks();
   });
 
@@ -239,5 +241,50 @@ describe("bot/handlers/subagent-topics", () => {
 
     expect(isEphemeralTopicScope("chat:-100:10")).toBe(true);
     expect(isEphemeralTopicScope("chat:-100:7")).toBe(false);
+  });
+
+  it("cools down persistent non-429 create failures instead of hammering", async () => {
+    vi.useFakeTimers();
+    try {
+      mocked.routeTarget = { chatId: -100, threadId: 7, scopeKey: "chat:-100:7" };
+      mocked.bindingsBySession.set("parent-1", {
+        sessionId: "parent-1",
+        scopeKey: "chat:-100:7",
+        projectId: "p1",
+      });
+      const api = { createForumTopic: vi.fn().mockRejectedValue(new Error("BOT_MISSING_RIGHTS")) };
+
+      await expect(
+        ensureSubagentTopic(api as never, "parent-1", {
+          sessionId: "child-cool",
+          description: "Deep",
+          agent: "general",
+        }),
+      ).resolves.toBe(false);
+      expect(api.createForumTopic).toHaveBeenCalledTimes(1);
+
+      // Immediate retry stays quiet: the failure is not transient.
+      await expect(
+        ensureSubagentTopic(api as never, "parent-1", {
+          sessionId: "child-cool",
+          description: "Deep",
+          agent: "general",
+        }),
+      ).resolves.toBe(false);
+      expect(api.createForumTopic).toHaveBeenCalledTimes(1);
+
+      // After the cooldown the next emission tries again.
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1000);
+      await expect(
+        ensureSubagentTopic(api as never, "parent-1", {
+          sessionId: "child-cool",
+          description: "Deep",
+          agent: "general",
+        }),
+      ).resolves.toBe(false);
+      expect(api.createForumTopic).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -336,6 +336,35 @@ describe("tool/background-offer", () => {
       pendingTimers: 0,
       runningCalls: 0,
       sentOffers: 0,
+      offerRetries: 0,
     });
+  });
+
+  it("clears a settled call retry timer without touching other calls", async () => {
+    const api = makeApi();
+    api.sendMessage.mockRejectedValue({ parameters: { retry_after: 1 } });
+    noteRunning(api, { callId: "call-a", delayMs: 100 });
+    noteRunning(api, { callId: "call-b", delayMs: 100 });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(__backgroundOfferTestHooks.sizes().offerRetries).toBe(2);
+
+    // Settling call-a disarms its own retry; call-b still gets one shot.
+    noteTerminal(api, "call-a", "completed");
+    expect(__backgroundOfferTestHooks.sizes().offerRetries).toBe(1);
+  });
+
+  it("caps retry timers when many tools fail at once", async () => {
+    const api = makeApi();
+    api.sendMessage.mockRejectedValue({ parameters: { retry_after: 1 } });
+    for (let i = 0; i < 25; i += 1) {
+      noteRunning(api, { sessionId: `ses-storm-${i}`, callId: "call-1", delayMs: 100 });
+    }
+
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(45_000);
+    // 25 failures arm retries, but the storm cap holds the line.
+    expect(__backgroundOfferTestHooks.sizes().offerRetries).toBeLessThanOrEqual(20);
   });
 });

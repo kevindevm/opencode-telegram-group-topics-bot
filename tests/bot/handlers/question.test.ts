@@ -8,6 +8,13 @@ import {
   closeQuestionSettledOutside,
   isDuplicateQuestionDelivery,
   showCurrentQuestion,
+  scheduleQuestionPollRetry,
+  cancelPendingQuestionPollRetries,
+  cancelPendingQuestionPollRetriesExcept,
+  noteQuestionPollShown,
+  getShownQuestionPoll,
+  getQuestionPollEpoch,
+  __resetQuestionPollRetriesForTests,
 } from "../../../src/bot/handlers/question.js";
 import type { Question } from "../../../src/question/types.js";
 import { RateLimitExceededError } from "../../../src/bot/telegram-rate-limiter.js";
@@ -525,5 +532,111 @@ describe("bot/handlers/question 429 retries", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("fires one retry after 60s when the guard allows it", async () => {
+    vi.useFakeTimers();
+    try {
+      const reshow = vi.fn().mockResolvedValue(undefined);
+      scheduleQuestionPollRetry({
+        requestId: "req-retry-1",
+        scopeKey: "scope-retry",
+        sessionId: "ses-retry",
+        reshow,
+        shouldProceed: () => true,
+      });
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(reshow).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(reshow).toHaveBeenCalledTimes(1);
+      // No second attempt: the one-shot guard holds.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(reshow).toHaveBeenCalledTimes(1);
+    } finally {
+      __resetQuestionPollRetriesForTests();
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips the retry when the guard denies it", async () => {
+    vi.useFakeTimers();
+    try {
+      const reshow = vi.fn().mockResolvedValue(undefined);
+      scheduleQuestionPollRetry({
+        requestId: "req-retry-2",
+        scopeKey: "scope-retry",
+        sessionId: "ses-retry",
+        reshow,
+        shouldProceed: () => false,
+      });
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(reshow).not.toHaveBeenCalled();
+    } finally {
+      __resetQuestionPollRetriesForTests();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels pending retries for a scope", async () => {
+    vi.useFakeTimers();
+    try {
+      const reshow = vi.fn().mockResolvedValue(undefined);
+      scheduleQuestionPollRetry({
+        requestId: "req-retry-3",
+        scopeKey: "scope-cancel",
+        sessionId: "ses-cancel",
+        reshow,
+        shouldProceed: () => true,
+      });
+      cancelPendingQuestionPollRetries("scope-cancel");
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(reshow).not.toHaveBeenCalled();
+    } finally {
+      __resetQuestionPollRetriesForTests();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps its own retry on duplicate delivery but drops stale ones", async () => {
+    vi.useFakeTimers();
+    try {
+      const own = vi.fn().mockResolvedValue(undefined);
+      const stale = vi.fn().mockResolvedValue(undefined);
+      scheduleQuestionPollRetry({
+        requestId: "req-keep",
+        scopeKey: "scope-except",
+        sessionId: "ses-keep",
+        reshow: own,
+        shouldProceed: () => true,
+      });
+      scheduleQuestionPollRetry({
+        requestId: "req-stale",
+        scopeKey: "scope-except",
+        sessionId: "ses-stale",
+        reshow: stale,
+        shouldProceed: () => true,
+      });
+      cancelPendingQuestionPollRetriesExcept("scope-except", "req-keep");
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(own).toHaveBeenCalledTimes(1);
+      expect(stale).not.toHaveBeenCalled();
+    } finally {
+      __resetQuestionPollRetriesForTests();
+      vi.useRealTimers();
+    }
+  });
+
+  it("tracks the last shown poll per scope", () => {
+    noteQuestionPollShown("scope-shown", "req-a");
+    expect(getShownQuestionPoll("scope-shown")).toEqual({ requestId: "req-a", epoch: 1 });
+    noteQuestionPollShown("scope-shown", "req-b");
+    expect(getShownQuestionPoll("scope-shown")).toEqual({ requestId: "req-b", epoch: 2 });
+    expect(getShownQuestionPoll("scope-unknown")).toBeUndefined();
+    __resetQuestionPollRetriesForTests();
+    expect(getShownQuestionPoll("scope-shown")).toBeUndefined();
+    // Epoch restarts after reset.
+    noteQuestionPollShown("scope-shown", "req-c");
+    expect(getShownQuestionPoll("scope-shown")).toEqual({ requestId: "req-c", epoch: 1 });
+    __resetQuestionPollRetriesForTests();
   });
 });
