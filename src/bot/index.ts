@@ -880,6 +880,14 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
   onFinalDeliveryGiveUp: (sessionId) => {
     summaryAggregator.stopTypingIndicator(sessionId);
     assistantRunState.clearRun(sessionId, "final_delivery_gave_up");
+    // Same orphan as on commit: drop the last carrier instead of leaving
+    // a "keyboard updated" notice behind on a dead turn.
+    if (botInstance) {
+      const target = getTargetBySessionId(sessionId);
+      if (target && keyboardManager.isInitialized(target.scopeKey)) {
+        void keyboardManager.removeCarrier(target.chatId, target.scopeKey);
+      }
+    }
   },
   onFinalDeliveryNotice: async (sessionId) => {
     if (!botInstance) {

@@ -642,7 +642,7 @@ describe("bot/session-output-coordinator", () => {
     }
   });
 
-  it("drops a re-delivery of an already delivered completion in a later turn", async () => {
+  it("drops a re-delivery inside the dedup window, then lets it through", async () => {
     vi.useFakeTimers();
     try {
       const onFinalizeSession = vi.fn().mockResolvedValue(true);
@@ -674,16 +674,55 @@ describe("bot/session-output-coordinator", () => {
         onFinalizeSession.mock.calls.filter((call) => call[1] === "Panorama answer"),
       ).toHaveLength(1);
 
-      // A different answer still goes out, and the repeated one after it too.
+      // Past the window it is a legit repeat and goes out again.
+      await vi.advanceTimersByTimeAsync(61_000);
       coordinator.dispatch({
         kind: "assistant_complete",
         sessionId: "s1",
         messageId: "m3",
-        text: "Other answer",
+        text: "Panorama answer",
       });
       coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
       await vi.runAllTimersAsync();
-      expect(onFinalizeSession).toHaveBeenLastCalledWith("s1", "Other answer", true);
+      expect(
+        onFinalizeSession.mock.calls.filter((call) => call[1] === "Panorama answer"),
+      ).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("attaches the footer to the last actually delivered item", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi.fn().mockResolvedValue(true);
+      const coordinator = createCoordinator({ onFinalizeSession });
+
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m1",
+        text: "First",
+      });
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m2",
+        text: "Second",
+      });
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m3",
+        text: "First",
+      });
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+      await vi.runAllTimersAsync();
+
+      // The replayed tail is skipped; the footer lands on Second.
+      expect(onFinalizeSession).toHaveBeenCalledTimes(2);
+      expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "First", false);
+      expect(onFinalizeSession).toHaveBeenLastCalledWith("s1", "Second", true);
     } finally {
       vi.useRealTimers();
     }

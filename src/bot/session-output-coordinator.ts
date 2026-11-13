@@ -483,11 +483,12 @@ export class SessionOutputCoordinator {
    * Last text actually delivered per session. Reconnect replays and late
    * flushes can re-queue an already delivered turn after the queue was
    * committed, so neither the consecutive check nor the overflow marker
-   * can see it. Remembering one delivery per session closes that hole
-   * without ever suppressing an A,B,A sequence.
+   * can see it. Short window on purpose: replays cluster within seconds,
+   * while a legit repeated answer across turns must still go out (only a
+   * byte-identical repeat inside the window is dropped, loudly).
    */
   private readonly lastDeliveredBySession = new Map<string, { text: string; at: number }>();
-  private static readonly DELIVERY_DEDUP_WINDOW_MS = 10 * 60 * 1000;
+  private static readonly DELIVERY_DEDUP_WINDOW_MS = 60_000;
   /**
    * Wall-clock cap for consecutive rate limits: rounds vary wildly in
    * length (each already includes the queue's own backoff), so counting
@@ -581,30 +582,42 @@ export class SessionOutputCoordinator {
         return false;
       }
     } else {
-      for (let index = 0; index < snapshot.length; index++) {
+      // Drop replays of already delivered turns up front so the footer
+      // below attaches to the last text that actually goes out. The sim
+      // set covers repeats inside this same batch (nothing is noted yet
+      // when filtering); wasRecentlyDelivered covers previous rounds.
+      const seen = new Set<string>();
+      const toDeliver = snapshot.filter((item) => {
+        const itemText = item?.text ?? null;
+        if (!itemText) {
+          return true;
+        }
+        const key = itemText.replace(/^\[system notice: \d+\+? earlier updates dropped\] /, "");
+        if (seen.has(key) || this.wasRecentlyDelivered(sessionId, itemText)) {
+          logger.warn(`[Bot] Skipping re-delivery of already delivered completion for ${sessionId}`);
+          return false;
+        }
+        seen.add(key);
+        return true;
+      });
+      for (let index = 0; index < toDeliver.length; index++) {
         // Only the very last message of an idle-triggered round carries
         // any footer; earlier ones go out plain. Arrivals queued
         // mid-delivery mean this batch is not the last, so none of them
         // takes the footer.
         const arrivalsPending = (this.pendingAssistantCompletions.get(sessionId)?.length ?? 0) > 0;
         const isLast =
-          index === snapshot.length - 1 &&
+          index === toDeliver.length - 1 &&
           !arrivalsPending &&
           this.idleRequested.get(sessionId) === true;
-        const itemText = snapshot[index]?.text ?? null;
-        if (itemText && this.wasRecentlyDelivered(sessionId, itemText)) {
-          // Late flush of a turn that already went out (see track path):
-          // skip it instead of doubling the topic.
-          logger.warn(`[Bot] Skipping re-delivery of already delivered completion for ${sessionId}`);
-          continue;
-        }
+        const itemText = toDeliver[index]?.text ?? null;
         if (!(await deliverNext(itemText, isLast))) {
           if (!this.pendingFinalDeliveries.has(sessionId)) {
             return false;
           }
           // Keep the undelivered tail ahead of any arrivals from the retry
           // window so turn order is preserved.
-          const remaining = snapshot.slice(index).filter((item) => item.text.trim().length > 0);
+          const remaining = toDeliver.slice(index).filter((item) => item.text.trim().length > 0);
           const arrivals = this.pendingAssistantCompletions.get(sessionId) ?? [];
           this.pendingAssistantCompletions.set(sessionId, [...remaining, ...arrivals]);
           return false;
@@ -630,12 +643,18 @@ export class SessionOutputCoordinator {
   }
 
   private noteDelivered(sessionId: string, text: string): void {
-    this.lastDeliveredBySession.set(sessionId, { text, at: Date.now() });
+    // Store the raw text: the overflow gap marker is presentation, and a
+    // replay may arrive with or without it.
+    this.lastDeliveredBySession.set(sessionId, {
+      text: text.replace(/^\[system notice: \d+\+? earlier updates dropped\] /, ""),
+      at: Date.now(),
+    });
   }
 
   private wasRecentlyDelivered(sessionId: string, text: string): boolean {
+    const normalized = text.replace(/^\[system notice: \d+\+? earlier updates dropped\] /, "");
     const last = this.lastDeliveredBySession.get(sessionId);
-    if (!last || last.text !== text) {
+    if (!last || last.text !== normalized) {
       return false;
     }
     if (Date.now() - last.at >= SessionOutputCoordinator.DELIVERY_DEDUP_WINDOW_MS) {

@@ -591,9 +591,13 @@ export class LiveStream {
     await this.enqueueTask(sessionId, async () => {
       await this.flushSessionState(sessionId);
 
+      // Activity mode keeps the lane as visible history: previous carriers
+      // stay, so there is nothing to clean up here.
+      const keepHistory = this.provisionalMode === "activity";
+
       const latestState = this.states.get(sessionId);
       if (!latestState || latestState.messageId === null) {
-        if (latestState) {
+        if (latestState && !keepHistory) {
           for (const archivedMessageId of latestState.assistant.archivedMessageIds) {
             await deleteMessage(archivedMessageId);
           }
@@ -602,10 +606,12 @@ export class LiveStream {
         return;
       }
 
-      for (const archivedMessageId of latestState.assistant.archivedMessageIds) {
-        await deleteMessage(archivedMessageId);
+      if (!keepHistory) {
+        for (const archivedMessageId of latestState.assistant.archivedMessageIds) {
+          await deleteMessage(archivedMessageId);
+        }
+        latestState.assistant.archivedMessageIds = [];
       }
-      latestState.assistant.archivedMessageIds = [];
 
       const hasAssistantEntry = latestState.entries.some((entry) => entry.kind === "assistant");
       if (!hasAssistantEntry) {
