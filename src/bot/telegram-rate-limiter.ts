@@ -203,24 +203,25 @@ function collectRateLimitText(error: unknown): string {
 }
 
 /**
- * Shared 429 detector: accepts numeric retry_after, string numbers, and
- * "retry after N" / "retry_after N" inside error description strings.
- * A bare 429 (error_code only, no timing info) still backs off with a
- * conservative default instead of failing the call as non-retryable.
+ * Shared 429 detector: accepts numeric retry_after, string numbers,
+ * "retry after N" / "retry_after N" inside error description strings, and
+ * camelCase / millisecond variants some clients emit. A bare 429
+ * (error_code only, no timing info) still backs off with a conservative
+ * default instead of failing the call as non-retryable.
  */
 export function parseRetryAfterMs(error: unknown): number | null {
   if (error && typeof error === "object") {
     const params = Reflect.get(error, "parameters");
     if (params && typeof params === "object") {
-      const retryAfter: unknown = Reflect.get(params, "retry_after");
-      let seconds = NaN;
-      if (typeof retryAfter === "number") {
-        seconds = retryAfter;
-      } else if (typeof retryAfter === "string") {
-        seconds = Number(retryAfter);
-      }
-      if (Number.isFinite(seconds) && seconds > 0) {
+      const seconds = readRetryAfterSeconds(params, "retry_after")
+        ?? readRetryAfterSeconds(params, "retryAfter");
+      if (seconds !== null) {
         return seconds * 1000;
+      }
+      const ms = readRetryAfterSeconds(params, "retry_after_ms")
+        ?? readRetryAfterSeconds(params, "retryAfterMs");
+      if (ms !== null) {
+        return ms;
       }
     }
   }
@@ -233,16 +234,20 @@ export function parseRetryAfterMs(error: unknown): number | null {
     }
   }
 
-  if (
-    error &&
-    typeof error === "object" &&
-    Reflect.get(error, "error_code") === 429 &&
-    /too many requests/i.test(collectRateLimitText(error))
-  ) {
+  // error_code 429 alone is sufficient evidence of flood control, even with
+  // no description or parameters attached.
+  if (error && typeof error === "object" && Reflect.get(error, "error_code") === 429) {
     return DEFAULT_UNKNOWN_429_DELAY_MS;
   }
 
   return null;
+}
+
+function readRetryAfterSeconds(params: object, key: string): number | null {
+  const value: unknown = Reflect.get(params, key);
+  const seconds =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
 function retryDelayMs(retryAfterMs: number): number {
@@ -400,9 +405,17 @@ export class TelegramRateLimiter {
     // User traffic is never dropped silently: an unbounded user queue means
     // a runaway producer, so cap it too and fail loudly. Rejected callers
     // see RateLimitExceededError and follow the transient retry paths.
+    // Newest-first: in-order delivery matters, so the oldest queued work
+    // (already awaited the longest) is preserved over the latest arrival.
     let droppedUser = 0;
     while (this.queue.length > MAX_USER_QUEUE_JOBS) {
-      const victimIndex = this.queue.findIndex((job) => job.kind === "user");
+      let victimIndex = -1;
+      for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+        if (this.queue[index]?.kind === "user") {
+          victimIndex = index;
+          break;
+        }
+      }
       if (victimIndex < 0) {
         break;
       }

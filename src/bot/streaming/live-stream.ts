@@ -671,6 +671,7 @@ export class LiveStream {
     await this.enqueueTask(sessionId, async () => undefined);
     this.states.delete(sessionId);
     this.retryFlushAttempts.delete(sessionId);
+    this.unbudgetedRetryStreaks.delete(sessionId);
   }
 
   async clearAll(reason: string): Promise<void> {
@@ -685,6 +686,7 @@ export class LiveStream {
         this.clearTimer(sessionId);
         this.sessionTasks.delete(sessionId);
         this.retryFlushAttempts.delete(sessionId);
+        this.unbudgetedRetryStreaks.delete(sessionId);
         this.states.delete(sessionId);
       }
     }
@@ -828,6 +830,7 @@ export class LiveStream {
 
   private resetRetryFlushAttempts(sessionId: string): void {
     this.retryFlushAttempts.delete(sessionId);
+    this.unbudgetedRetryStreaks.delete(sessionId);
   }
 
   /**
@@ -892,11 +895,28 @@ export class LiveStream {
   /**
    * The queue already spent its own 429 budget before surfacing
    * RateLimitExceededError, so retrying here must not consume the local
-   * budget too: wait out the storm without counting down.
+   * budget too. Still bounded: an endless ban must not retain the timer
+   * and the entries forever, so unbudgeted rounds stop after their own cap
+   * and the next mutation revives the stream like any other stall.
    */
+  private static readonly MAX_UNBUDGETED_RETRIES = 40;
+  private readonly unbudgetedRetryStreaks = new Map<string, number>();
+
   private scheduleUnbudgetedRetry(sessionId: string, delayMs: number): void {
+    const streak = (this.unbudgetedRetryStreaks.get(sessionId) ?? 0) + 1;
+    this.unbudgetedRetryStreaks.set(sessionId, streak);
+    if (streak > LiveStream.MAX_UNBUDGETED_RETRIES) {
+      logger.warn("[LiveStream] Storm retries exhausted; keeping entries until next mutation", {
+        sessionId,
+      });
+      return;
+    }
     this.clearTimer(sessionId);
     this.armRetryTimer(sessionId, delayMs);
+  }
+
+  private resetUnbudgetedRetries(sessionId: string): void {
+    this.unbudgetedRetryStreaks.delete(sessionId);
   }
 
   private armRetryTimer(sessionId: string, delayMs: number): void {

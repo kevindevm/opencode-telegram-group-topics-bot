@@ -146,12 +146,14 @@ export async function handleCompactConfirm(ctx: Context): Promise<boolean> {
       getThreadSendOptions(scope?.threadId ?? null),
     );
 
-    // Show typing indicator
-    await ctx.api.sendChatAction(
-      ctx.chat!.id,
-      TELEGRAM_CHAT_ACTION.TYPING,
-      getChatActionThreadOptions(scope?.threadId ?? null),
-    );
+    // Show typing indicator (best effort: cosmetic, never fail the command).
+    await ctx.api
+      .sendChatAction(
+        ctx.chat!.id,
+        TELEGRAM_CHAT_ACTION.TYPING,
+        getChatActionThreadOptions(scope?.threadId ?? null),
+      )
+      .catch(() => {});
 
     const storedModel = getStoredModel(scopeKey);
 

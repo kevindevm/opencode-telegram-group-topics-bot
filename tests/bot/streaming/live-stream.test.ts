@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LiveStream } from "../../../src/bot/streaming/live-stream.js";
+import { RateLimitExceededError } from "../../../src/bot/telegram-rate-limiter.js";
 
 describe("bot/streaming/live-stream", () => {
   afterEach(() => {
@@ -756,6 +757,34 @@ describe("bot/streaming/live-stream", () => {
       releaseSend?.();
       await vi.advanceTimersByTimeAsync(0);
       expect(internals.states.has("s1")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("caps unbudgeted queue-exhausted retries and revives on next mutation", async () => {
+    vi.useFakeTimers();
+    try {
+      const sendText = vi.fn().mockRejectedValue(new RateLimitExceededError("sendMessage"));
+      const editText = vi.fn().mockResolvedValue(undefined);
+      const stream = new LiveStream({ sendText, editText, throttleMs: 50 });
+
+      await stream.updateAssistant("s1", "m1", "Storm text");
+      for (let round = 0; round < 45; round++) {
+        await vi.advanceTimersByTimeAsync(15_000);
+      }
+      const callsAfterCap = sendText.mock.calls.length;
+      expect(callsAfterCap).toBeGreaterThan(0);
+
+      // Capped: no more sends despite the storm continuing.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(sendText.mock.calls.length).toBe(callsAfterCap);
+
+      // Next mutation revives the stream.
+      sendText.mockResolvedValue(999);
+      await stream.updateAssistant("s1", "m1", "Storm text continued");
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sendText.mock.calls.length).toBeGreaterThan(callsAfterCap);
     } finally {
       vi.useRealTimers();
     }

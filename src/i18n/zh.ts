@@ -394,6 +394,8 @@ export const zh: I18nDictionary = {
   "question.settled_outside.cancelled": "❌ Cancelled outside Telegram",
   "question.answer_already_received": "已收到答案，请稍候...",
   "question.completed_no_answers": "✅ 投票完成（无答案）",
+  "question.poll_failed_notice":
+    "⚠️ The agent asked a question but the poll could not be delivered (rate limits). Answer from your other client or ask it to repeat the question.",
   "question.no_active_project": "❌ 没有活动项目",
   "question.no_active_request": "❌ 没有活动请求",
   "question.send_answers_error": "❌ 向代理发送答案失败",

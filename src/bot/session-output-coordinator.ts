@@ -504,6 +504,10 @@ export class SessionOutputCoordinator {
         this.scheduleFinalDelivery(sessionId);
         return false;
       }
+      // A success breaks any consecutive-429 streak inside the same round:
+      // without this reset a later 429 would inherit a stale start time.
+      this.rateLimitStreaks.delete(sessionId);
+      this.rateLimitStreakStartedAt.delete(sessionId);
       return true;
     };
 
@@ -558,6 +562,12 @@ export class SessionOutputCoordinator {
    * a loud error instead of looping silently every settle interval.
    */
   private noteFinalDeliveryAttempt(sessionId: string, error?: unknown): boolean {
+    // A non-429 outcome breaks a consecutive-429 streak: without this reset
+    // a stale start time would make the next storm give up too early.
+    if (!(error instanceof RateLimitExceededError)) {
+      this.rateLimitStreaks.delete(sessionId);
+      this.rateLimitStreakStartedAt.delete(sessionId);
+    }
     const attempts = (this.finalDeliveryAttempts.get(sessionId) ?? 0) + 1;
     this.finalDeliveryAttempts.set(sessionId, attempts);
     if (attempts < SessionOutputCoordinator.MAX_FINAL_DELIVERY_ATTEMPTS) {

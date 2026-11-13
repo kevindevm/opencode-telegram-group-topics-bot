@@ -10,6 +10,10 @@ import { formatTopicTitle } from "../../topic/title-format.js";
 import {
   updateTopicBindingNameBySessionId,
 } from "../../topic/manager.js";
+import {
+  parseRetryAfterMs,
+  RateLimitExceededError,
+} from "../telegram-rate-limiter.js";
 import type { SubagentInfo } from "../../summary/aggregator.js";
 import { inheritDisplayOverrides } from "../../display/manager.js";
 import { logger } from "../../utils/logger.js";
@@ -124,7 +128,26 @@ async function createSubagentTopic(
     );
     return true;
   } catch (error) {
-    logger.error("[SubagentTopic] Failed to create subagent topic:", error);
+    // A 429 here gets one delayed retry: the transcript would otherwise be
+    // lost silently if this was the subagent's only emission.
+    if (error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null) {
+      if (!pendingFinalizeRetries.has(childSessionId)) {
+        pendingFinalizeRetries.add(childSessionId);
+        setTimeout(() => {
+          pendingFinalizeRetries.delete(childSessionId);
+          if (!getTopicBindingBySessionId(childSessionId)) {
+            void ensureSubagentTopic(api, parentSessionId, info).catch((retryError) => {
+              logger.warn("[SubagentTopic] Scheduled create retry failed:", {
+                childSessionId,
+                retryError,
+              });
+            });
+          }
+        }, FINALIZE_RETRY_DELAY_MS).unref?.();
+      }
+    } else {
+      logger.error("[SubagentTopic] Failed to create subagent topic:", error);
+    }
     return false;
   }
 }
@@ -146,20 +169,41 @@ export async function finalizeSubagentTopic(
 
   const icon = status === "completed" ? SUBAGENT_TOPIC_DONE_ICON : SUBAGENT_TOPIC_FAILED_ICON;
   const currentName = binding.topicName ?? "";
-  // Already finalized with this status: skip API calls entirely so repeated
-  // terminal emissions don't rename/close in a loop.
+  // Already finalized with this status: the rename landed on a previous
+  // attempt, but the close may not have (e.g. a 429 after the edit). Close
+  // is idempotent, so confirm it instead of assuming it. A 429 here gets
+  // one delayed retry since terminal emissions may never repeat.
   if (currentName.startsWith(`${icon} `)) {
+    try {
+      await api.closeForumTopic(binding.chatId, binding.threadId);
+    } catch (error) {
+      if (isAlreadyFinalizedError(error)) {
+        return true;
+      }
+      if (error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null) {
+        logger.warn("[SubagentTopic] Transcript close rate limited, retrying once later:", {
+          childSessionId,
+        });
+        scheduleFinalizeRetry(api, childSessionId, status, description);
+        return false;
+      }
+      logger.error("[SubagentTopic] Failed to confirm transcript topic close:", error);
+    }
     return true;
   }
   const baseName = currentName.replace(/^[🧩✅❌]\s*/u, "").trim() || description.trim();
   const nextName = formatTopicTitle(`${icon} ${baseName}`);
 
   try {
+    // Close first: closing is idempotent (a second close reports the topic
+    // as already closed, which counts as finalized), while a rename applied
+    // without the close would trip the icon guard below and skip the close
+    // forever on the next terminal emission.
+    await api.closeForumTopic(binding.chatId, binding.threadId);
     if (nextName && nextName !== currentName) {
       await api.editForumTopic(binding.chatId, binding.threadId, { name: nextName });
       updateTopicBindingNameBySessionId(childSessionId, nextName);
     }
-    await api.closeForumTopic(binding.chatId, binding.threadId);
     logger.info(
       `[SubagentTopic] Closed transcript topic for subagent ${childSessionId}: thread=${binding.threadId}`,
     );
@@ -169,9 +213,52 @@ export async function finalizeSubagentTopic(
       updateTopicBindingNameBySessionId(childSessionId, nextName);
       return true;
     }
-    logger.error("[SubagentTopic] Failed to finalize subagent topic:", error);
+    if (error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null) {
+      logger.warn("[SubagentTopic] Transcript finalize rate limited, retrying once later:", {
+        childSessionId,
+      });
+      scheduleFinalizeRetry(api, childSessionId, status, description);
+    } else {
+      logger.error("[SubagentTopic] Failed to finalize subagent topic:", error);
+    }
     return false;
   }
+}
+
+/**
+ * One-shot delayed retry for 429-killed finalizes. Terminal emissions may
+ * never repeat, so without this a storm leaves the transcript open (and
+ * editable) forever. Retried once: still failing means waiting for the next
+ * emission, same as before.
+ */
+const FINALIZE_RETRY_DELAY_MS = 60_000;
+const pendingFinalizeRetries = new Set<string>();
+
+function scheduleFinalizeRetry(
+  api: ForumTopicApi,
+  childSessionId: string,
+  status: "completed" | "error",
+  description: string,
+): void {
+  if (pendingFinalizeRetries.has(childSessionId)) {
+    return;
+  }
+  pendingFinalizeRetries.add(childSessionId);
+  if (pendingFinalizeRetries.size > 200) {
+    const oldest = pendingFinalizeRetries.values().next();
+    if (!oldest.done) {
+      pendingFinalizeRetries.delete(oldest.value);
+    }
+  }
+  setTimeout(() => {
+    pendingFinalizeRetries.delete(childSessionId);
+    void finalizeSubagentTopic(api, childSessionId, status, description).catch((retryError) => {
+      logger.warn("[SubagentTopic] Scheduled finalize retry failed:", {
+        childSessionId,
+        retryError,
+      });
+    });
+  }, FINALIZE_RETRY_DELAY_MS).unref?.();
 }
 
 /** Transcript-only topics reject user prompts; chat stays in the parent. */

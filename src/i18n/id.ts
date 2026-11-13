@@ -379,6 +379,8 @@ export const id: I18nDictionary = {
   "question.settled_outside.cancelled": "❌ Cancelled outside Telegram",
   "question.answer_already_received": "Jawaban sudah diterima, tunggu sebentar...",
   "question.completed_no_answers": "✅ Pertanyaan selesai (tanpa jawaban)",
+  "question.poll_failed_notice":
+    "⚠️ The agent asked a question but the poll could not be delivered (rate limits). Answer from your other client or ask it to repeat the question.",
   "question.no_active_project": "❌ No active project",
   "question.no_active_request": "❌ No active request",
   "question.send_answers_error": "❌ Failed to send answers to agent",

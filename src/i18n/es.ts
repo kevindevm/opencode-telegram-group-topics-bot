@@ -461,6 +461,8 @@ export const es: I18nDictionary = {
   "question.settled_outside.cancelled": "❌ Cancelada fuera de Telegram",
   "question.answer_already_received": "Respuesta ya recibida, espera...",
   "question.completed_no_answers": "✅ Encuesta completada (sin respuestas)",
+  "question.poll_failed_notice":
+    "⚠️ El agente hizo una pregunta pero la encuesta no se pudo entregar (límite de frecuencia). Respondé desde tu otro cliente o pedile que repita la pregunta.",
   "question.no_active_project": "❌ No hay un proyecto activo",
   "question.no_active_request": "❌ No hay una solicitud activa",
   "question.send_answers_error": "❌ No se pudieron enviar las respuestas al agente",

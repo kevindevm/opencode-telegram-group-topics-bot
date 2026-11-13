@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_UNKNOWN_429_DELAY_MS,
   MAX_QUEUE_JOBS,
   RateLimitExceededError,
   TelegramRateLimiter,
@@ -561,6 +562,20 @@ describe("bot/telegram-rate-limiter hardening", () => {
     expect(parseRetryAfterMs({ parameters: { retry_after: 0 } })).toBeNull();
     expect(parseRetryAfterMs({ parameters: { retry_after: -2 } })).toBeNull();
     expect(parseRetryAfterMs(null)).toBeNull();
+  });
+
+  it("accepts camelCase, millisecond, and bare 429 shapes", () => {
+    expect(parseRetryAfterMs({ parameters: { retryAfter: 4 } })).toBe(4000);
+    expect(parseRetryAfterMs({ parameters: { retry_after_ms: 2500 } })).toBe(2500);
+    expect(parseRetryAfterMs({ parameters: { retryAfterMs: "1500" } })).toBe(1500);
+    expect(parseRetryAfterMs(new Error("Too Many Requests: retry_after:5"))).toBe(5000);
+    expect(parseRetryAfterMs({ error_code: 429, description: "Too Many Requests" })).toBe(
+      DEFAULT_UNKNOWN_429_DELAY_MS,
+    );
+    expect(parseRetryAfterMs({ error_code: 429 })).toBe(DEFAULT_UNKNOWN_429_DELAY_MS);
+    expect(parseRetryAfterMs({ error_code: 400 })).toBeNull();
+    expect(parseRetryAfterMs({ error_code: 429 })).toBe(DEFAULT_UNKNOWN_429_DELAY_MS);
+    expect(parseRetryAfterMs({ error_code: 400, description: "Bad Request" })).toBeNull();
   });
 
   it("gives up the queued job after the initial try plus MAX_429_ATTEMPTS retries", async () => {

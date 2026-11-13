@@ -210,7 +210,7 @@ describe("bot/handlers/subagent-topics", () => {
     expect(api.createForumTopic).toHaveBeenCalledTimes(1);
   });
 
-  it("skips api calls when the transcript is already finalized", async () => {
+  it("confirms the close without renaming when the transcript is already finalized", async () => {
     mocked.bindingsBySession.set("child-1", {
       sessionId: "child-1",
       chatId: -100,
@@ -226,8 +226,11 @@ describe("bot/handlers/subagent-topics", () => {
     await expect(
       finalizeSubagentTopic(api as never, "child-1", "completed", "Inspect sync"),
     ).resolves.toBe(true);
+    // The terminal name is already there, so no rename; the close is
+    // re-confirmed because close is idempotent and the earlier close may
+    // never have landed (e.g. a 429 after the edit).
     expect(api.editForumTopic).not.toHaveBeenCalled();
-    expect(api.closeForumTopic).not.toHaveBeenCalled();
+    expect(api.closeForumTopic).toHaveBeenCalledWith(-100, 10);
   });
 
   it("detects ephemeral scopes", () => {

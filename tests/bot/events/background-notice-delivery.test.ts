@@ -212,4 +212,32 @@ describe("bot/events/background-notice-delivery", () => {
 
     expect(mocked.sendTextMock).toHaveBeenCalledTimes(1);
   });
+
+  it("suppresses repeats briefly after a failed send instead of the full window", async () => {
+    vi.useFakeTimers();
+    try {
+      const failingSend = vi.fn().mockRejectedValueOnce(new Error("telegram down"));
+      const send = createBackgroundNoticeDelivery(
+        {
+          getDestination: () => ({ api: {} as never, chatId: -1001, threadId: 42 }),
+        },
+        { sendText: failingSend } as unknown as TelegramEventDelivery,
+      );
+
+      await send({ kind: "assistant_response", sessionId: "ses-fail" });
+      expect(failingSend).toHaveBeenCalledTimes(1);
+
+      // A retry right away is swallowed: no hammering during the storm.
+      await send({ kind: "assistant_response", sessionId: "ses-fail" });
+      expect(failingSend).toHaveBeenCalledTimes(1);
+
+      // But the suppression is short: after a minute the notice goes out again.
+      failingSend.mockRejectedValueOnce(new Error("telegram down"));
+      await vi.advanceTimersByTimeAsync(61_000);
+      await send({ kind: "assistant_response", sessionId: "ses-fail" });
+      expect(failingSend).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

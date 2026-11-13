@@ -736,6 +736,153 @@ async function finalizeSessionDelivery(
   return deliveryComplete;
 }
 
+/**
+ * Shows a question poll with one best-effort retry. A poll killed by a
+ * 429 leaves the agent blocked with no way to answer, so one delayed
+ * attempt runs after the storm window instead of dropping it silently.
+ */
+const pendingQuestionPollRetries = new Map<string, { timer: ReturnType<typeof setTimeout>; scopeKey: string }>();
+const retriedQuestionPolls = new Set<string>();
+
+function cancelPendingQuestionPollRetries(scopeKey?: string, requestId?: string): void {
+  for (const [id, pending] of Array.from(pendingQuestionPollRetries)) {
+    if ((scopeKey !== undefined && pending.scopeKey !== scopeKey) || (requestId !== undefined && id !== requestId)) {
+      continue;
+    }
+    clearTimeout(pending.timer);
+    pendingQuestionPollRetries.delete(id);
+  }
+}
+
+function scheduleQuestionPollRetry(input: {
+  api: Bot<Context>["api"];
+  sessionId: string;
+  questions: import("../question/types.js").Question[];
+  requestId: string;
+  chatId: number;
+  scopeKey: string;
+  threadId: number | null;
+}): void {
+  if (retriedQuestionPolls.has(input.requestId) || pendingQuestionPollRetries.has(input.requestId)) {
+    return;
+  }
+  retriedQuestionPolls.add(input.requestId);
+  // Bounded: request ids are unique per question event, but never let the
+  // set grow without limit in a pathological storm.
+  if (retriedQuestionPolls.size > 500) {
+    const oldest = retriedQuestionPolls.values().next();
+    if (!oldest.done) {
+      retriedQuestionPolls.delete(oldest.value);
+    }
+  }
+  const timer = setTimeout(() => {
+    pendingQuestionPollRetries.delete(input.requestId);
+    // Never resurrect over a healthy poll: a newer question, an answer
+    // from elsewhere, or a reused scope must win over this stale retry.
+    // Settled and active both mean do not touch.
+    if (
+      questionManager.wasSettledRecently(input.requestId) ||
+      questionManager.isActive(input.scopeKey) ||
+      (getTopicBindingBySessionId(input.sessionId)?.scopeKey ?? null) !== input.scopeKey
+    ) {
+      return;
+    }
+    void showQuestionPollWithRetry(input).catch((retryError: unknown) => {
+      logger.error("[Bot] Scheduled question poll retry failed:", {
+        sessionId: input.sessionId,
+        requestId: input.requestId,
+        retryError,
+      });
+    });
+  }, 60_000);
+  pendingQuestionPollRetries.set(input.requestId, { timer, scopeKey: input.scopeKey });
+}
+
+async function showQuestionPollWithRetry(input: {
+  api: Bot<Context>["api"];
+  sessionId: string;
+  questions: import("../question/types.js").Question[];
+  requestId: string;
+}): Promise<void> {
+  const { sessionId, questions, requestId } = input;
+  const activeBot = botInstance;
+  if (!activeBot) {
+    logger.error("Bot or chat ID not available for showing questions");
+    return;
+  }
+
+  const target = getTargetBySessionId(sessionId);
+  if (!target) {
+    return;
+  }
+
+  if (isDuplicateQuestionDelivery(target.scopeKey, requestId)) {
+    logger.debug(`[Bot] Ignoring duplicate question delivery: requestID=${requestId}`);
+    return;
+  }
+
+  // A fresh poll supersedes any pending retry for this scope: the retry
+  // targets a stale turn and must never clobber the live one.
+  cancelPendingQuestionPollRetries(target.scopeKey);
+
+  await liveStream.sealCurrentMessage(sessionId, true);
+
+if (questionManager.isActive(target.scopeKey)) {
+        logger.warn("[Bot] Replacing active poll with a new one");
+
+        const previousMessageIds = questionManager.getMessageIds(target.scopeKey);
+        for (const messageId of previousMessageIds) {
+          await activeBot.api.deleteMessage(target.chatId, messageId).catch(() => {});
+        }
+
+        clearAllInteractionState(
+          INTERACTION_CLEAR_REASON.QUESTION_REPLACED_BY_NEW_POLL,
+          target.scopeKey,
+        );
+      }
+
+      logger.info(
+        `[Bot] Received ${questions.length} questions from agent, requestID=${requestId}`,
+      );
+      questionManager.startQuestions(questions, requestId, target.scopeKey);
+      try {
+        await showCurrentQuestion(activeBot.api, target.chatId, target.scopeKey, target.threadId);
+      } catch (error) {
+        logger.error("[Bot] Failed to show question poll:", {
+          sessionId,
+          requestId,
+          error,
+        });
+        // The poll never reached Telegram: drop the orphaned local state so
+        // a later question starts clean instead of stacking on a ghost poll.
+        questionManager.clear(target.scopeKey);
+        summaryAggregator.stopTypingIndicator(sessionId);
+        // The agent is blocked waiting; without a poll the user never
+        // knows. Best effort: a one-line pointer, then release the error
+        // so the coordinator logs it like any other delivery failure.
+        await activeBot.api
+          .sendMessage(target.chatId, t("question.poll_failed_notice"), {
+            ...getThreadSendOptions(target.threadId),
+          })
+          .catch(() => {});
+        // Only 429s earn a retry: permanent failures would just fail again.
+        // isRetry callers never re-arm (single attempt by design).
+        const rateLimited = error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null;
+        if (rateLimited) {
+          scheduleQuestionPollRetry({
+            api: activeBot.api,
+            sessionId,
+            requestId,
+            questions,
+            chatId: target.chatId,
+            scopeKey: target.scopeKey,
+            threadId: target.threadId,
+          });
+        }
+        throw error;
+      }
+}
+
 const sessionOutputCoordinator = new SessionOutputCoordinator({
   settleMs: FINAL_DELIVERY_SETTLE_MS,
   onFinalizeSession: finalizeSessionDelivery,
@@ -745,6 +892,7 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
     await dispatchNextQueuedPrompt(sessionId);
   },
   onFinalDeliveryGiveUp: (sessionId) => {
+    summaryAggregator.stopTypingIndicator(sessionId);
     assistantRunState.clearRun(sessionId, "final_delivery_gave_up");
   },
   onFinalDeliveryNotice: async (sessionId) => {
@@ -915,37 +1063,12 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
         return;
       }
 
-      const target = getTargetBySessionId(sessionId);
-      if (!target) {
-        return;
-      }
-
-      if (isDuplicateQuestionDelivery(target.scopeKey, requestId)) {
-        logger.debug(`[Bot] Ignoring duplicate question delivery: requestID=${requestId}`);
-        return;
-      }
-
-      await liveStream.sealCurrentMessage(sessionId, true);
-
-      if (questionManager.isActive(target.scopeKey)) {
-        logger.warn("[Bot] Replacing active poll with a new one");
-
-        const previousMessageIds = questionManager.getMessageIds(target.scopeKey);
-        for (const messageId of previousMessageIds) {
-          await botInstance.api.deleteMessage(target.chatId, messageId).catch(() => {});
-        }
-
-        clearAllInteractionState(
-          INTERACTION_CLEAR_REASON.QUESTION_REPLACED_BY_NEW_POLL,
-          target.scopeKey,
-        );
-      }
-
-      logger.info(
-        `[Bot] Received ${questions.length} questions from agent, requestID=${requestId}`,
-      );
-      questionManager.startQuestions(questions, requestId, target.scopeKey);
-      await showCurrentQuestion(botInstance.api, target.chatId, target.scopeKey, target.threadId);
+      await showQuestionPollWithRetry({
+        api: botInstance.api,
+        sessionId,
+        questions,
+        requestId,
+      });
     },
     onPermission: async ({ sessionId, request }) => {
       if (!botInstance) {
@@ -1036,13 +1159,17 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
         ? "bot.session_error_invalid_request"
         : "bot.session_error";
 
-      await botInstance.api
-        .sendMessage(target.chatId, t(templateKey, { message: truncatedMessage }), {
+      const activeBot = botInstance;
+      if (!activeBot) {
+        return;
+      }
+      await runWithRateLimitRetries(`session-error:${sessionId}`, () =>
+        activeBot.api.sendMessage(target.chatId, t(templateKey, { message: truncatedMessage }), {
           ...getThreadSendOptions(target.threadId),
-        })
-        .catch((err) => {
-          logger.error("[Bot] Failed to send session.error message:", err);
-        });
+        }),
+      ).catch((err) => {
+        logger.error("[Bot] Failed to send session.error message:", err);
+      });
     },
     onSessionRetry: async ({ sessionId, retryInfo }) => {
       if (!botInstance) {
@@ -1829,10 +1956,20 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
         });
       }
 
+      // The failed tool will never be answered: mark settled so a pending
+      // one-shot retry does not resurrect a ghost poll, drop local state,
+      // and cancel the retry timer for this scope.
+      const requestId = questionManager.getRequestID(binding.scopeKey);
+      if (requestId) {
+        questionManager.markSettled(requestId);
+      }
+      questionManager.clear(binding.scopeKey);
+      cancelPendingQuestionPollRetries(binding.scopeKey);
       clearAllInteractionState(INTERACTION_CLEAR_REASON.QUESTION_ERROR, binding.scopeKey);
     }
 
     clearAllInteractionState(INTERACTION_CLEAR_REASON.QUESTION_ERROR, GLOBAL_SCOPE_KEY);
+    cancelPendingQuestionPollRetries(GLOBAL_SCOPE_KEY);
   });
 
   summaryAggregator.setOnPermission((request) => {
@@ -1988,16 +2125,19 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
         const day = todayKey();
         const dayTotal = addDailyCost(day, tokens.cost);
         if (shouldAlertBudget(day, dayTotal, config.cost.budgetAlertUsd)) {
-          await botInstance?.api
-            .sendMessage(
-              target.chatId,
-              t("cost.budget_alert", {
-                today: formatUsd(dayTotal),
-                budget: formatUsd(config.cost.budgetAlertUsd),
-              }),
-              getThreadSendOptions(target.threadId),
-            )
-            .catch(() => {});
+          const activeBot = botInstance;
+          if (activeBot) {
+            await runWithRateLimitRetries(`cost-budget-alert:${sessionId}`, () =>
+              activeBot.api.sendMessage(
+                target.chatId,
+                t("cost.budget_alert", {
+                  today: formatUsd(dayTotal),
+                  budget: formatUsd(config.cost.budgetAlertUsd),
+                }),
+                getThreadSendOptions(target.threadId),
+              ),
+            ).catch(() => {});
+          }
         }
       }
 
@@ -2063,6 +2203,10 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
       await pinnedMessageManager.flush(target.scopeKey);
 
       if (consumePendingCompactionNotice(sessionId)) {
+        const activeBot = botInstance;
+        if (!activeBot) {
+          return;
+        }
         const contextInfo = contextStateManager.get(target.scopeKey);
         const keyboard = keyboardManager.isInitialized(target.scopeKey)
           ? keyboardManager.getKeyboard(target.scopeKey)
@@ -2071,10 +2215,12 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
           ? t("context.after_compaction", { context: formatContextForButton(contextInfo) })
           : t("context.success");
 
-        await botInstance?.api.sendMessage(target.chatId, contextText, {
-          ...(keyboard ? { reply_markup: keyboard } : {}),
-          ...getThreadSendOptions(target.threadId),
-        });
+        await runWithRateLimitRetries(`context-after-compaction:${sessionId}`, () =>
+          activeBot.api.sendMessage(target.chatId, contextText, {
+            ...(keyboard ? { reply_markup: keyboard } : {}),
+            ...getThreadSendOptions(target.threadId),
+          }),
+        );
       }
     } catch (err) {
       logger.error("[Bot] Error reloading context after compaction:", err);

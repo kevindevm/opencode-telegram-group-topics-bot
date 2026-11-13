@@ -2,7 +2,13 @@ import type { Bot, Context } from "grammy";
 import { config } from "../config.js";
 import { getThreadSendOptions } from "../bot/scope.js";
 import { sendBotText } from "../bot/utils/telegram-text.js";
-import { runWithRateLimitRetries } from "../bot/telegram-rate-limiter.js";
+import {
+  MAX_429_ATTEMPTS,
+  parseRetryAfterMs,
+  RateLimitExceededError,
+  runWithRateLimitRetries,
+} from "../bot/telegram-rate-limiter.js";
+import { t } from "../i18n/index.js";
 import { logger } from "../utils/logger.js";
 import { executeScheduledTask } from "./executor.js";
 import {
@@ -310,7 +316,12 @@ function buildErrorMessage(task: ScheduledTask, finishedAt: string, errorMessage
   ].join("\n");
 }
 
-async function deliverResult(bot: Bot<Context>, task: ScheduledTask, text: string): Promise<void> {
+async function deliverResult(
+  bot: Bot<Context>,
+  task: ScheduledTask,
+  text: string,
+  maxAttempts = MAX_429_ATTEMPTS,
+): Promise<void> {
   const parts = splitMessage(text);
 
   logger.info(
@@ -321,14 +332,17 @@ async function deliverResult(bot: Bot<Context>, task: ScheduledTask, text: strin
     // Bounded 429 budget shared with the rest of the bot: on exhaustion the
     // throw below lands in the existing generic error path, so the task
     // still records an error result instead of retrying forever.
-    await runWithRateLimitRetries(`scheduled-task:${task.id}`, () =>
-      sendBotText({
-        api: bot.api,
-        chatId: task.delivery.chatId,
-        text: part,
-        options: getThreadSendOptions(task.delivery.threadId),
-        format: "raw",
-      }),
+    await runWithRateLimitRetries(
+      `scheduled-task:${task.id}`,
+      () =>
+        sendBotText({
+          api: bot.api,
+          chatId: task.delivery.chatId,
+          text: part,
+          options: getThreadSendOptions(task.delivery.threadId),
+          format: "raw",
+        }),
+      maxAttempts,
     );
   }
 }
@@ -391,11 +405,16 @@ async function finalizeTaskRun(bot: Bot<Context>, task: ScheduledTask): Promise<
     // Best effort and non-blocking: the result never reached the chat, so
     // say so plainly instead of leaving only a store entry. Fire-and-forget:
     // a storm may still swallow it, and finalization must not wait behind it.
-    void deliverResult(
-      bot,
-      task,
-      `Scheduled task could not be delivered: ${fallbackErrorMessage}`,
-    ).catch((deliveryError: unknown) => {
+    // A bare rate-limit error carries internal wording: swap it for the
+    // user-facing line instead of leaking queue jargon into the chat. The
+    // notice itself gets a tiny budget (initial try + 1 retry) instead of
+    // the full one, so a give-up during a storm costs at most a couple of
+    // sends instead of doubling the storm.
+    const notice =
+      error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null
+        ? t("sessions.rate_limited_retry")
+        : `Scheduled task could not be delivered: ${fallbackErrorMessage}`;
+    void deliverResult(bot, task, notice, 1).catch((deliveryError: unknown) => {
       logger.warn("[ScheduledTaskRuntime] Give-up notice delivery failed", {
         taskId: task.id,
         deliveryError,

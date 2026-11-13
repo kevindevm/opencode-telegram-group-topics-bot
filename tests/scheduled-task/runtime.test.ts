@@ -301,9 +301,10 @@ describe("scheduled-task/runtime", () => {
       // part): let both bounded sequences finish before counting.
       await vi.advanceTimersByTimeAsync(60_000);
 
-      // Bounded budget twice: the result delivery plus the give-up notice,
-      // each one initial attempt plus the shared give-up budget.
-      expect(mocked.sendBotTextMock).toHaveBeenCalledTimes(2 * (MAX_429_ATTEMPTS + 1));
+      // Bounded budget: the result delivery with the full budget, plus the
+      // best-effort notice with only initial + 1 retry, so a give-up during
+      // a storm costs 11 + 2 sends instead of doubling the storm.
+      expect(mocked.sendBotTextMock).toHaveBeenCalledTimes(MAX_429_ATTEMPTS + 1 + 2);
       expect(getScheduledTasks()[0]).toEqual(
         expect.objectContaining({
           id: "task-429-storm",

@@ -39,34 +39,53 @@ function getBackgroundSessionLabel(notification: BackgroundSessionNotification):
  */
 const LIVE_NOTICE_TTL_MS = 5 * 60 * 1000;
 const liveNotices = new Map<string, number>();
+/**
+ * Failed sends suppress repeats only briefly: a 429 storm may pass a
+ * minute later, and the 5-minute live window would hide the notice long
+ * after delivery works again.
+ */
+const FAILED_NOTICE_TTL_MS = 60_000;
+const failedNotices = new Map<string, number>();
 
 function liveNoticeKey(sessionId: string, kind: BackgroundSessionNotification["kind"]): string {
   return `${sessionId}:${kind}`;
 }
 
 function hasLiveNotice(sessionId: string, kind: BackgroundSessionNotification["kind"]): boolean {
-  const sentAt = liveNotices.get(liveNoticeKey(sessionId, kind));
-  if (sentAt === undefined) {
-    return false;
+  const key = liveNoticeKey(sessionId, kind);
+  const sentAt = liveNotices.get(key);
+  if (sentAt !== undefined) {
+    if (Date.now() - sentAt >= LIVE_NOTICE_TTL_MS) {
+      liveNotices.delete(key);
+    } else {
+      return true;
+    }
   }
-  if (Date.now() - sentAt >= LIVE_NOTICE_TTL_MS) {
-    liveNotices.delete(liveNoticeKey(sessionId, kind));
-    return false;
+  const failedAt = failedNotices.get(key);
+  if (failedAt !== undefined) {
+    if (Date.now() - failedAt >= FAILED_NOTICE_TTL_MS) {
+      failedNotices.delete(key);
+    } else {
+      return true;
+    }
   }
-  return true;
+  return false;
 }
 
 /** The user engaged with the session: the next event may notify again. */
 export function clearBackgroundNoticesForSession(sessionId: string): void {
-  for (const key of Array.from(liveNotices.keys())) {
-    if (key.startsWith(`${sessionId}:`)) {
-      liveNotices.delete(key);
+  for (const map of [liveNotices, failedNotices]) {
+    for (const key of Array.from(map.keys())) {
+      if (key.startsWith(`${sessionId}:`)) {
+        map.delete(key);
+      }
     }
   }
 }
 
 export function __resetBackgroundNoticesForTests(): void {
   liveNotices.clear();
+  failedNotices.clear();
 }
 
 /**
@@ -165,10 +184,23 @@ export function createBackgroundNoticeDelivery(
       }
     }
 
-    await delivery.sendText(destination, formatBackgroundSessionNotification(notification), {
-      reply_markup: buildBackgroundSessionOpenKeyboard(notification.sessionId, notification.kind),
-      ...getThreadSendOptions(destination.threadId ?? null),
-    });
-    liveNotices.set(liveNoticeKey(notification.sessionId, notification.kind), Date.now());
+    try {
+      await delivery.sendText(destination, formatBackgroundSessionNotification(notification), {
+        reply_markup: buildBackgroundSessionOpenKeyboard(notification.sessionId, notification.kind),
+        ...getThreadSendOptions(destination.threadId ?? null),
+      });
+      liveNotices.set(liveNoticeKey(notification.sessionId, notification.kind), Date.now());
+    } catch (error) {
+      // A failed send still suppresses immediate repeats (no hammering),
+      // but only briefly: the storm may pass a minute later and the user
+      // should still get this notice instead of waiting out the full
+      // live window that a successful send earns.
+      failedNotices.set(liveNoticeKey(notification.sessionId, notification.kind), Date.now());
+      logger.warn("[BackgroundNotice] Failed to send background notice; will retry soon:", {
+        sessionId: notification.sessionId,
+        kind: notification.kind,
+        error,
+      });
+    }
   };
 }

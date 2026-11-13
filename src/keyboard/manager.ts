@@ -27,6 +27,9 @@ class KeyboardManager {
   private static readonly KEYBOARD_STORM_COOLDOWN_MS = 60_000;
   /** Carrier message kept per scope so repaints edit it instead of resending. */
   private carrierMessageIdByScope = new Map<string, number>();
+  /** Predecessors whose delete failed: retried on the next successful send. */
+  private staleCarrierIdsByScope = new Map<string, number[]>();
+  private static readonly MAX_STALE_CARRIERS = 5;
 
   private getOrCreateState(scopeKey: string): KeyboardState {
     const existing = this.stateByScope.get(scopeKey);
@@ -103,6 +106,7 @@ class KeyboardManager {
     this.lastSentMarkupByScope.delete(scopeKey);
     this.cooldownUntilByScope.delete(scopeKey);
     this.carrierMessageIdByScope.delete(scopeKey);
+    this.staleCarrierIdsByScope.delete(scopeKey);
     contextStateManager.clear(scopeKey);
   }
 
@@ -269,8 +273,25 @@ class KeyboardManager {
         ...(typeof threadId === "number" ? { message_thread_id: threadId } : {}),
       });
       this.carrierMessageIdByScope.set(scopeKey, sent.message_id);
-      if (previousCarrierId !== undefined && previousCarrierId !== sent.message_id) {
-        await this.api.deleteMessage(targetChatId, previousCarrierId).catch(() => {});
+      const staleIds = [
+        ...(previousCarrierId !== undefined && previousCarrierId !== sent.message_id
+          ? [previousCarrierId]
+          : []),
+        ...(this.staleCarrierIdsByScope.get(scopeKey) ?? []),
+      ].filter((id, index, all) => id !== sent.message_id && all.indexOf(id) === index);
+      this.staleCarrierIdsByScope.delete(scopeKey);
+      for (const staleId of staleIds) {
+        try {
+          await this.api.deleteMessage(targetChatId, staleId);
+        } catch {
+          // Best effort: keep it for the next successful repaint instead
+          // of failing the turn over cleanup.
+          const pending = this.staleCarrierIdsByScope.get(scopeKey) ?? [];
+          if (pending.length < KeyboardManager.MAX_STALE_CARRIERS) {
+            pending.push(staleId);
+            this.staleCarrierIdsByScope.set(scopeKey, pending);
+          }
+        }
       }
     } catch (err) {
       this.rollbackFingerprint(scopeKey, previousFingerprint, previousUpdateTime);

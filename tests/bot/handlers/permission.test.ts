@@ -15,6 +15,9 @@ import { t } from "../../../src/i18n/index.js";
 
 const mocked = vi.hoisted(() => ({
   permissionReplyMock: vi.fn(),
+  topicBindingBySessionIdMock: vi.fn(() => undefined) as unknown as (
+    sessionId: string,
+  ) => { chatId: number; threadId: number; scopeKey: string } | undefined,
   currentProject: {
     id: "project-1",
     worktree: "D:/repo",
@@ -37,6 +40,10 @@ vi.mock("../../../src/settings/manager.js", () => ({
 vi.mock("../../../src/session/manager.js", () => ({
   getCurrentSession: vi.fn(() => mocked.currentSession),
   getSessionById: vi.fn(() => null),
+}));
+
+vi.mock("../../../src/topic/manager.js", () => ({
+  getTopicBindingBySessionId: mocked.topicBindingBySessionIdMock,
 }));
 
 vi.mock("../../../src/utils/safe-background-task.js", () => ({
@@ -143,6 +150,8 @@ describe("bot/handlers/permission", () => {
 
     mocked.permissionReplyMock.mockReset();
     mocked.permissionReplyMock.mockResolvedValue({ error: null });
+    mocked.topicBindingBySessionIdMock.mockReset();
+    mocked.topicBindingBySessionIdMock.mockReturnValue(undefined);
 
     mocked.currentProject = {
       id: "project-1",
@@ -493,6 +502,52 @@ describe("bot/handlers/permission", () => {
     const sendMessageMock = botApi.sendMessage as unknown as ReturnType<typeof vi.fn>;
     expect(sendMessageMock).toHaveBeenCalledTimes(2);
     expect(permissionManager.isActive()).toBe(false);
+  });
+
+  it("retries the poll once after a 429 and then stops", async () => {
+    vi.useFakeTimers();
+    try {
+      const rateLimitError = Object.assign(new Error("Too Many Requests"), {
+        parameters: { retry_after: 1 },
+      });
+      const botApi = {
+        sendMessage: vi
+          .fn()
+          .mockRejectedValueOnce(rateLimitError)
+          .mockRejectedValueOnce(rateLimitError)
+          .mockResolvedValue({ message_id: 902 }),
+        deleteMessage: vi.fn().mockResolvedValue(true),
+      } as unknown as Context["api"];
+
+      const first = showPermissionRequest(
+        botApi,
+        777,
+        createPermissionRequest("perm-retry-once"),
+        "global",
+        null,
+      );
+      await expect(first).rejects.toThrow("Too Many Requests");
+      // Poll attempt + notice; the retry is scheduled, not run yet.
+      expect(botApi.sendMessage).toHaveBeenCalledTimes(2);
+
+      // 60s later the single retry fires and the poll shows.
+      mocked.topicBindingBySessionIdMock.mockReturnValue({
+        chatId: 777,
+        threadId: null,
+        scopeKey: "global",
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushMicrotasks();
+      expect(botApi.sendMessage).toHaveBeenCalledTimes(3);
+      expect(permissionManager.isActive()).toBe(true);
+
+      // No further retries are scheduled after the retry: settle stays quiet.
+      cancelScheduledPermissionPoll("perm-retry-once");
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(botApi.sendMessage).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("sends no notice when the poll send fails without a 429", async () => {

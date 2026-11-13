@@ -178,10 +178,6 @@ function untrackRunningCall(sessionId: string, callId: string): boolean {
   return false;
 }
 
-function isCallTracked(sessionId: string, callId: string): boolean {
-  return runningCallIds.get(sessionId)?.has(callId) ?? false;
-}
-
 function truncateCommandPreview(commandPreview: string): string {
   const singleLine = commandPreview.replace(/\s+/g, " ").trim();
   if (singleLine.length <= MAX_COMMAND_PREVIEW_LENGTH) {
@@ -217,11 +213,15 @@ async function sendOfferMessage(
       ...getThreadSendOptions(input.threadId),
     }));
     // The tool may have settled while the send was in flight (slow retry
-    // after clear): never resurrect an offer for a call that is gone.
-    if (!isCallTracked(sessionId, callId)) {
-      await api
-        .deleteMessage(chatId, sent.message_id)
-        .catch(() => {});
+    // after clear): never resurrect an offer for a session with no running
+    // calls left. The check is session-wide on purpose: offers are tracked
+    // per session, so an overlapping tool still running keeps it alive.
+    if (!runningCallIds.has(sessionId)) {
+      await runWithRateLimitRetries(
+        `background-offer-cleanup:${sessionId}`,
+        () => api.deleteMessage(chatId, sent.message_id),
+        2,
+      ).catch(() => {});
       return;
     }
     sentOffers.set(sessionId, {

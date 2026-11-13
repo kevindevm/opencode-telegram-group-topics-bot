@@ -631,6 +631,10 @@ export async function handleBackgroundSessionOpen(ctx: Context): Promise<boolean
     });
     if (isRateLimitExhaustion(error)) {
       await ctx.reply(t("sessions.rate_limited_retry")).catch(() => {});
+      // The thread reply already says to retry: ack silently instead of
+      // stacking an error alert on top of it.
+      await ctx.answerCallbackQuery().catch(() => {});
+      return true;
     }
     await ctx
       .answerCallbackQuery({ text: t("sessions.select_error"), show_alert: true })

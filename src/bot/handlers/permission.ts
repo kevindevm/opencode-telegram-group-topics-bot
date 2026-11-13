@@ -9,6 +9,7 @@ import { interactionManager } from "../../interaction/manager.js";
 import { INTERACTION_CLEAR_REASON } from "../../interaction/constants.js";
 import { logger } from "../../utils/logger.js";
 import { parseRetryAfterMs, RateLimitExceededError } from "../telegram-rate-limiter.js";
+import { getTopicBindingBySessionId } from "../../topic/manager.js";
 import { PermissionRequest, PermissionReply } from "../../permission/types.js";
 import type { I18nKey } from "../../i18n/en.js";
 import { t } from "../../i18n/index.js";
@@ -30,6 +31,24 @@ const PERMISSION_CALLBACK = {
 const PERMISSION_SHOW_GRACE_MS = 2500;
 
 const pendingShowTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; scopeKey: string }>();
+
+/**
+ * One-shot re-show when a poll send dies to 429. The request stays pending
+ * server-side, so dropping it would block the agent with no recourse; one
+ * delayed attempt gives the storm time to pass without looping forever.
+ */
+const POLL_RETRY_DELAY_MS = 60_000;
+const pollRetryTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; scopeKey: string }>();
+/** One-shot retries only: request ids already retried never re-arm. Bounded like the question side. */
+const retriedPermissionPolls = new Set<string>();
+
+function clearPollRetryTimer(requestId: string): void {
+  const pending = pollRetryTimers.get(requestId);
+  if (pending) {
+    clearTimeout(pending.timer);
+    pollRetryTimers.delete(requestId);
+  }
+}
 
 /**
  * Schedules the poll for a permission request after the grace period.
@@ -76,12 +95,11 @@ export function schedulePermissionPoll(
 
 export function cancelScheduledPermissionPoll(requestID: string): void {
   const pending = pendingShowTimers.get(requestID);
-  if (!pending) {
-    return;
+  if (pending) {
+    clearTimeout(pending.timer);
+    pendingShowTimers.delete(requestID);
   }
-
-  clearTimeout(pending.timer);
-  pendingShowTimers.delete(requestID);
+  clearPollRetryTimer(requestID);
 }
 
 export function cancelAllScheduledPermissionPolls(scopeKey?: string): void {
@@ -93,6 +111,14 @@ export function cancelAllScheduledPermissionPolls(scopeKey?: string): void {
     clearTimeout(pending.timer);
     pendingShowTimers.delete(requestID);
   }
+  for (const [requestID, pending] of Array.from(pollRetryTimers)) {
+    if (scopeKey !== undefined && pending.scopeKey !== scopeKey) {
+      continue;
+    }
+
+    clearTimeout(pending.timer);
+    pollRetryTimers.delete(requestID);
+  }
 }
 
 export function __resetScheduledPermissionPollsForTests(): void {
@@ -101,6 +127,11 @@ export function __resetScheduledPermissionPollsForTests(): void {
   }
 
   pendingShowTimers.clear();
+  for (const pending of pollRetryTimers.values()) {
+    clearTimeout(pending.timer);
+  }
+
+  pollRetryTimers.clear();
 }
 
 /**
@@ -495,6 +526,7 @@ export async function showPermissionRequest(
   request: PermissionRequest,
   scopeKey: string,
   threadId: number | null,
+  isRetry = false,
 ): Promise<void> {
   logger.debug(`[PermissionHandler] Showing permission request: ${request.permission}`);
 
@@ -561,10 +593,45 @@ export async function showPermissionRequest(
     summaryAggregator.stopTypingIndicator(request.sessionID);
   } catch (err) {
     logger.error("[PermissionHandler] Failed to send permission message:", err);
-    if (err instanceof RateLimitExceededError || getRetryAfterMs(err) !== null) {
+    summaryAggregator.stopTypingIndicator(request.sessionID);
+    const rateLimited = err instanceof RateLimitExceededError || getRetryAfterMs(err) !== null;
+    if (rateLimited) {
       await bot
         .sendMessage(chatId, t("permission.rate_limited_notice"), getThreadSendOptions(threadId))
         .catch(() => {});
+      if (!isRetry && !pollRetryTimers.has(request.id) && !retriedPermissionPolls.has(request.id)) {
+        retriedPermissionPolls.add(request.id);
+        if (retriedPermissionPolls.size > 500) {
+          const oldest = retriedPermissionPolls.values().next();
+          if (!oldest.done) {
+            retriedPermissionPolls.delete(oldest.value);
+          }
+        }
+        const timer = setTimeout(() => {
+          pollRetryTimers.delete(request.id);
+          // The request may have settled or been superseded meanwhile, and
+          // the topic may have moved: showPermissionRequest re-checks the
+          // first two, and the target is re-resolved fresh here.
+          const freshBinding = getTopicBindingBySessionId(request.sessionID);
+          if (!freshBinding) {
+            return;
+          }
+          void showPermissionRequest(
+            bot,
+            freshBinding.chatId,
+            request,
+            freshBinding.scopeKey,
+            freshBinding.threadId,
+            true,
+          ).catch((retryError: unknown) => {
+            logger.error("[PermissionHandler] Scheduled poll retry failed:", {
+              requestId: request.id,
+              retryError,
+            });
+          });
+        }, POLL_RETRY_DELAY_MS);
+        pollRetryTimers.set(request.id, { timer, scopeKey });
+      }
     }
     throw err;
   }
