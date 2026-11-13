@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Context } from "grammy";
 import { handleRecentSelect, recentCommand } from "../../../src/bot/commands/recent.js";
+import { interactionManager } from "../../../src/interaction/manager.js";
+import { getScopeKeyFromContext } from "../../../src/bot/scope.js";
 import { t } from "../../../src/i18n/index.js";
 
 const mocked = vi.hoisted(() => ({
@@ -264,5 +266,47 @@ describe("bot/commands/recent", () => {
     await expect(handleRecentSelect(ctx as never)).resolves.toBe(true);
 
     expect(mocked.openSessionInNewTopicMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the menu active when a project switch clears it mid-select", async () => {
+    mocked.loadRecentSessionsMock.mockResolvedValue([entry("s9", "/repo/b")]);
+    mocked.sessionGetMock.mockResolvedValue({
+      data: { id: "s9", title: "title-s9" },
+      error: undefined,
+    });
+    const ctx = createCallbackContext("recent:s9");
+    const scopeKey = getScopeKeyFromContext(ctx as never);
+
+    interactionManager.start(
+      {
+        kind: "inline",
+        expectedInput: "callback",
+        metadata: { menuKind: "recent", messageId: 456 },
+      },
+      scopeKey,
+    );
+    // The real switchToProject wipes the scope interaction; emulate it.
+    mocked.switchToProjectMock.mockImplementationOnce(async (switchCtx: Context) => {
+      interactionManager.clear("test", getScopeKeyFromContext(switchCtx as never));
+    });
+
+    try {
+      await expect(handleRecentSelect(ctx as never)).resolves.toBe(true);
+
+      expect(mocked.switchToProjectMock).toHaveBeenCalledTimes(1);
+      expect(mocked.openSessionInNewTopicMock).toHaveBeenCalledWith(
+        ctx,
+        expect.objectContaining({ id: "s9" }),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        { keepMenu: true },
+      );
+      const state = interactionManager.getSnapshot(scopeKey);
+      expect(state).toMatchObject({ kind: "inline" });
+      expect(state?.metadata).toMatchObject({ menuKind: "recent", messageId: 456 });
+    } finally {
+      interactionManager.clear("test", scopeKey);
+    }
   });
 });

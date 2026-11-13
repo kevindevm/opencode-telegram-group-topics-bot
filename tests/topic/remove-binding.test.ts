@@ -50,11 +50,18 @@ vi.mock("../../src/bot/scope.js", () => ({
   getScopeFromKey: vi.fn(() => null),
 }));
 
+vi.mock("../../src/topic/binding-backup.js", () => ({
+  forgetBinding: vi.fn(),
+  loadBindingBackup: vi.fn(() => []),
+  snapshotBinding: vi.fn(),
+}));
+
 import {
   __resetTopicManagerForTests,
   createTopicBindingKey,
   removeTopicBinding,
 } from "../../src/topic/manager.js";
+import { forgetBinding } from "../../src/topic/binding-backup.js";
 
 describe("topic/manager removeTopicBinding", () => {
   beforeEach(() => {
@@ -79,6 +86,7 @@ describe("topic/manager removeTopicBinding", () => {
 
     expect(mocked.bindings.get(createTopicBindingKey(-100, 11))).toBeUndefined();
     expect(mocked.unregisterSessionScopeMock).toHaveBeenCalledWith("ses-1", "-100:11");
+    expect(forgetBinding).toHaveBeenCalledWith("-100:11");
   });
 
   it("is a no-op for unknown topics and never touches session routing", () => {

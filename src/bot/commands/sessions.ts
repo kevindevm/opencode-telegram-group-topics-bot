@@ -53,6 +53,8 @@ import { parseBackgroundSessionCallback } from "../menus/session-selection-menu.
 import { TOPIC_COLORS } from "../../topic/colors.js";
 import { formatTopicTitle } from "../../topic/title-format.js";
 import { buildTopicThreadLink } from "../utils/topic-link.js";
+import { forgetBinding } from "../../topic/binding-backup.js";
+import { clearBackgroundNoticesForSession } from "../events/background-notice-delivery.js";
 import {
   loadLastAssistantMessage,
   loadLastVisibleTurn,
@@ -317,8 +319,19 @@ export async function openSessionInNewTopic(
   }
 
   const chat = ctx.chat;
+  // The tap is acked at most once: the probe below can fall through to the
+  // create-topic path, which also acks. Without the flag the second ack
+  // throws "query too old" and the outer handler reports a phantom error.
+  let callbackAcked = false;
   const existingBinding = getTopicBindingBySessionId(session.id);
   if (existingBinding && existingBinding.chatId === chat.id) {
+    // Ack first: the probe send below can stall on 429 retries and the tap
+    // would otherwise time out client-side looking dead.
+    if (!options.keepMenu) {
+      clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
+      await ctx.answerCallbackQuery();
+      callbackAcked = true;
+    }
     const existingLink = await (async () => {
       try {
         const topicMessage = await ctx.api.sendMessage(
@@ -336,15 +349,12 @@ export async function openSessionInNewTopic(
           { threadId: existingBinding.threadId, error },
         );
         clearTopicSessionBinding(existingBinding.scopeKey);
+        forgetBinding(existingBinding.scopeKey);
         return null;
       }
     })();
 
     if (existingLink) {
-      if (!options.keepMenu) {
-        clearInteractionWithScope(INTERACTION_CLEAR_REASON.SESSION_SWITCHED, scopeKey);
-        await ctx.answerCallbackQuery();
-      }
       await ctx.reply(
         t(BOT_I18N_KEY.SESSIONS_BOUND_TOPIC_LINK, {
           title: session.title,
@@ -374,7 +384,7 @@ export async function openSessionInNewTopic(
       );
     } catch (error) {
       logger.error("[Sessions] Error creating forum topic for existing session", error);
-      if (!options.keepMenu) {
+      if (!options.keepMenu && !callbackAcked) {
         await ctx.answerCallbackQuery();
       }
       if (getErrorText(error).includes(TELEGRAM_ERROR_MARKER.NOT_ENOUGH_RIGHTS_CREATE_TOPIC)) {
@@ -490,7 +500,7 @@ export async function openSessionInNewTopic(
     throw new Error("Unable to build topic link");
   }
 
-  if (!options.keepMenu) {
+  if (!options.keepMenu && !callbackAcked) {
     await ctx.answerCallbackQuery();
   }
   await ctx.reply(
@@ -531,6 +541,11 @@ export async function handleBackgroundSessionOpen(ctx: Context): Promise<boolean
   }
 
   try {
+    // Ack first: the probe send below can stall on 429 retries and the tap
+    // would otherwise time out client-side looking dead.
+    await ctx.answerCallbackQuery().catch(() => {});
+    // The user engaged with the session: a later event may notify again.
+    clearBackgroundNoticesForSession(parsed.sessionId);
     // Visible marker inside the topic (also probes that it still exists).
     await ctx.api.sendMessage(
       binding.chatId,
@@ -538,7 +553,6 @@ export async function handleBackgroundSessionOpen(ctx: Context): Promise<boolean
       getThreadSendOptions(binding.threadId),
     );
     const topicLink = buildTopicThreadLink(ctx.chat, binding.threadId);
-    await ctx.answerCallbackQuery().catch(() => {});
     if (topicLink) {
       await ctx
         .reply(

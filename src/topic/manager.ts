@@ -16,6 +16,11 @@ import {
 import { getScopeForSession, unregisterSessionScope } from "../session/manager.js";
 import { SCOPE_CONTEXT, getScopeFromKey } from "../bot/scope.js";
 import { logger } from "../utils/logger.js";
+import {
+  forgetBinding,
+  loadBindingBackup,
+  snapshotBinding,
+} from "./binding-backup.js";
 
 const BINDING_KEY_SEPARATOR = ":";
 let hydratedFromScopedSessions = false;
@@ -115,6 +120,8 @@ function ensureTopicBindingsHydrated(): void {
       `[TopicManager] Hydrated binding from scoped session: scope=${scopeKey}, session=${sessionInfo.id}`,
     );
   }
+
+  restoreMissingBindingsFromBackup();
 }
 
 export function __resetTopicManagerForTests(): void {
@@ -141,6 +148,7 @@ export function registerTopicSessionBinding(input: TopicBindingInput): TopicSess
     );
     if (existingBySessionKey !== bindingKey) {
       clearTopicSessionBinding(existingBySessionKey);
+      forgetBinding(existingBySession.scopeKey);
       logger.warn(
         `[TopicManager] Rebinding session ${input.sessionId} from topic ${existingBySessionKey} to ${bindingKey}`,
       );
@@ -149,6 +157,7 @@ export function registerTopicSessionBinding(input: TopicBindingInput): TopicSess
 
   const nextBinding = buildBinding(input, existingByTopic);
   setTopicSessionBinding(bindingKey, nextBinding);
+  snapshotBinding(nextBinding);
 
   logger.info(
     `[TopicManager] Registered topic binding: scope=${nextBinding.scopeKey}, session=${nextBinding.sessionId}, status=${nextBinding.status}`,
@@ -190,6 +199,10 @@ export function updateTopicBindingStatus(
   ensureTopicBindingsHydrated();
   const bindingKey = createTopicBindingKey(chatId, threadId);
   updateTopicSessionBindingStatus(bindingKey, status);
+  const updated = getTopicSessionBinding(bindingKey);
+  if (updated) {
+    snapshotBinding(updated);
+  }
 }
 
 export function updateTopicBindingStatusBySessionId(
@@ -203,6 +216,10 @@ export function updateTopicBindingStatusBySessionId(
   }
 
   updateTopicSessionBindingStatus(createTopicBindingKey(binding.chatId, binding.threadId), status);
+  const updated = getTopicSessionBinding(createTopicBindingKey(binding.chatId, binding.threadId));
+  if (updated) {
+    snapshotBinding(updated);
+  }
 }
 
 export function updateTopicBindingNameBySessionId(sessionId: string, topicName: string): void {
@@ -221,6 +238,7 @@ export function updateTopicBindingNameBySessionId(sessionId: string, topicName: 
   };
 
   setTopicSessionBinding(bindingKey, nextBinding);
+  snapshotBinding(nextBinding);
 }
 
 export function removeTopicBinding(chatId: number, threadId: number): void {
@@ -228,9 +246,35 @@ export function removeTopicBinding(chatId: number, threadId: number): void {
   const bindingKey = createTopicBindingKey(chatId, threadId);
   const binding = getTopicSessionBinding(bindingKey);
   clearTopicSessionBinding(bindingKey);
-
   if (binding) {
+    forgetBinding(binding.scopeKey);
     unregisterSessionScope(binding.sessionId, binding.scopeKey);
+  }
+}
+
+/**
+ * Re-seeds bindings lost from settings (e.g. a wiped or corrupted file)
+ * from the sidecar backup. Live bindings always win: only scopes without
+ * any binding are restored, and only for sessions not bound elsewhere.
+ * Stale entries (manually deleted topics) self-clean on first use, which
+ * also drops them from the backup.
+ */
+export function restoreMissingBindingsFromBackup(): void {
+  let restored = 0;
+  for (const backup of loadBindingBackup()) {
+    const bindingKey = createTopicBindingKey(backup.chatId, backup.threadId);
+    if (getTopicSessionBinding(bindingKey)) {
+      continue;
+    }
+    if (findTopicSessionBindingBySessionId(backup.sessionId)) {
+      continue;
+    }
+    setTopicSessionBinding(bindingKey, { ...backup });
+    restored += 1;
+  }
+
+  if (restored > 0) {
+    logger.info(`[TopicManager] Restored ${restored} topic binding(s) from backup`);
   }
 }
 

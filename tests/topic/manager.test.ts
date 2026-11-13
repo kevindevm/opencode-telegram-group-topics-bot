@@ -55,6 +55,12 @@ vi.mock("../../src/session/manager.js", () => ({
   getScopeForSession: vi.fn(() => null),
 }));
 
+vi.mock("../../src/topic/binding-backup.js", () => ({
+  forgetBinding: vi.fn(),
+  loadBindingBackup: vi.fn(() => []),
+  snapshotBinding: vi.fn(),
+}));
+
 vi.mock("../../src/bot/scope.js", () => ({
   SCOPE_CONTEXT: {
     DM: "dm",
@@ -65,16 +71,20 @@ vi.mock("../../src/bot/scope.js", () => ({
 }));
 
 import {
+  __resetTopicManagerForTests,
   createTopicBindingKey,
   getSessionRouteTarget,
   registerTopicSessionBinding,
 } from "../../src/topic/manager.js";
+import { forgetBinding, loadBindingBackup, snapshotBinding } from "../../src/topic/binding-backup.js";
 
 describe("topic/manager", () => {
   beforeEach(() => {
     mocked.bindings.clear();
     mocked.getCurrentProjectMock.mockClear();
     mocked.getScopedSessionsMock.mockReturnValue({});
+    __resetTopicManagerForTests();
+    vi.mocked(loadBindingBackup).mockReturnValue([]);
   });
 
   it("rebinds session to new topic instead of throwing", () => {
@@ -103,6 +113,8 @@ describe("topic/manager", () => {
       sessionId: "ses-1",
       scopeKey: "-200:22",
     });
+    expect(forgetBinding).toHaveBeenCalledWith("-100:11");
+    expect(snapshotBinding).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "ses-1" }));
   });
 
   it("returns route target from binding when available", () => {
@@ -124,5 +136,53 @@ describe("topic/manager", () => {
       chatId: -300,
       threadId: 33,
     });
+  });
+
+  it("restores a backed-up binding when settings lost it", async () => {
+    const { listAllTopicBindings } = await import("../../src/topic/manager.js");
+    vi.mocked(loadBindingBackup).mockReturnValue([
+      {
+        scopeKey: "-100:11",
+        chatId: -100,
+        threadId: 11,
+        sessionId: "ses-9",
+        projectId: "p1",
+        status: "active",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+    __resetTopicManagerForTests();
+
+    expect(listAllTopicBindings()).toMatchObject([{ sessionId: "ses-9" }]);
+  });
+
+  it("keeps live bindings ahead of the backup", async () => {
+    const { listAllTopicBindings } = await import("../../src/topic/manager.js");
+    mocked.bindings.set(createTopicBindingKey(-100, 11), {
+      scopeKey: "-100:11",
+      chatId: -100,
+      threadId: 11,
+      sessionId: "ses-live",
+      projectId: "p1",
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    vi.mocked(loadBindingBackup).mockReturnValue([
+      {
+        scopeKey: "-100:11",
+        chatId: -100,
+        threadId: 11,
+        sessionId: "ses-stale",
+        projectId: "p1",
+        status: "active",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+    __resetTopicManagerForTests();
+
+    expect(listAllTopicBindings()).toMatchObject([{ sessionId: "ses-live" }]);
   });
 });

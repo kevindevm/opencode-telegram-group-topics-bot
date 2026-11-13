@@ -15,6 +15,8 @@ import {
   replyWithInlineMenu,
 } from "../handlers/inline-menu.js";
 import { clearAllInteractionState } from "../../interaction/cleanup.js";
+import { interactionManager } from "../../interaction/manager.js";
+import type { InteractionState } from "../../interaction/types.js";
 import { INTERACTION_CLEAR_REASON } from "../../interaction/constants.js";
 import { summaryAggregator } from "../../summary/aggregator.js";
 import { logger } from "../../utils/logger.js";
@@ -86,6 +88,40 @@ function parseRecentIdCallback(data: string): string | null {
   return sessionId.length > 0 ? sessionId : null;
 }
 
+/**
+ * Re-registers the /recent menu after an out-of-band interaction clear
+ * (e.g. a project switch on the way to opening the topic). Only restores
+ * the exact menu that was open, never over a newer interaction, and never
+ * past its original expiry.
+ */
+function restoreRecentMenu(scopeKey: string, snapshot: InteractionState | null): void {
+  if (
+    !snapshot ||
+    snapshot.kind !== "inline" ||
+    snapshot.metadata?.menuKind !== "recent" ||
+    typeof snapshot.metadata?.messageId !== "number" ||
+    (typeof snapshot.expiresAt === "number" && snapshot.expiresAt <= Date.now())
+  ) {
+    return;
+  }
+  if (interactionManager.getSnapshot(scopeKey)) {
+    return;
+  }
+  interactionManager.start(
+    {
+      kind: "inline",
+      expectedInput: "callback",
+      allowedCommands: snapshot.allowedCommands,
+      metadata: snapshot.metadata,
+      expiresInMs:
+        typeof snapshot.expiresAt === "number"
+          ? Math.max(1000, snapshot.expiresAt - Date.now())
+          : undefined,
+    },
+    scopeKey,
+  );
+}
+
 async function loadRecentPage(
   page: number,
   pageSize: number,
@@ -141,6 +177,11 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
   if (!isActiveMenu) {
     return true;
   }
+
+  // Snapshot BEFORE any project switch: switchToProject clears the scope's
+  // interaction by design, which would orphan the still-visible menu even
+  // though openSessionInNewTopic runs with keepMenu below.
+  const menuSnapshot = interactionManager.getSnapshot(scopeKey);
 
   const page = parseRecentPageCallback(callbackQuery.data);
   if (page !== null) {
@@ -231,6 +272,7 @@ export async function handleRecentSelect(ctx: Context): Promise<boolean> {
     }
 
     if (await openSessionInNewTopic(ctx, session, project, scopeKey, scope, { keepMenu: true })) {
+      restoreRecentMenu(scopeKey, menuSnapshot);
       return true;
     }
 
