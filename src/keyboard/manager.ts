@@ -5,6 +5,7 @@ import { getStoredAgent } from "../agent/manager.js";
 import { getStoredModel } from "../model/manager.js";
 import { formatVariantForButton } from "../variant/manager.js";
 import { logger } from "../utils/logger.js";
+import { RateLimitExceededError, parseRetryAfterMs } from "../bot/telegram-rate-limiter.js";
 import type { ContextInfo, KeyboardState } from "./types.js";
 import { t } from "../i18n/index.js";
 import { SCOPE_CONTEXT, getScopeFromKey, getThreadIdFromScopeKey } from "../bot/scope.js";
@@ -18,6 +19,14 @@ class KeyboardManager {
   private lastUpdateTimeByScope = new Map<string, number>();
   private readonly UPDATE_DEBOUNCE_MS = 2000;
   private lastSentMarkupByScope = new Map<string, string>();
+  /**
+   * Drop repaints while in cooldown. Set after a 429 so retries do not feed
+   * the flood. Mirrors the pinned dashboard storm guard.
+   */
+  private cooldownUntilByScope = new Map<string, number>();
+  private static readonly KEYBOARD_STORM_COOLDOWN_MS = 60_000;
+  /** Carrier message kept per scope so repaints edit it instead of resending. */
+  private carrierMessageIdByScope = new Map<string, number>();
 
   private getOrCreateState(scopeKey: string): KeyboardState {
     const existing = this.stateByScope.get(scopeKey);
@@ -92,6 +101,8 @@ class KeyboardManager {
     this.stateByScope.delete(scopeKey);
     this.lastUpdateTimeByScope.delete(scopeKey);
     this.lastSentMarkupByScope.delete(scopeKey);
+    this.cooldownUntilByScope.delete(scopeKey);
+    this.carrierMessageIdByScope.delete(scopeKey);
     contextStateManager.clear(scopeKey);
   }
 
@@ -169,6 +180,33 @@ class KeyboardManager {
     this.lastSentMarkupByScope.delete(scopeKey);
   }
 
+  /**
+   * Opens the circuit breaker after a flood-control rejection.
+   */
+  private openStormCooldown(scopeKey: string): void {
+    this.cooldownUntilByScope.set(scopeKey, Date.now() + KeyboardManager.KEYBOARD_STORM_COOLDOWN_MS);
+  }
+
+  private static isRateLimitError(error: unknown): boolean {
+    return error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null;
+  }
+
+  private rollbackFingerprint(scopeKey: string, previousFingerprint: string | undefined, previousUpdateTime: number | undefined): void {
+    // The fingerprint was recorded optimistically by
+    // consumeStaleKeyboardMarkup: roll it back so the next update retries
+    // instead of freezing the client on the failed markup forever.
+    if (previousFingerprint === undefined) {
+      this.lastSentMarkupByScope.delete(scopeKey);
+    } else {
+      this.lastSentMarkupByScope.set(scopeKey, previousFingerprint);
+    }
+    if (previousUpdateTime === undefined) {
+      this.lastUpdateTimeByScope.delete(scopeKey);
+    } else {
+      this.lastUpdateTimeByScope.set(scopeKey, previousUpdateTime);
+    }
+  }
+
   public async sendKeyboardUpdate(
     chatId?: number,
     scopeKey: string = "global",
@@ -186,6 +224,13 @@ class KeyboardManager {
     }
 
     const now = Date.now();
+    // Storm guard: a scope in cooldown drops repaints instead of feeding the
+    // flood. The fingerprint stays stale so the next post-cooldown carrier
+    // (or piggyback) repaints with the latest state.
+    if (now < (this.cooldownUntilByScope.get(scopeKey) ?? 0)) {
+      return;
+    }
+
     // The turn-end repost must not be swallowed by the mid-run debounce: it
     // is the one update that guarantees the topic ends with current numbers.
     // The markup fingerprint below still skips it when nothing changed.
@@ -209,6 +254,13 @@ class KeyboardManager {
       return;
     }
 
+    // A replaced carrier leaves its predecessor behind: remembered here and
+    // cleaned up after the replacement send lands. Note: the carrier hosts
+    // a reply keyboard, which Telegram does not allow editing in place
+    // (editMessageText is inline-only), so every repaint is send+delete.
+    // Cooldown + fingerprint above bound that cost.
+    const previousCarrierId = this.carrierMessageIdByScope.get(scopeKey);
+
     try {
       const threadId = getThreadIdFromScopeKey(scopeKey);
       const sent = await this.api.sendMessage(targetChatId, t("keyboard.updated"), {
@@ -216,23 +268,14 @@ class KeyboardManager {
         disable_notification: true,
         ...(typeof threadId === "number" ? { message_thread_id: threadId } : {}),
       });
-      // Silent refresh: the reply keyboard persists in the chat after its
-      // carrier message is deleted, so remove it right away instead of
-      // leaving a "keyboard updated" notice behind.
-      await this.api.deleteMessage(targetChatId, sent.message_id).catch(() => {});
-    } catch (err) {
-      // The fingerprint was recorded optimistically by
-      // consumeStaleKeyboardMarkup: roll it back so the next update retries
-      // instead of freezing the client on the failed markup forever.
-      if (previousFingerprint === undefined) {
-        this.lastSentMarkupByScope.delete(scopeKey);
-      } else {
-        this.lastSentMarkupByScope.set(scopeKey, previousFingerprint);
+      this.carrierMessageIdByScope.set(scopeKey, sent.message_id);
+      if (previousCarrierId !== undefined && previousCarrierId !== sent.message_id) {
+        await this.api.deleteMessage(targetChatId, previousCarrierId).catch(() => {});
       }
-      if (previousUpdateTime === undefined) {
-        this.lastUpdateTimeByScope.delete(scopeKey);
-      } else {
-        this.lastUpdateTimeByScope.set(scopeKey, previousUpdateTime);
+    } catch (err) {
+      this.rollbackFingerprint(scopeKey, previousFingerprint, previousUpdateTime);
+      if (KeyboardManager.isRateLimitError(err)) {
+        this.openStormCooldown(scopeKey);
       }
       logger.error("[KeyboardManager] Failed to send keyboard update:", err);
     }

@@ -2,6 +2,7 @@ import type { Bot, Context } from "grammy";
 import { config } from "../config.js";
 import { getThreadSendOptions } from "../bot/scope.js";
 import { sendBotText } from "../bot/utils/telegram-text.js";
+import { runWithRateLimitRetries } from "../bot/telegram-rate-limiter.js";
 import { logger } from "../utils/logger.js";
 import { executeScheduledTask } from "./executor.js";
 import {
@@ -317,13 +318,18 @@ async function deliverResult(bot: Bot<Context>, task: ScheduledTask, text: strin
   );
 
   for (const part of parts) {
-    await sendBotText({
-      api: bot.api,
-      chatId: task.delivery.chatId,
-      text: part,
-      options: getThreadSendOptions(task.delivery.threadId),
-      format: "raw",
-    });
+    // Bounded 429 budget shared with the rest of the bot: on exhaustion the
+    // throw below lands in the existing generic error path, so the task
+    // still records an error result instead of retrying forever.
+    await runWithRateLimitRetries(`scheduled-task:${task.id}`, () =>
+      sendBotText({
+        api: bot.api,
+        chatId: task.delivery.chatId,
+        text: part,
+        options: getThreadSendOptions(task.delivery.threadId),
+        format: "raw",
+      }),
+    );
   }
 }
 
@@ -381,6 +387,20 @@ async function finalizeTaskRun(bot: Bot<Context>, task: ScheduledTask): Promise<
       error instanceof Error && error.message.trim()
         ? error.message.trim()
         : "Scheduled task finalization failed";
+
+    // Best effort and non-blocking: the result never reached the chat, so
+    // say so plainly instead of leaving only a store entry. Fire-and-forget:
+    // a storm may still swallow it, and finalization must not wait behind it.
+    void deliverResult(
+      bot,
+      task,
+      `Scheduled task could not be delivered: ${fallbackErrorMessage}`,
+    ).catch((deliveryError: unknown) => {
+      logger.warn("[ScheduledTaskRuntime] Give-up notice delivery failed", {
+        taskId: task.id,
+        deliveryError,
+      });
+    });
 
     await updateScheduledTask(task.id, (existingTask) => ({
       ...existingTask,

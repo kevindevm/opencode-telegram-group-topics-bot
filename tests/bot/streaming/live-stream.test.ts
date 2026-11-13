@@ -524,6 +524,32 @@ describe("bot/streaming/live-stream", () => {
     vi.useRealTimers();
   });
 
+  it("retries the live message delete through a 429 instead of leaving a duplicate", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(155);
+    const editText = vi.fn().mockResolvedValue(undefined);
+    const storm = { parameters: { retry_after: 1 } };
+    const deleteText = vi
+      .fn()
+      .mockRejectedValueOnce(storm)
+      .mockRejectedValueOnce(storm)
+      .mockResolvedValue(undefined);
+    const stream = new LiveStream({ sendText, editText, deleteText, throttleMs: 50 });
+
+    await stream.updateAssistant("s1", "m1", "Final answer");
+    await vi.advanceTimersByTimeAsync(50);
+
+    const pending = stream.cleanupAfterFinalDelivery("s1");
+    await vi.advanceTimersByTimeAsync(60_000);
+    await pending;
+
+    expect(deleteText).toHaveBeenCalledTimes(3);
+    expect(deleteText).toHaveBeenCalledWith("s1", 155);
+
+    vi.useRealTimers();
+  });
+
   it("abandons an uneditable message so the next flush sends a fresh one", async () => {    vi.useFakeTimers();
 
     const sendText = vi.fn().mockResolvedValue(152);
@@ -644,6 +670,93 @@ describe("bot/streaming/live-stream", () => {
       expect(editText).toHaveBeenLastCalledWith("s1", 302, "Recovery text", "raw", false);
     } finally {
       process.removeListener("unhandledRejection", onUnhandled);
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds 429 retries and keeps entries for the next mutation", async () => {
+    vi.useFakeTimers();
+    try {
+      const storm = { parameters: { retry_after: 1 } };
+      const sendText = vi.fn().mockRejectedValue(storm);
+      const editText = vi.fn().mockResolvedValue(undefined);
+      const stream = new LiveStream({ sendText, editText, throttleMs: 50 });
+
+      await stream.updateAssistant("s1", "m1", "Hello");
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await vi.advanceTimersByTimeAsync(1200);
+      }
+
+      expect(sendText.mock.calls.length).toBeLessThanOrEqual(11);
+      const callsAfterBudget = sendText.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sendText.mock.calls.length).toBe(callsAfterBudget);
+
+      sendText.mockResolvedValueOnce(999);
+      await stream.updateAssistant("s1", "m1", "Hello revived");
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sendText).toHaveBeenLastCalledWith("s1", "Hello revived", "raw", false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a generic send failure instead of hanging until the next mutation", async () => {
+    vi.useFakeTimers();
+    try {
+      const sendText = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("boom"))
+        .mockResolvedValue(1001);
+      const editText = vi.fn().mockResolvedValue(undefined);
+      const stream = new LiveStream({ sendText, editText, throttleMs: 50 });
+
+      await stream.updateAssistant("s1", "m1", "Hello");
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sendText).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sendText).toHaveBeenCalledTimes(2);
+      expect(sendText).toHaveBeenNthCalledWith(2, "s1", "Hello", "raw", false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops orphan timers and tasks when clearAll times out", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseSend: (() => void) | null = null;
+      const sendText = vi.fn(
+        () =>
+          new Promise<number>((resolve) => {
+            releaseSend = () => resolve(4321);
+          }),
+      );
+      const editText = vi.fn().mockResolvedValue(undefined);
+      const stream = new LiveStream({ sendText, editText, throttleMs: 50 });
+      const internals = stream as unknown as {
+        states: Map<string, unknown>;
+        timers: Map<string, unknown>;
+        sessionTasks: Map<string, Promise<void>>;
+      };
+
+      await stream.updateAssistant("s1", "m1", "Hung");
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sendText).toHaveBeenCalledTimes(1);
+
+      const cleared = stream.clearAll("shutdown");
+      await vi.advanceTimersByTimeAsync(5000);
+      await cleared;
+
+      expect(internals.states.has("s1")).toBe(false);
+      expect(internals.timers.has("s1")).toBe(false);
+      expect(internals.sessionTasks.has("s1")).toBe(false);
+
+      releaseSend?.();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(internals.states.has("s1")).toBe(false);
+    } finally {
       vi.useRealTimers();
     }
   });

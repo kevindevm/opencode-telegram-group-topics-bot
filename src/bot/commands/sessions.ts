@@ -54,6 +54,7 @@ import { TOPIC_COLORS } from "../../topic/colors.js";
 import { formatTopicTitle } from "../../topic/title-format.js";
 import { buildTopicThreadLink } from "../utils/topic-link.js";
 import { forgetBinding } from "../../topic/binding-backup.js";
+import { RateLimitExceededError, parseRetryAfterMs } from "../telegram-rate-limiter.js";
 import { clearBackgroundNoticesForSession } from "../events/background-notice-delivery.js";
 import {
   loadLastAssistantMessage,
@@ -145,6 +146,31 @@ function getErrorText(error: unknown): string {
   }
 
   return String(error).toLowerCase();
+}
+
+function hasTelegramRetryAfter(error: unknown): boolean {
+  return parseRetryAfterMs(error) !== null;
+}
+
+function isRateLimitExhaustion(error: unknown): boolean {
+  return error instanceof RateLimitExceededError || hasTelegramRetryAfter(error);
+}
+
+/**
+ * True only when Telegram proves the topic is gone. Anything else (flood
+ * control, network blips, unknown API errors) keeps the binding: recreating
+ * the topic then would strand the session across two duplicate topics.
+ */
+function isTopicGoneError(error: unknown): boolean {
+  const text = getErrorText(error);
+  return (
+    text.includes("chat not found") ||
+    text.includes("thread not found") ||
+    text.includes("message thread is not found") ||
+    text.includes("topic not found") ||
+    text.includes("group chat was upgraded") ||
+    text.includes("chat was deleted")
+  );
 }
 
 function clearInteractionWithScope(reason: string, scopeKey: string): void {
@@ -332,7 +358,10 @@ export async function openSessionInNewTopic(
       await ctx.answerCallbackQuery();
       callbackAcked = true;
     }
-    const existingLink = await (async () => {
+    // Probe outcome: a topic link to reuse, null when the probe proved the
+    // topic is gone (recreate below), or "stop" when the probe failed
+    // without proof (rate limits, unknown errors) and the binding is kept.
+    const existingLink = await (async (): Promise<string | null | "stop"> => {
       try {
         const topicMessage = await ctx.api.sendMessage(
           chat.id,
@@ -344,15 +373,39 @@ export async function openSessionInNewTopic(
         );
         return buildTopicThreadLink(chat, existingBinding.threadId);
       } catch (error) {
-        logger.warn(
-          "[Sessions] Bound topic no longer exists, creating a new one",
-          { threadId: existingBinding.threadId, error },
-        );
+        if (isRateLimitExhaustion(error)) {
+          logger.warn("[Sessions] Bound topic probe rate-limited, keeping binding", {
+            threadId: existingBinding.threadId,
+            error,
+          });
+          await ctx
+            .reply(t("sessions.rate_limited_retry"), getThreadSendOptions(scope?.threadId ?? null))
+            .catch(() => {});
+          return "stop";
+        }
+
+        if (!isTopicGoneError(error)) {
+          logger.warn("[Sessions] Bound topic probe failed, keeping binding", {
+            threadId: existingBinding.threadId,
+            error,
+          });
+          await ctx.reply(t("sessions.select_error"), getThreadSendOptions(scope?.threadId ?? null));
+          return "stop";
+        }
+
+        logger.warn("[Sessions] Bound topic no longer exists, creating a new one", {
+          threadId: existingBinding.threadId,
+          error,
+        });
         clearTopicSessionBinding(existingBinding.scopeKey);
         forgetBinding(existingBinding.scopeKey);
         return null;
       }
     })();
+
+    if (existingLink === "stop") {
+      return true;
+    }
 
     if (existingLink) {
       await ctx.reply(
@@ -387,7 +440,14 @@ export async function openSessionInNewTopic(
       if (!options.keepMenu && !callbackAcked) {
         await ctx.answerCallbackQuery();
       }
-      if (getErrorText(error).includes(TELEGRAM_ERROR_MARKER.NOT_ENOUGH_RIGHTS_CREATE_TOPIC)) {
+      if (isRateLimitExhaustion(error)) {
+        await ctx.reply(
+          t("sessions.rate_limited_retry"),
+          getThreadSendOptions(scope?.threadId ?? null),
+        );
+      } else if (
+        getErrorText(error).includes(TELEGRAM_ERROR_MARKER.NOT_ENOUGH_RIGHTS_CREATE_TOPIC)
+      ) {
         await ctx.reply(
           t(BOT_I18N_KEY.NEW_TOPIC_CREATE_NO_RIGHTS),
           getThreadSendOptions(scope?.threadId ?? null),
@@ -569,6 +629,9 @@ export async function handleBackgroundSessionOpen(ctx: Context): Promise<boolean
       sessionId: parsed.sessionId,
       error,
     });
+    if (isRateLimitExhaustion(error)) {
+      await ctx.reply(t("sessions.rate_limited_retry")).catch(() => {});
+    }
     await ctx
       .answerCallbackQuery({ text: t("sessions.select_error"), show_alert: true })
       .catch(() => {});

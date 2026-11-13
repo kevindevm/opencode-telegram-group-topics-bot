@@ -30,6 +30,8 @@ export const ru: I18nDictionary = {
   "permission.outcome.always": "🔓 Allowed always",
   "permission.outcome.reject": "❌ Rejected",
   "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.rate_limited_notice":
+    "⚠️ Permission prompt lost to rate limits, please answer in Telegram/PC.",
 
   "background.session_fallback": "session {id}",
   "background.assistant_response": "🔔 Assistant replied in background session: {session}",
@@ -105,6 +107,8 @@ export const ru: I18nDictionary = {
     "⚠️ Не удалось передать это сообщение в OpenCode.\n\nВозможная причина: временный сбой соединения между ботом и сервером OpenCode.\nЧто делать: отправьте сообщение еще раз. Если ошибка повторяется, выполните /status и проверьте доступность OpenCode.",
   "bot.prompt_send_error_session_not_found":
     "⚠️ Не удалось передать сообщение, потому что активная сессия больше недоступна.\n\nПочему так: сессия могла быть сброшена, переключена или удалена.\nЧто делать: выберите сессию через /sessions или создайте новую через /new, затем отправьте сообщение снова.",
+  "bot.delivery_failed_notice":
+    "⚠️ I could not deliver the answer after several retries. Please ask again.",
   "bot.session_error": "🔴 OpenCode вернул ошибку: {message}",
   "bot.session_error_invalid_request":
     "🔴 The model rejected the request: {message}\n\nThe session context is probably too large or corrupted, retrying will not help. Compact it from 🎛️ Session Control, or start fresh with /new.",
@@ -212,6 +216,7 @@ export const ru: I18nDictionary = {
   "sessions.loading_context": "⏳ Загружаю контекст и последние сообщения...",
   "sessions.selected": "✅ Сессия выбрана: {title}",
   "sessions.select_error": "🔴 Ошибка при выборе сессии.",
+  "sessions.rate_limited_retry": "Telegram is rate limited, please retry in a bit.",
   "sessions.preview.empty": "Последних сообщений нет.",
   "sessions.preview.title": "Последние сообщения:",
   "sessions.preview.you": "Вы:",

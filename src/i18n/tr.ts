@@ -36,6 +36,8 @@ export const tr: I18nDictionary = {
   "permission.outcome.always": "🔓 Allowed always",
   "permission.outcome.reject": "❌ Rejected",
   "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.rate_limited_notice":
+    "⚠️ Permission prompt lost to rate limits, please answer in Telegram/PC.",
 
   "background.session_fallback": "session {id}",
   "background.assistant_response": "🔔 Assistant replied in background session: {session}",
@@ -88,6 +90,7 @@ export const tr: I18nDictionary = {
   "bot.session_reset_project_mismatch": "⚠️ Etkin oturum seçili projeyle eşleşmediği için sıfırlandı. Birini seçmek için /sessions veya yeni oturum oluşturmak için /new kullanın.",
   "bot.prompt_send_error": "İstek OpenCode'a gönderilemedi.",
   "bot.prompt_send_error_session_not_found": "⚠️ I could not deliver this message because the active session is no longer available.\n\nWhy this happened: the session may have been reset, changed, or removed.\nWhat to do: choose a session with /sessions or create a new one with /new, then resend your message.",
+  "bot.delivery_failed_notice": "I could not deliver the answer after several retries. Please ask again.",
   "bot.session_error": "🔴 OpenCode bir hata döndürdü: {message}",
   "bot.session_error_invalid_request":
     "🔴 The model rejected the request: {message}\n\nThe session context is probably too large or corrupted, retrying will not help. Compact it from 🎛️ Session Control, or start fresh with /new.",
@@ -208,6 +211,7 @@ export const tr: I18nDictionary = {
   "sessions.loading_context": "⏳ Bağlam ve son mesajlar yükleniyor...",
   "sessions.selected": "✅ Oturum seçildi: {title}",
   "sessions.select_error": "🔴 Oturum seçilemedi.",
+  "sessions.rate_limited_retry": "Telegram is rate limited, please retry in a bit.",
   "sessions.preview.empty": "Son mesaj yok.",
   "sessions.preview.title": "Recent messages:",
   "sessions.preview.you": "You:",

@@ -36,6 +36,8 @@ export const id: I18nDictionary = {
   "permission.outcome.always": "🔓 Allowed always",
   "permission.outcome.reject": "❌ Rejected",
   "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.rate_limited_notice":
+    "⚠️ Permission prompt lost to rate limits, please answer in Telegram/PC.",
 
   "background.session_fallback": "session {id}",
   "background.assistant_response": "🔔 Assistant replied in background session: {session}",
@@ -88,6 +90,7 @@ export const id: I18nDictionary = {
   "bot.session_reset_project_mismatch": "⚠️ Sesi aktif tidak cocok dengan proyek yang dipilih, jadi sesi direset. Gunakan /sessions untuk memilih atau /new untuk membuat sesi baru.",
   "bot.prompt_send_error": "Gagal mengirim prompt ke OpenCode.",
   "bot.prompt_send_error_session_not_found": "⚠️ I could not deliver this message because the active session is no longer available.\n\nWhy this happened: the session may have been reset, changed, or removed.\nWhat to do: choose a session with /sessions or create a new one with /new, then resend your message.",
+  "bot.delivery_failed_notice": "I could not deliver the answer after several retries. Please ask again.",
   "bot.session_error": "🔴 OpenCode mengembalikan kesalahan: {message}",
   "bot.session_error_invalid_request":
     "🔴 The model rejected the request: {message}\n\nThe session context is probably too large or corrupted, retrying will not help. Compact it from 🎛️ Session Control, or start fresh with /new.",
@@ -208,6 +211,7 @@ export const id: I18nDictionary = {
   "sessions.loading_context": "⏳ Memuat konteks dan pesan terbaru...",
   "sessions.selected": "✅ Sesi dipilih: {title}",
   "sessions.select_error": "🔴 Gagal memilih sesi.",
+  "sessions.rate_limited_retry": "Telegram is rate limited, please retry in a bit.",
   "sessions.preview.empty": "Tidak ada pesan terbaru.",
   "sessions.preview.title": "Recent messages:",
   "sessions.preview.you": "You:",

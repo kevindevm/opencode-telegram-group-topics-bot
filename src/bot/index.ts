@@ -139,6 +139,7 @@ import {
 import {
   RateLimitExceededError,
   TelegramRateLimiter,
+  parseRetryAfterMs,
   runWithRateLimitRetries,
 } from "./telegram-rate-limiter.js";
 import type { Event as OpenCodeEvent, FilePartInput } from "@opencode-ai/sdk/v2";
@@ -446,10 +447,12 @@ function mirrorPcUserMessageEvent(event: OpenCodeEvent): void {
   safeBackgroundTask({
     taskName: "pc_user_mirror.send",
     task: () =>
-      activeBot.api.sendMessage(
-        payload.target.chatId,
-        t("pcuser.echo", { text: truncateText(payload.text, 3900) }),
-        getThreadSendOptions(payload.target.threadId),
+      runWithRateLimitRetries(`pc-mirror:${payload.sessionId}`, () =>
+        activeBot.api.sendMessage(
+          payload.target.chatId,
+          t("pcuser.echo", { text: truncateText(payload.text, 3900) }),
+          getThreadSendOptions(payload.target.threadId),
+        ),
       ),
     onError: (error) => {
       logger.error("[Bot] Failed to mirror PC user message to topic:", error);
@@ -544,13 +547,13 @@ function mirrorPcPromptOnRunStart(event: OpenCodeEvent): void {
       }
 
       logger.info(`[Bot] Mirroring PC prompt on run start for session ${sessionId}`);
-      await activeBot.api
-        .sendMessage(binding.chatId, t("pcuser.echo", { text: truncateText(text, 3900) }), {
+      await runWithRateLimitRetries(`pc-mirror-run-start:${sessionId}`, () =>
+        activeBot.api.sendMessage(binding.chatId, t("pcuser.echo", { text: truncateText(text, 3900) }), {
           ...getThreadSendOptions(binding.threadId),
-        })
-        .catch((error: unknown) => {
-          logger.error("[Bot] Failed to mirror PC prompt on run start:", error);
-        });
+        }),
+      ).catch((error: unknown) => {
+        logger.error("[Bot] Failed to mirror PC prompt on run start:", error);
+      });
     },
   });
 }
@@ -744,6 +747,25 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
   onFinalDeliveryGiveUp: (sessionId) => {
     assistantRunState.clearRun(sessionId, "final_delivery_gave_up");
   },
+  onFinalDeliveryNotice: async (sessionId) => {
+    if (!botInstance) {
+      return;
+    }
+    const target = getTargetBySessionId(sessionId);
+    if (!target) {
+      return;
+    }
+    await botInstance.api
+      .sendMessage(target.chatId, t("bot.delivery_failed_notice"), {
+        ...getThreadSendOptions(target.threadId),
+      })
+      .catch((error: unknown) => {
+        logger.warn("[Bot] Failed to send final delivery give-up notice:", {
+          sessionId,
+          error,
+        });
+      });
+  },
   handlers: {
     onAssistantUpdate: async ({ sessionId, messageId, text }) => {
       await liveStream.updateAssistant(sessionId, messageId, text);
@@ -866,10 +888,22 @@ const sessionOutputCoordinator = new SessionOutputCoordinator({
               continue;
             }
           }
-          await sendSessionDocumentMessage(sessionId, {
-            ...entry.fileData,
-            caption,
-          });
+          try {
+            await sendSessionDocumentMessage(sessionId, {
+              ...entry.fileData,
+              caption,
+            });
+          } catch (documentError) {
+            if (documentError instanceof RateLimitExceededError) {
+              // Retries are spent but the turn still completes: leave the
+              // warning in the stream so the missing file stays visible.
+              liveStream.pushServiceUpdate(
+                sessionId,
+                buildAttachmentFailureNotice(entry.fileData.filename),
+              );
+            }
+            throw documentError;
+          }
         }
       } catch (err) {
         logger.error("Failed to send file to Telegram:", err);
@@ -1057,6 +1091,16 @@ function prepareDocumentCaption(caption: string): string {
   return `${normalizedCaption.slice(0, TELEGRAM_DOCUMENT_CAPTION_MAX_LENGTH - 3)}...`;
 }
 
+/**
+ * Short in-turn warning when a tool file cannot be delivered. It goes into
+ * the turn stream like the other tool notices (not a direct send), so the
+ * turn still shows the missing file instead of completing silently.
+ */
+export function buildAttachmentFailureNotice(filename: string): string {
+  const name = filename.trim() || "attachment";
+  return `(attachment ${name} could not be delivered)`;
+}
+
 async function deliverAssistantCompletion(
   sessionId: string,
   messageText: string,
@@ -1217,6 +1261,34 @@ const LIVE_KEYBOARD_REPOST_MIN_PERCENT_DELTA = 2;
 const LIVE_KEYBOARD_REPOST_MAX_SCOPES = 200;
 const TYPING_INDICATOR_MIN_INTERVAL_MS = 5_000;
 const lastTypingIndicatorByScope = new Map<string, number>();
+
+/**
+ * sendChatAction bypasses the rate-limiter queue, so a flood rejection here
+ * would repeat on every typing event. After any 429, skip chat actions for
+ * a while; typing dots are cosmetic and never worth feeding the storm.
+ */
+const CHAT_ACTION_429_COOLDOWN_MS = 60_000;
+const chatActionRateLimitedUntilByChat = new Map<number, number>();
+
+function hasTelegramRetryAfter(error: unknown): boolean {
+  return parseRetryAfterMs(error) !== null;
+}
+
+function noteChatActionRateLimit(chatId: number, error: unknown): boolean {
+  if (error instanceof RateLimitExceededError || hasTelegramRetryAfter(error)) {
+    chatActionRateLimitedUntilByChat.set(chatId, Date.now() + CHAT_ACTION_429_COOLDOWN_MS);
+    while (chatActionRateLimitedUntilByChat.size > LIVE_KEYBOARD_REPOST_MAX_SCOPES) {
+      const oldest = chatActionRateLimitedUntilByChat.keys().next();
+      if (oldest.done) {
+        break;
+      }
+      chatActionRateLimitedUntilByChat.delete(oldest.value);
+    }
+    return true;
+  }
+
+  return false;
+}
 
 /** Records a repost baseline, evicting the oldest scope when the map grows. */
 function trackLiveKeyboardRepost(scopeKey: string, at: number, percent: number): void {
@@ -1842,6 +1914,19 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
     if (now - lastTypingAt < TYPING_INDICATOR_MIN_INTERVAL_MS) {
       return;
     }
+    const cooldownUntil = chatActionRateLimitedUntilByChat.get(target.chatId);
+    if (cooldownUntil !== undefined) {
+      if (now < cooldownUntil) {
+        logger.debug("[Bot] Skipping typing indicator while chat actions cool down", {
+          sessionId,
+        });
+        return;
+      }
+      // Expired: drop it opportunistically instead of retaining stale keys.
+      chatActionRateLimitedUntilByChat.delete(target.chatId);
+    }
+    // Refresh recency for the same reason on the throttle map.
+    lastTypingIndicatorByScope.delete(target.scopeKey);
     lastTypingIndicatorByScope.set(target.scopeKey, now);
     if (lastTypingIndicatorByScope.size > LIVE_KEYBOARD_REPOST_MAX_SCOPES) {
       const oldest = lastTypingIndicatorByScope.keys().next();
@@ -1857,6 +1942,14 @@ export async function ensureEventSubscription(directory: string): Promise<void> 
         getChatActionThreadOptions(target.threadId),
       )
       .catch((error) => {
+        if (noteChatActionRateLimit(target.chatId, error)) {
+          logger.debug("[Bot] Chat action rate limited; pausing chat actions", {
+            sessionId,
+            chatId: target.chatId,
+            threadId: target.threadId,
+          });
+          return;
+        }
         logger.debug("[Bot] Failed to send typing indicator", {
           sessionId,
           chatId: target.chatId,
@@ -2734,5 +2827,6 @@ export function cleanupBotRuntime(reason: string): void {
   clearAllBackgroundOffers();
   initializedCommandChats.clear();
   renamedGeneralTopicChats.clear();
+  chatActionRateLimitedUntilByChat.clear();
   botInstance = null;
 }

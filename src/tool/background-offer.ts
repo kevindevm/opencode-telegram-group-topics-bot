@@ -3,7 +3,11 @@ import { config } from "../config.js";
 import { t } from "../i18n/index.js";
 import { logger } from "../utils/logger.js";
 import { getThreadSendOptions } from "../bot/scope.js";
-import { runWithRateLimitRetries } from "../bot/telegram-rate-limiter.js";
+import {
+  parseRetryAfterMs,
+  RateLimitExceededError,
+  runWithRateLimitRetries,
+} from "../bot/telegram-rate-limiter.js";
 import { opencodeClient } from "../opencode/client.js";
 import type { Result } from "../opencode/v2/client.js";
 
@@ -85,6 +89,26 @@ const runningCallIds = new Map<string, Set<string>>();
 const sentOffers = new Map<string, PendingOffer>();
 
 /**
+ * One delayed retry per session after a 429 storm burns the shared send
+ * budget. Fire-and-forget with unref so it never holds the process open;
+ * cleared with the rest of the state on settle/shutdown.
+ */
+const OFFER_RETRY_DELAY_MS = 60_000;
+const offerRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function isRateLimitFailure(error: unknown): boolean {
+  return error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null;
+}
+
+function clearOfferRetryTimer(sessionId: string): void {
+  const timer = offerRetryTimers.get(sessionId);
+  if (timer) {
+    clearTimeout(timer);
+    offerRetryTimers.delete(sessionId);
+  }
+}
+
+/**
  * Unpressed offers must not linger forever: an abandoned session (restart
  * mid-run, deleted topic) would otherwise keep the message and the entry.
  */
@@ -154,6 +178,10 @@ function untrackRunningCall(sessionId: string, callId: string): boolean {
   return false;
 }
 
+function isCallTracked(sessionId: string, callId: string): boolean {
+  return runningCallIds.get(sessionId)?.has(callId) ?? false;
+}
+
 function truncateCommandPreview(commandPreview: string): string {
   const singleLine = commandPreview.replace(/\s+/g, " ").trim();
   if (singleLine.length <= MAX_COMMAND_PREVIEW_LENGTH) {
@@ -162,15 +190,18 @@ function truncateCommandPreview(commandPreview: string): string {
   return `${singleLine.slice(0, MAX_COMMAND_PREVIEW_LENGTH - 3).trimEnd()}...`;
 }
 
-async function sendOfferMessage(input: {
-  api: OfferApi;
-  sessionId: string;
-  callId: string;
-  commandPreview: string;
-  isSubagent: boolean;
-  chatId: number;
-  threadId: number | null;
-}): Promise<void> {
+async function sendOfferMessage(
+  input: {
+    api: OfferApi;
+    sessionId: string;
+    callId: string;
+    commandPreview: string;
+    isSubagent: boolean;
+    chatId: number;
+    threadId: number | null;
+  },
+  isRetry = false,
+): Promise<void> {
   const { api, sessionId, callId, chatId } = input;
   const keyboard = new InlineKeyboard().text(
     t("tool.background_button"),
@@ -185,6 +216,14 @@ async function sendOfferMessage(input: {
       reply_markup: keyboard,
       ...getThreadSendOptions(input.threadId),
     }));
+    // The tool may have settled while the send was in flight (slow retry
+    // after clear): never resurrect an offer for a call that is gone.
+    if (!isCallTracked(sessionId, callId)) {
+      await api
+        .deleteMessage(chatId, sent.message_id)
+        .catch(() => {});
+      return;
+    }
     sentOffers.set(sessionId, {
       chatId,
       messageId: sent.message_id,
@@ -212,6 +251,21 @@ async function sendOfferMessage(input: {
       callId,
       error,
     });
+
+    if (!isRetry && isRateLimitFailure(error) && !offerRetryTimers.has(sessionId)) {
+      // The tool is still running but the storm burned the shared budget:
+      // try once more a minute later instead of dropping the offer. No
+      // loop: the retry below never schedules another one.
+      const timer = setTimeout(() => {
+        offerRetryTimers.delete(sessionId);
+        if (!runningCallIds.has(sessionId)) {
+          return;
+        }
+        void sendOfferMessage(input, true);
+      }, OFFER_RETRY_DELAY_MS);
+      timer.unref?.();
+      offerRetryTimers.set(sessionId, timer);
+    }
   }
 }
 
@@ -260,6 +314,7 @@ export function noteToolBackgroundState(input: NoteToolBackgroundStateInput): vo
 
 /** Drops pending timers (and an unpressed offer message) when a session settles. */
 export function clearSessionBackgroundOffers(sessionId: string): void {
+  clearOfferRetryTimer(sessionId);
   for (const key of Array.from(pendingTimers.keys())) {
     if (key.startsWith(`${sessionId}:`)) {
       clearTimeout(pendingTimers.get(key));
@@ -272,6 +327,10 @@ export function clearSessionBackgroundOffers(sessionId: string): void {
 
 /** Drops every pending timer and unpressed offer (shutdown path). */
 export function clearAllBackgroundOffers(): void {
+  for (const timer of offerRetryTimers.values()) {
+    clearTimeout(timer);
+  }
+  offerRetryTimers.clear();
   for (const timer of pendingTimers.values()) {
     clearTimeout(timer);
   }

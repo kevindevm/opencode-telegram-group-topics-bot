@@ -7,6 +7,7 @@ import { summaryAggregator } from "../../summary/aggregator.js";
 import { interactionManager } from "../../interaction/manager.js";
 import { DEFAULT_ALLOWED_INTERACTION_COMMANDS } from "../../interaction/manager.js";
 import { logger } from "../../utils/logger.js";
+import { runWithRateLimitRetries } from "../telegram-rate-limiter.js";
 import { safeBackgroundTask } from "../../utils/safe-background-task.js";
 import { t } from "../../i18n/index.js";
 import { getScopeKeyFromContext, getThreadIdFromScopeKey, getThreadSendOptions } from "../scope.js";import { truncateTelegramText } from "../utils/telegram-text.js";
@@ -232,20 +233,22 @@ export async function showCurrentQuestion(
     return;
   }
 
-  const message = await sendMessageWithMarkdownFallback({
-    api: bot,
-    chatId,
-    text: formatQuestionText(question, scopeKey),
-    options: {
-      reply_markup: buildQuestionKeyboard(
-        question,
-        questionManager.getSelectedOptions(questionManager.getCurrentIndex(scopeKey), scopeKey),
-        scopeKey,
-      ),
-      ...getThreadSendOptions(threadId),
-    },
-    parseMode: "MarkdownV2",
-  });
+  const message = await runWithRateLimitRetries(`question:${scopeKey}`, () =>
+    sendMessageWithMarkdownFallback({
+      api: bot,
+      chatId,
+      text: formatQuestionText(question, scopeKey),
+      options: {
+        reply_markup: buildQuestionKeyboard(
+          question,
+          questionManager.getSelectedOptions(questionManager.getCurrentIndex(scopeKey), scopeKey),
+          scopeKey,
+        ),
+        ...getThreadSendOptions(threadId),
+      },
+      parseMode: "MarkdownV2",
+    }),
+  );
 
   questionManager.addMessageId(message.message_id, scopeKey);
   questionManager.setActiveMessageId(message.message_id, scopeKey);
@@ -357,13 +360,17 @@ async function showPollSummary(
   await sendAllAnswersToAgent(bot, chatId, scopeKey, threadId);
 
   if (answers.length === 0) {
-    await bot.sendMessage(
-      chatId,
-      t("question.completed_no_answers"),
-      getThreadSendOptions(threadId),
+    await runWithRateLimitRetries(`question-summary:${scopeKey}`, () =>
+      bot.sendMessage(
+        chatId,
+        t("question.completed_no_answers"),
+        getThreadSendOptions(threadId),
+      ),
     );
   } else {
-    await bot.sendMessage(chatId, formatAnswersSummary(answers), getThreadSendOptions(threadId));
+    await runWithRateLimitRetries(`question-summary:${scopeKey}`, () =>
+      bot.sendMessage(chatId, formatAnswersSummary(answers), getThreadSendOptions(threadId)),
+    );
   }
 
   clearQuestionInteraction("question_completed", scopeKey);

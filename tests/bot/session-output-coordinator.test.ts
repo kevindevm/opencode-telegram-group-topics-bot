@@ -6,6 +6,7 @@ describe("bot/session-output-coordinator", () => {
     onFinalizeSession?: ReturnType<typeof vi.fn>;
     onFinalDeliveryCommitted?: ReturnType<typeof vi.fn>;
     onFinalDeliveryGiveUp?: ReturnType<typeof vi.fn>;
+    onFinalDeliveryNotice?: ReturnType<typeof vi.fn>;
   }): SessionOutputCoordinator {
     return new SessionOutputCoordinator({
       settleMs: 100,
@@ -13,6 +14,7 @@ describe("bot/session-output-coordinator", () => {
       onFinalDeliveryCommitted:
         overrides?.onFinalDeliveryCommitted ?? vi.fn().mockResolvedValue(undefined),
       onFinalDeliveryGiveUp: overrides?.onFinalDeliveryGiveUp,
+      onFinalDeliveryNotice: overrides?.onFinalDeliveryNotice,
       handlers: {
         onAssistantUpdate: vi.fn().mockResolvedValue(undefined),
         onAssistantComplete: vi.fn().mockResolvedValue(undefined),
@@ -425,7 +427,7 @@ describe("bot/session-output-coordinator", () => {
     }
   });
 
-  it("never drops a rate-limited final delivery, no matter how long the flood lasts", async () => {
+  it("recovers a rate-limited final delivery when the flood ends within budget", async () => {
     vi.useFakeTimers();
     try {
       const { RateLimitExceededError } = await import(
@@ -445,11 +447,9 @@ describe("bot/session-output-coordinator", () => {
       });
       coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
 
-      // Far beyond the give-up budget: still retrying, nothing dropped.
-      for (let attempt = 0; attempt < 70; attempt++) {
+      for (let attempt = 0; attempt < 5; attempt++) {
         await vi.advanceTimersByTimeAsync(15_000);
       }
-      expect(onFinalizeSession.mock.calls.length).toBeGreaterThan(51);
       expect(onFinalDeliveryCommitted).not.toHaveBeenCalled();
 
       // Flood over: the very same turn text finally lands.
@@ -458,6 +458,245 @@ describe("bot/session-output-coordinator", () => {
 
       expect(onFinalizeSession).toHaveBeenLastCalledWith("s1", "Reply", true);
       expect(onFinalDeliveryCommitted).toHaveBeenCalledWith("s1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops a rate-limited final delivery after the consecutive 429 cap", async () => {
+    vi.useFakeTimers();
+    try {
+      const { RateLimitExceededError } = await import(
+        "../../src/bot/telegram-rate-limiter.js"
+      );
+      const onFinalizeSession = vi.fn(async () => {
+        throw new RateLimitExceededError("final:s1");
+      });
+      const onFinalDeliveryCommitted = vi.fn().mockResolvedValue(undefined);
+      const onFinalDeliveryGiveUp = vi.fn();
+      const coordinator = createCoordinator({
+        onFinalizeSession,
+        onFinalDeliveryCommitted,
+        onFinalDeliveryGiveUp,
+      });
+
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m1",
+        text: "Reply",
+      });
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+
+      for (let attempt = 0; attempt < 50; attempt++) {
+        await vi.advanceTimersByTimeAsync(15_000);
+      }
+      expect(onFinalDeliveryCommitted).not.toHaveBeenCalled();
+      expect(onFinalDeliveryGiveUp).toHaveBeenCalledWith("s1");
+
+      const callsAfterGiveUp = onFinalizeSession.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(onFinalizeSession.mock.calls.length).toBe(callsAfterGiveUp);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends a best-effort notice before dropping on non-429 give-up", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi.fn().mockRejectedValue(new Error("telegram down"));
+      const onFinalDeliveryCommitted = vi.fn();
+      const onFinalDeliveryNotice = vi.fn().mockResolvedValue(undefined);
+      const onFinalDeliveryGiveUp = vi.fn();
+      const coordinator = createCoordinator({
+        onFinalizeSession,
+        onFinalDeliveryCommitted,
+        onFinalDeliveryNotice,
+        onFinalDeliveryGiveUp,
+      });
+
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      await Promise.resolve();
+
+      expect(onFinalDeliveryCommitted).not.toHaveBeenCalled();
+      expect(onFinalDeliveryNotice).toHaveBeenCalledTimes(1);
+      expect(onFinalDeliveryNotice).toHaveBeenCalledWith("s1");
+      expect(onFinalDeliveryGiveUp).toHaveBeenCalledWith("s1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still drops when the give-up notice itself fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi.fn().mockRejectedValue(new Error("telegram down"));
+      const onFinalDeliveryNotice = vi.fn().mockRejectedValue(new Error("send failed"));
+      const onFinalDeliveryGiveUp = vi.fn();
+      const coordinator = createCoordinator({
+        onFinalizeSession,
+        onFinalDeliveryNotice,
+        onFinalDeliveryGiveUp,
+      });
+
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      await Promise.resolve();
+
+      expect(onFinalDeliveryGiveUp).toHaveBeenCalledWith("s1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reset the give-up budget when new completions arrive", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi.fn().mockResolvedValue(false);
+      const onFinalDeliveryCommitted = vi.fn();
+      const onFinalDeliveryGiveUp = vi.fn();
+      const coordinator = createCoordinator({
+        onFinalizeSession,
+        onFinalDeliveryCommitted,
+        onFinalDeliveryGiveUp,
+      });
+
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m0",
+        text: "Start",
+      });
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+
+      for (let attempt = 0; attempt < 60; attempt++) {
+        coordinator.dispatch({
+          kind: "assistant_complete",
+          sessionId: "s1",
+          messageId: `m${attempt + 1}`,
+          text: `Drip ${attempt + 1}`,
+        });
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      expect(onFinalDeliveryCommitted).not.toHaveBeenCalled();
+      expect(onFinalDeliveryGiveUp).toHaveBeenCalledWith("s1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks dropped completions with a gap marker instead of losing them silently", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi.fn().mockResolvedValue(true);
+      const coordinator = createCoordinator({ onFinalizeSession });
+
+      for (let index = 1; index <= 22; index++) {
+        coordinator.dispatch({
+          kind: "assistant_complete",
+          sessionId: "s1",
+          messageId: `m${index}`,
+          text: `Update ${index}`,
+        });
+      }
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+      await vi.runAllTimersAsync();
+
+      expect(onFinalizeSession).toHaveBeenCalledTimes(20);
+      expect(onFinalizeSession).toHaveBeenNthCalledWith(1, "s1", "Update 3", false);
+      expect(onFinalizeSession).toHaveBeenLastCalledWith(
+        "s1",
+        "[system notice: 2 earlier updates dropped] Update 22",
+        true,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("caps the overflow gap marker count", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi.fn().mockResolvedValue(true);
+      const coordinator = createCoordinator({ onFinalizeSession });
+
+      for (let index = 1; index <= 150; index++) {
+        coordinator.dispatch({
+          kind: "assistant_complete",
+          sessionId: "s1",
+          messageId: `m${index}`,
+          text: `Update ${index}`,
+        });
+      }
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+      await vi.runAllTimersAsync();
+
+      expect(onFinalizeSession).toHaveBeenLastCalledWith(
+        "s1",
+        "[system notice: 99+ earlier updates dropped] Update 150",
+        true,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not resurrect a cleared session on retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("telegram down"))
+        .mockResolvedValue(true);
+      const coordinator = createCoordinator({ onFinalizeSession });
+
+      coordinator.dispatch({
+        kind: "assistant_complete",
+        sessionId: "s1",
+        messageId: "m1",
+        text: "Reply",
+      });
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(onFinalizeSession).toHaveBeenCalledTimes(1);
+
+      coordinator.clearSession("s1");
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(onFinalizeSession).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not double finalize when flush races an in-flight round", async () => {
+    vi.useFakeTimers();
+    try {
+      const onFinalizeSession = vi.fn().mockResolvedValue(true);
+      const onFinalDeliveryCommitted = vi.fn().mockResolvedValue(undefined);
+      const coordinator = createCoordinator({ onFinalizeSession, onFinalDeliveryCommitted });
+
+      coordinator.dispatch({ kind: "session_idle", sessionId: "s1" });
+
+      const first = coordinator.flushPendingFinalDelivery("s1");
+      const second = coordinator.flushPendingFinalDelivery("s1");
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+
+      expect(firstResult).toBe(true);
+      expect(secondResult).toBe(true);
+      expect(onFinalizeSession).toHaveBeenCalledTimes(1);
+      expect(onFinalizeSession).toHaveBeenCalledWith("s1", null, true);
+      expect(onFinalDeliveryCommitted).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

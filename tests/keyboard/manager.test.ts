@@ -41,10 +41,14 @@ describe("keyboard/manager", () => {
     vi.useFakeTimers();
     try {
       const scopeKey = "-100123:99";
-      const sendMessage = vi.fn().mockResolvedValue({ message_id: 7 });
+      const sendMessage = vi
+        .fn()
+        .mockResolvedValueOnce({ message_id: 7 })
+        .mockResolvedValue({ message_id: 8 });
+      const editMessageText = vi.fn().mockResolvedValue(true);
       const deleteMessage = vi.fn().mockResolvedValue(true);
       keyboardManager.initialize(
-        { sendMessage, deleteMessage } as never,
+        { sendMessage, editMessageText, deleteMessage } as never,
         -100123,
         scopeKey,
       );
@@ -67,10 +71,12 @@ describe("keyboard/manager", () => {
       await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
       expect(sendMessage).toHaveBeenCalledTimes(1);
 
-      // New numbers with force: sent even inside the debounce window.
+      // New numbers with force: reply keyboards cannot be edited in
+      // place, so a fresh carrier goes out and the old one is deleted.
       contextStateManager.update(5_000, 100_000, scopeKey);
       await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
       expect(sendMessage).toHaveBeenCalledTimes(2);
+      expect(deleteMessage).toHaveBeenCalledWith(-100123, 7);
 
       keyboardManager.clearScope(scopeKey);
     } finally {
@@ -220,9 +226,13 @@ describe("keyboard/manager", () => {
     vi.useFakeTimers();
     try {
       const scopeKey = "-100123:60";
-      const sendMessage = vi.fn().mockResolvedValue({ message_id: 9 });
+      const sendMessage = vi
+        .fn()
+        .mockResolvedValueOnce({ message_id: 9 })
+        .mockResolvedValue({ message_id: 10 });
+      const editMessageText = vi.fn().mockResolvedValue(true);
       const deleteMessage = vi.fn().mockResolvedValue(true);
-      keyboardManager.initialize({ sendMessage, deleteMessage } as never, -100123, scopeKey);
+      keyboardManager.initialize({ sendMessage, editMessageText, deleteMessage } as never, -100123, scopeKey);
       keyboardManager.updateAgent("build", scopeKey);
       keyboardManager.updateModel(
         { providerID: "openai", modelID: "gpt-5.4", variant: "default" },
@@ -239,15 +249,106 @@ describe("keyboard/manager", () => {
       expect(sendMessage).toHaveBeenCalledTimes(1);
 
       // 600ms later (2.1s after the real delivery) new numbers go out
-      // immediately instead of being throttled by the no-op.
+      // immediately instead of being throttled by the no-op: a fresh
+      // carrier replaces the previous one.
       await vi.advanceTimersByTimeAsync(600);
       contextStateManager.update(5_000, 100_000, scopeKey);
       await keyboardManager.sendKeyboardUpdate(-100123, scopeKey);
+      expect(sendMessage).toHaveBeenCalledTimes(2);
+      expect(deleteMessage).toHaveBeenCalledWith(-100123, 9);
+      keyboardManager.clearScope(scopeKey);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("opens a storm cooldown after a 429 and skips repaints while cooling", async () => {
+    vi.useFakeTimers();
+    try {
+      const scopeKey = "-100123:61";
+      // The mocked api bypasses the queue: the raw 429 shape is what the
+      // manager sees (production would surface RateLimitExceededError).
+      const sendMessage = vi.fn().mockRejectedValue({ parameters: { retry_after: 1 } });
+      keyboardManager.initialize({ sendMessage } as never, -100123, scopeKey);
+      keyboardManager.updateAgent("build", scopeKey);
+      keyboardManager.updateModel(
+        { providerID: "openai", modelID: "gpt-5.4", variant: "default" },
+        scopeKey,
+      );
+      contextStateManager.update(1_000, 100_000, scopeKey);
+
+      await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+
+      // Cooling: even forced repaints with fresh numbers are skipped.
+      contextStateManager.update(5_000, 100_000, scopeKey);
+      await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+
+      // Cooldown lapsed: the next repaint goes out with the latest numbers.
+      await vi.advanceTimersByTimeAsync(61_000);
+      await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
+      // The fingerprint rolled back on the failure, so this is a real send.
       expect(sendMessage).toHaveBeenCalledTimes(2);
 
       keyboardManager.clearScope(scopeKey);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("replaces the carrier with send+delete since reply keyboards cannot be edited", async () => {
+    const scopeKey = "-100123:62";
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 70 });
+    const deleteMessage = vi.fn().mockResolvedValue(true);
+    keyboardManager.initialize({ sendMessage, deleteMessage } as never, -100123, scopeKey);
+    keyboardManager.updateAgent("build", scopeKey);
+    keyboardManager.updateModel(
+      { providerID: "openai", modelID: "gpt-5.4", variant: "default" },
+      scopeKey,
+    );
+    contextStateManager.update(1_000, 100_000, scopeKey);
+
+    await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(deleteMessage).not.toHaveBeenCalled();
+
+    // Reply keyboards are inline-edit-proof: the next repaint sends a fresh
+    // carrier and deletes its predecessor.
+    sendMessage.mockResolvedValue({ message_id: 73 });
+    contextStateManager.update(9_000, 100_000, scopeKey);
+    await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(deleteMessage).toHaveBeenCalledWith(-100123, 70);
+
+    keyboardManager.clearScope(scopeKey);
+  });
+
+  it("replaces the carrier when the previous one is gone", async () => {
+    const scopeKey = "-100123:63";
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValueOnce({ message_id: 71 })
+      .mockResolvedValue({ message_id: 72 });
+    const deleteMessage = vi.fn().mockResolvedValue(true);
+    keyboardManager.initialize({ sendMessage, deleteMessage } as never, -100123, scopeKey);
+    keyboardManager.updateAgent("build", scopeKey);
+    keyboardManager.updateModel(
+      { providerID: "openai", modelID: "gpt-5.4", variant: "default" },
+      scopeKey,
+    );
+    contextStateManager.update(1_000, 100_000, scopeKey);
+
+    await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    // The carrier vanished outside Telegram: the next repaint sends a fresh
+    // carrier and best-effort deletes the stale predecessor.
+    contextStateManager.update(9_000, 100_000, scopeKey);
+    await keyboardManager.sendKeyboardUpdate(-100123, scopeKey, { force: true });
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(deleteMessage).toHaveBeenCalledWith(-100123, 71);
+
+    keyboardManager.clearScope(scopeKey);
   });
 });

@@ -433,7 +433,7 @@ describe("bot/handlers/permission", () => {
     expect(interactionManager.getSnapshot()).toBeNull();
   });
 
-  it("retries permission message delivery after Telegram 429", async () => {
+  it("sends once and posts a notice when Telegram 429s the poll", async () => {
     vi.useFakeTimers();
 
     const rateLimitError = Object.assign(new Error("Too Many Requests"), {
@@ -443,10 +443,12 @@ describe("bot/handlers/permission", () => {
       sendMessage: vi
         .fn()
         .mockRejectedValueOnce(rateLimitError)
-        .mockResolvedValueOnce({ message_id: 900 }),
+        .mockResolvedValueOnce({ message_id: 901 }),
       deleteMessage: vi.fn().mockResolvedValue(true),
     } as unknown as Context["api"];
 
+    // Retries live in the shared queue in production; this layer makes a
+    // single attempt and leaves a pointer so the user can answer elsewhere.
     const promise = showPermissionRequest(
       botApi,
       777,
@@ -454,14 +456,58 @@ describe("bot/handlers/permission", () => {
       "global",
       null,
     );
-
-    await vi.advanceTimersByTimeAsync(1100);
-    await promise;
+    const assertion = expect(promise).rejects.toThrow("Too Many Requests");
+    await vi.advanceTimersByTimeAsync(2000);
+    await assertion;
 
     const sendMessageMock = botApi.sendMessage as unknown as ReturnType<typeof vi.fn>;
     expect(sendMessageMock).toHaveBeenCalledTimes(2);
-    expect(permissionManager.getRequestID(900)).toBe("perm-retry");
-    expect(interactionManager.getSnapshot()?.kind).toBe("permission");
+    const [, noticeText] = sendMessageMock.mock.calls[1];
+    expect(noticeText).toContain("rate limit");
+    expect(permissionManager.isActive()).toBe(false);
+  });
+
+  it("still drops the poll when the notice itself is rate limited", async () => {
+    vi.useFakeTimers();
+
+    const rateLimitError = Object.assign(new Error("Too Many Requests"), {
+      parameters: { retry_after: 1 },
+    });
+    const botApi = {
+      sendMessage: vi.fn().mockRejectedValue(rateLimitError),
+      deleteMessage: vi.fn().mockResolvedValue(true),
+    } as unknown as Context["api"];
+
+    const promise = showPermissionRequest(
+      botApi,
+      777,
+      createPermissionRequest("perm-storm"),
+      "global",
+      null,
+    );
+    const assertion = expect(promise).rejects.toThrow("Too Many Requests");
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await assertion;
+
+    const sendMessageMock = botApi.sendMessage as unknown as ReturnType<typeof vi.fn>;
+    expect(sendMessageMock).toHaveBeenCalledTimes(2);
+    expect(permissionManager.isActive()).toBe(false);
+  });
+
+  it("sends no notice when the poll send fails without a 429", async () => {
+    const botApi = {
+      sendMessage: vi.fn().mockRejectedValue(new Error("send failed")),
+      deleteMessage: vi.fn().mockResolvedValue(true),
+    } as unknown as Context["api"];
+
+    await expect(
+      showPermissionRequest(botApi, 777, createPermissionRequest("perm-plain-fail"), "global", null),
+    ).rejects.toThrow("send failed");
+
+    const sendMessageMock = botApi.sendMessage as unknown as ReturnType<typeof vi.fn>;
+    expect(sendMessageMock).toHaveBeenCalledTimes(1);
+    expect(permissionManager.isActive()).toBe(false);
   });
 
   it("sends permission text in raw mode for underscore-based permission names", async () => {

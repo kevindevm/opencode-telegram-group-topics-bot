@@ -222,6 +222,14 @@ describe("bot/utils/send-with-markdown-fallback", () => {
     expect(getTelegramRetryAfterMs(new Error("network timeout"))).toBeNull();
   });
 
+  it("extracts retry_after from strings and descriptions", () => {
+    expect(getTelegramRetryAfterMs({ parameters: { retry_after: "5" } })).toBe(5000);
+    expect(getTelegramRetryAfterMs(new Error("Too Many Requests: retry after 3"))).toBe(3000);
+    expect(getTelegramRetryAfterMs({ description: "Flood control: retry_after 7" })).toBe(7000);
+    expect(getTelegramRetryAfterMs({ parameters: { retry_after: 0 } })).toBeNull();
+    expect(getTelegramRetryAfterMs({ parameters: { retry_after: -2 } })).toBeNull();
+  });
+
   it("supports Markdown parse mode with fallback", async () => {
     const sendMessage = vi
       .fn()

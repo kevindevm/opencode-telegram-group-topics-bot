@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { InputFile } from "grammy";
 import { sendTtsResponseForSession } from "../../../src/bot/utils/send-tts-response.js";
-import { MAX_429_ATTEMPTS } from "../../../src/bot/telegram-rate-limiter.js";
+import {
+  MAX_429_ATTEMPTS,
+  RateLimitExceededError,
+} from "../../../src/bot/telegram-rate-limiter.js";
 import { t } from "../../../src/i18n/index.js";
 
 vi.mock("../../../src/utils/logger.js", () => ({
@@ -143,7 +146,8 @@ describe("bot/utils/send-tts-response", () => {
       synthesizeSpeech: synthesizeSpeechMock,
     });
 
-    await vi.advanceTimersByTimeAsync(2100);
+    // The 429 retry sleep carries jitter: advance past the worst case.
+    await vi.advanceTimersByTimeAsync(5000);
     await expect(resultPromise).resolves.toBe(true);
     expect(sendAudioMock).toHaveBeenCalledTimes(2);
     expect(sendMessageMock).not.toHaveBeenCalled();
@@ -151,7 +155,7 @@ describe("bot/utils/send-tts-response", () => {
     vi.useRealTimers();
   });
 
-  it("gives up after repeated Telegram rate limits instead of retrying forever", async () => {
+  it("stays silent after repeated Telegram rate limits instead of sending a fallback", async () => {
     vi.useFakeTimers();
 
     const sendMessageMock = vi.fn().mockResolvedValue(undefined);
@@ -180,10 +184,34 @@ describe("bot/utils/send-tts-response", () => {
 
     // Bounded budget: one initial attempt plus the shared give-up budget.
     expect(sendAudioMock).toHaveBeenCalledTimes(MAX_429_ATTEMPTS + 1);
-    expect(sendMessageMock).toHaveBeenCalledWith(123, t("tts.failed"), {
-      message_thread_id: 55,
-    });
+    expect(sendMessageMock).not.toHaveBeenCalled();
 
     vi.useRealTimers();
+  });
+
+  it("stays silent when the audio send throws RateLimitExceededError", async () => {
+    const sendMessageMock = vi.fn().mockResolvedValue(undefined);
+    const sendAudioMock = vi
+      .fn()
+      .mockRejectedValue(new RateLimitExceededError("sendAudio"));
+    const synthesizeSpeechMock = vi.fn().mockResolvedValue({
+      buffer: Buffer.from("mp3"),
+      filename: "assistant-reply.mp3",
+      mimeType: "audio/mpeg",
+    });
+
+    const result = await sendTtsResponseForSession({
+      api: { sendAudio: sendAudioMock, sendMessage: sendMessageMock },
+      sessionId: "session-1",
+      chatId: 123,
+      threadId: 55,
+      text: "Hello from audio",
+      consumeResponseMode: () => "text_and_tts",
+      isTtsConfigured: () => true,
+      synthesizeSpeech: synthesizeSpeechMock,
+    });
+
+    expect(result).toBe(false);
+    expect(sendMessageMock).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,5 @@
 import { logger } from "../../utils/logger.js";
+import { parseRetryAfterMs } from "../telegram-rate-limiter.js";
 import type { Api, RawApi } from "grammy";
 
 type SendMessageApi = Pick<Api<RawApi>, "sendMessage">;
@@ -156,21 +157,7 @@ export function isTelegramMessageNotModifiedError(error: unknown): boolean {
 }
 
 export function getTelegramRetryAfterMs(error: unknown): number | null {
-  if (!error || typeof error !== "object") {
-    return null;
-  }
-
-  const params = Reflect.get(error, "parameters");
-  if (!params || typeof params !== "object") {
-    return null;
-  }
-
-  const retryAfter = Reflect.get(params, "retry_after");
-  if (typeof retryAfter !== "number" || retryAfter <= 0) {
-    return null;
-  }
-
-  return retryAfter * 1000;
+  return parseRetryAfterMs(error);
 }
 
 export async function sendMessageWithMarkdownFallback({

@@ -7,6 +7,14 @@ const PER_CHAT_EDIT_INTERVAL_MS = 250;
 const GROUP_WINDOW_MS = 60_000;
 const GROUP_LIMIT_PER_WINDOW = 20;
 
+export const MAX_QUEUE_JOBS = 200;
+/** Hard ceiling for user traffic too; rejections reschedule via transient paths. */
+export const MAX_USER_QUEUE_JOBS = 1000;
+/** Backoff when Telegram says 429 but gives no timing info. */
+export const DEFAULT_UNKNOWN_429_DELAY_MS = 5000;
+const RETRY_JITTER_MS = 500;
+const FAIRNESS_CONSECUTIVE_LIMIT = 5;
+
 const RATE_LIMITED_METHODS = new Set<string>([
   "sendMessage",
   "editMessageText",
@@ -56,16 +64,19 @@ export async function runWithRateLimitRetries<T>(
     try {
       return await run();
     } catch (error) {
-      const retryAfterMs = getRetryAfterMs(error);
+      const retryAfterMs = parseRetryAfterMs(error);
       if (!retryAfterMs) {
         throw error;
       }
+      // Budget counts retries: the total is the initial try plus
+      // maxAttempts retries, same as the queued and direct paths.
       if (attempt >= maxAttempts) {
         logger.warn(`[RateLimiter] Giving up on ${label} after ${attempt + 1} rate limits`);
         throw new RateLimitExceededError(label);
       }
-      logger.info(`[RateLimiter] Telegram rate limit for ${label}; retry in ${retryAfterMs + 100}ms`);
-      await sleep(retryAfterMs + 100);
+      const delayMs = retryDelayMs(retryAfterMs);
+      logger.info(`[RateLimiter] Telegram rate limit for ${label}; retry in ${delayMs}ms`);
+      await sleep(delayMs);
     }
   }
 }
@@ -92,16 +103,18 @@ interface QueueJob {
 /** Edits re-render what the user already sees; everything else moves the conversation forward. */
 const REPAINT_METHODS = new Set(["editMessageText", "editMessageReplyMarkup"]);
 
-function isEditMessageJob(job: QueueJob): boolean {
-  return job.method === "editMessageText";
+function isEditLikeMethod(method: string): boolean {
+  return method === "editMessageText" || method === "editMessageReplyMarkup";
 }
 
 function getPerChatIntervalMs(job: QueueJob): number {
-  return isEditMessageJob(job) ? PER_CHAT_EDIT_INTERVAL_MS : PER_CHAT_SEND_INTERVAL_MS;
+  return isEditLikeMethod(job.method) ? PER_CHAT_EDIT_INTERVAL_MS : PER_CHAT_SEND_INTERVAL_MS;
 }
 
 function countsTowardsGroupWindow(job: QueueJob): boolean {
-  return !isEditMessageJob(job);
+  // Stream text edits can self-induce floods, so they share the group
+  // window. Markup-only edits stay exempt.
+  return job.method !== "editMessageReplyMarkup";
 }
 
 function parseMessageId(payload: unknown): number | null {
@@ -172,22 +185,68 @@ function isGroupLikeChat(chatId: number | null): boolean {
   return chatId !== null && chatId < 0;
 }
 
-function getRetryAfterMs(error: unknown): number | null {
-  if (!error || typeof error !== "object") {
-    return null;
+function collectRateLimitText(error: unknown): string {
+  const parts: string[] = [];
+  if (typeof error === "string") {
+    parts.push(error);
+  } else if (error && typeof error === "object") {
+    const description = Reflect.get(error, "description");
+    if (typeof description === "string") {
+      parts.push(description);
+    }
+    const message = Reflect.get(error, "message");
+    if (typeof message === "string") {
+      parts.push(message);
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
+ * Shared 429 detector: accepts numeric retry_after, string numbers, and
+ * "retry after N" / "retry_after N" inside error description strings.
+ * A bare 429 (error_code only, no timing info) still backs off with a
+ * conservative default instead of failing the call as non-retryable.
+ */
+export function parseRetryAfterMs(error: unknown): number | null {
+  if (error && typeof error === "object") {
+    const params = Reflect.get(error, "parameters");
+    if (params && typeof params === "object") {
+      const retryAfter: unknown = Reflect.get(params, "retry_after");
+      let seconds = NaN;
+      if (typeof retryAfter === "number") {
+        seconds = retryAfter;
+      } else if (typeof retryAfter === "string") {
+        seconds = Number(retryAfter);
+      }
+      if (Number.isFinite(seconds) && seconds > 0) {
+        return seconds * 1000;
+      }
+    }
   }
 
-  const params = Reflect.get(error, "parameters");
-  if (!params || typeof params !== "object") {
-    return null;
+  const match = /retry[_ ]after\s*:?\s*(\d+(?:\.\d+)?)/i.exec(collectRateLimitText(error));
+  if (match) {
+    const seconds = Number(match[1]);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return seconds * 1000;
+    }
   }
 
-  const retryAfter = Reflect.get(params, "retry_after");
-  if (typeof retryAfter !== "number" || retryAfter <= 0) {
-    return null;
+  if (
+    error &&
+    typeof error === "object" &&
+    Reflect.get(error, "error_code") === 429 &&
+    /too many requests/i.test(collectRateLimitText(error))
+  ) {
+    return DEFAULT_UNKNOWN_429_DELAY_MS;
   }
 
-  return retryAfter * 1000;
+  return null;
+}
+
+function retryDelayMs(retryAfterMs: number): number {
+  return retryAfterMs + 100 + Math.random() * RETRY_JITTER_MS;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -198,15 +257,26 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export interface EnqueueOptions {
+  /** Override the default user/repaint classification; default keeps it. */
+  priority?: "user" | "repaint";
+}
+
 export class TelegramRateLimiter {
   private readonly queue: QueueJob[] = [];
   private processing = false;
   private lastGlobalSentAt = 0;
   private readonly lastSentAtByChat = new Map<number, number>();
   private readonly groupWindowByChat = new Map<number, number[]>();
+  private readonly backoffUntilByChat = new Map<number, number>();
   private activeScopeKey: string | null = null;
+  private lastPickedScopeKey: string | null = null;
+  private consecutiveScopePicks = 0;
 
-  private findCoalescibleEditIndex(payload: unknown): number {
+  private findCoalescibleEditIndex(method: string, payload: unknown): number {
+    if (!isEditLikeMethod(method)) {
+      return -1;
+    }
     const scopeKey = scopeKeyFromPayload(payload);
     const messageId = parseMessageId(payload);
     if (!scopeKey || messageId === null) {
@@ -215,7 +285,7 @@ export class TelegramRateLimiter {
 
     for (let index = this.queue.length - 1; index >= 0; index--) {
       const job = this.queue[index];
-      if (!isEditMessageJob(job) || job.scopeKey !== scopeKey) {
+      if (job.method !== method || job.scopeKey !== scopeKey) {
         continue;
       }
 
@@ -236,31 +306,38 @@ export class TelegramRateLimiter {
       try {
         return await run();
       } catch (error) {
-        const retryAfterMs = getRetryAfterMs(error);
+        const retryAfterMs = parseRetryAfterMs(error);
         if (!retryAfterMs) {
           throw error;
         }
 
+        // Budget counts retries: the total is the initial try plus
+        // MAX_429_ATTEMPTS retries, same as the queued and wrapper paths.
         if (attempt >= MAX_429_ATTEMPTS) {
           logger.warn(`[RateLimiter] Giving up on ${method} after ${attempt + 1} rate limits`);
           throw new RateLimitExceededError(method);
         }
 
-        const delayMs = retryAfterMs + 100;
+        const delayMs = retryDelayMs(retryAfterMs);
         logger.info(`[RateLimiter] Telegram rate limit for ${method}; retry in ${delayMs}ms`);
         await sleep(delayMs);
       }
     }
   }
 
-  enqueue<T>(method: string, payload: unknown, run: () => Promise<T>): Promise<T> {
+  enqueue<T>(
+    method: string,
+    payload: unknown,
+    run: () => Promise<T>,
+    opts?: EnqueueOptions,
+  ): Promise<T> {
     if (!RATE_LIMITED_METHODS.has(method)) {
       return this.executeWithRetryAfter(method, run);
     }
 
     const promise = new Promise<unknown>((resolve, reject) => {
-      if (method === "editMessageText") {
-        const existingIndex = this.findCoalescibleEditIndex(payload);
+      if (isEditLikeMethod(method)) {
+        const existingIndex = this.findCoalescibleEditIndex(method, payload);
         if (existingIndex >= 0) {
           const existingJob = this.queue[existingIndex];
           existingJob.payload = payload;
@@ -280,13 +357,14 @@ export class TelegramRateLimiter {
         isGroupLike: isGroupLikeChat(chatId),
         notBefore: 0,
         attempts429: 0,
-        kind: REPAINT_METHODS.has(method) ? "repaint" : "user",
+        kind: opts?.priority ?? (REPAINT_METHODS.has(method) ? "repaint" : "user"),
         run: run as () => Promise<unknown>,
         resolves: [resolve],
         rejects: [reject],
       };
 
       this.queue.push(job);
+      this.enforceQueueBound();
       if (this.queue.length > 25) {
         logger.debug(`[RateLimiter] Outbound queue depth=${this.queue.length}`);
       }
@@ -294,6 +372,56 @@ export class TelegramRateLimiter {
       this.ensureProcessing();
     });
     return promise as Promise<T>;
+  }
+
+  private enforceQueueBound(): void {
+    let dropped = 0;
+    while (this.queue.length > MAX_QUEUE_JOBS) {
+      const victimIndex = this.queue.findIndex((job) => job.kind === "repaint");
+      if (victimIndex < 0) {
+        break;
+      }
+      const [victim] = this.queue.splice(victimIndex, 1);
+      dropped += 1;
+      // Reject so awaiting callers follow the existing failure paths.
+      // Dropped jobs surface as RateLimitExceededError on purpose: the
+      // coordinator treats that as transient and reschedules instead of
+      // counting it against the give-up budget.
+      const giveUp = new RateLimitExceededError(victim.method);
+      for (const reject of victim.rejects) {
+        reject(giveUp);
+      }
+    }
+    if (dropped > 0) {
+      logger.warn(
+        `[RateLimiter] Queue overflow; dropped ${dropped} repaint jobs (depth=${this.queue.length})`,
+      );
+    }
+    // User traffic is never dropped silently: an unbounded user queue means
+    // a runaway producer, so cap it too and fail loudly. Rejected callers
+    // see RateLimitExceededError and follow the transient retry paths.
+    let droppedUser = 0;
+    while (this.queue.length > MAX_USER_QUEUE_JOBS) {
+      const victimIndex = this.queue.findIndex((job) => job.kind === "user");
+      if (victimIndex < 0) {
+        break;
+      }
+      const [victim] = this.queue.splice(victimIndex, 1);
+      droppedUser += 1;
+      const giveUp = new RateLimitExceededError(victim.method);
+      for (const reject of victim.rejects) {
+        reject(giveUp);
+      }
+    }
+    if (droppedUser > 0) {
+      logger.error(
+        `[RateLimiter] Queue overflow; dropped ${droppedUser} user jobs (depth=${this.queue.length}). Producer is outrunning Telegram; some sends will retry late.`,
+      );
+    } else if (this.queue.length > MAX_QUEUE_JOBS) {
+      logger.warn(
+        `[RateLimiter] Queue full of user jobs (depth=${this.queue.length}); waiting to drain`,
+      );
+    }
   }
 
   private ensureProcessing(): void {
@@ -306,7 +434,8 @@ export class TelegramRateLimiter {
   }
 
   private findNextIndex(now: number): { index: number; waitMs: number } {
-    let best: { index: number; waitMs: number; tier: number } | null = null;
+    let best: { index: number; tier: number; scopeKey: string | null } | null = null;
+    const ready: Array<{ index: number; tier: number; scopeKey: string | null }> = [];
     let minWaitMs = Number.POSITIVE_INFINITY;
     let minWaitIndex = 0;
     const seenScopeKeys = new Set<string>();
@@ -333,8 +462,9 @@ export class TelegramRateLimiter {
         const tier =
           (job.kind === "user" ? 0 : 2) +
           (this.activeScopeKey && job.scopeKey === this.activeScopeKey ? 0 : 1);
+        ready.push({ index, tier, scopeKey: job.scopeKey });
         if (!best || tier < best.tier || (tier === best.tier && index < best.index)) {
-          best = { index, waitMs: 0, tier };
+          best = { index, tier, scopeKey: job.scopeKey };
         }
 
         continue;
@@ -346,14 +476,48 @@ export class TelegramRateLimiter {
       }
     }
 
-    if (best) {
-      return { index: best.index, waitMs: 0 };
+    if (!best) {
+      return {
+        index: minWaitIndex,
+        waitMs: Number.isFinite(minWaitMs) ? Math.max(1, minWaitMs) : 1,
+      };
     }
 
-    return {
-      index: minWaitIndex,
-      waitMs: Number.isFinite(minWaitMs) ? Math.max(1, minWaitMs) : 1,
-    };
+    const top = best;
+    if (
+      this.consecutiveScopePicks >= FAIRNESS_CONSECUTIVE_LIMIT &&
+      top.scopeKey === this.lastPickedScopeKey
+    ) {
+      // One scope must not starve the rest: after several consecutive picks
+      // from the same scope, run the oldest-ready job from another scope at
+      // the same or next tier instead, once. The counter resets below.
+      let alternative: { index: number; tier: number; scopeKey: string | null } | null = null;
+      for (const candidate of ready) {
+        if (candidate.scopeKey === this.lastPickedScopeKey) {
+          continue;
+        }
+        if (candidate.tier > top.tier + 1) {
+          continue;
+        }
+        if (!alternative || candidate.index < alternative.index) {
+          alternative = candidate;
+        }
+      }
+      if (alternative) {
+        return { index: alternative.index, waitMs: 0 };
+      }
+    }
+
+    return { index: top.index, waitMs: 0 };
+  }
+
+  private notePickedScope(scopeKey: string | null): void {
+    if (scopeKey === this.lastPickedScopeKey) {
+      this.consecutiveScopePicks += 1;
+      return;
+    }
+    this.lastPickedScopeKey = scopeKey;
+    this.consecutiveScopePicks = 1;
   }
 
   private pruneGroupWindow(chatId: number, now: number): number[] {
@@ -373,6 +537,14 @@ export class TelegramRateLimiter {
     if (job.chatId !== null) {
       const lastPerChat = this.lastSentAtByChat.get(job.chatId) ?? 0;
       waits.push(lastPerChat + getPerChatIntervalMs(job) - now);
+      const backoffUntil = this.backoffUntilByChat.get(job.chatId);
+      if (backoffUntil !== undefined) {
+        if (backoffUntil <= now) {
+          this.backoffUntilByChat.delete(job.chatId);
+        } else {
+          waits.push(backoffUntil - now);
+        }
+      }
     }
 
     if (job.isGroupLike && job.chatId !== null && countsTowardsGroupWindow(job)) {
@@ -409,7 +581,7 @@ export class TelegramRateLimiter {
       }
       return "done";
     } catch (error) {
-      const retryAfterMs = getRetryAfterMs(error);
+      const retryAfterMs = parseRetryAfterMs(error);
       if (!retryAfterMs) {
         for (const reject of job.rejects) {
           reject(error);
@@ -418,6 +590,8 @@ export class TelegramRateLimiter {
       }
 
       job.attempts429 += 1;
+      // Budget counts retries: the total is the initial try plus
+      // MAX_429_ATTEMPTS retries, same as the direct paths.
       if (job.attempts429 > MAX_429_ATTEMPTS) {
         logger.warn(
           `[RateLimiter] Giving up on ${job.method} after ${job.attempts429} rate limits`,
@@ -429,19 +603,22 @@ export class TelegramRateLimiter {
         return "done";
       }
 
-      const delayMs = retryAfterMs + 100;
+      const delayMs = retryDelayMs(retryAfterMs);
       job.notBefore = Date.now() + delayMs;
+      if (job.chatId !== null) {
+        this.backoffUntilByChat.set(job.chatId, job.notBefore);
+      }
       logger.info(`[RateLimiter] Telegram rate limit for ${job.method}; retry in ${delayMs}ms`);
       return "retry";
     }
   }
 
   private requeueRetryJob(job: QueueJob): void {
-    if (isEditMessageJob(job)) {
+    if (isEditLikeMethod(job.method)) {
       // A newer edit for the same message makes this retry stale: drop the
-      // old text instead of resending it ahead of the fresh one. The old
+      // old payload instead of resending it ahead of the fresh one. The old
       // waiters join the newer job so they resolve with the latest repaint.
-      const newerIndex = this.findCoalescibleEditIndex(job.payload);
+      const newerIndex = this.findCoalescibleEditIndex(job.method, job.payload);
       if (newerIndex >= 0) {
         const newer = this.queue[newerIndex];
         newer.resolves.push(...job.resolves);
@@ -479,6 +656,7 @@ export class TelegramRateLimiter {
 
         const index = selection.index;
         const [job] = this.queue.splice(index, 1);
+        this.notePickedScope(job.scopeKey);
         const outcome = await this.executeJob(job);
         if (outcome === "retry") {
           this.requeueRetryJob(job);

@@ -30,6 +30,8 @@ export const zh: I18nDictionary = {
   "permission.outcome.always": "🔓 Allowed always",
   "permission.outcome.reject": "❌ Rejected",
   "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.rate_limited_notice":
+    "⚠️ Permission prompt lost to rate limits, please answer in Telegram/PC.",
 
   "background.session_fallback": "session {id}",
   "background.assistant_response": "🔔 Assistant replied in background session: {session}",
@@ -97,6 +99,8 @@ export const zh: I18nDictionary = {
     "⚠️ 这条消息没有成功发送到 OpenCode。\n\n可能原因：机器人与 OpenCode 服务器之间出现了临时连接问题。\n建议：请重发一次；如果持续出现，请运行 /status 检查 OpenCode 是否可达。",
   "bot.prompt_send_error_session_not_found":
     "⚠️ 这条消息发送失败，因为当前活动会话已不可用。\n\n原因：该会话可能已被重置、切换或删除。\n建议：先用 /sessions 选择会话，或用 /new 创建新会话，然后再重发消息。",
+  "bot.delivery_failed_notice":
+    "I could not deliver the answer after several retries. Please ask again.",
   "bot.session_error": "🔴 OpenCode 返回错误：{message}",
   "bot.session_error_invalid_request":
     "🔴 The model rejected the request: {message}\n\nThe session context is probably too large or corrupted, retrying will not help. Compact it from 🎛️ Session Control, or start fresh with /new.",
@@ -195,6 +199,7 @@ export const zh: I18nDictionary = {
   "sessions.loading_context": "⏳ 正在加载上下文和最新消息...",
   "sessions.selected": "✅ 已选择会话：{title}",
   "sessions.select_error": "🔴 选择会话失败。",
+  "sessions.rate_limited_retry": "Telegram is rate limited, please retry in a bit.",
   "sessions.preview.empty": "没有最近消息。",
   "sessions.preview.title": "最近消息：",
   "sessions.preview.you": "你：",

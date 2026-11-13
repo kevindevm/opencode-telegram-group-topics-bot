@@ -268,10 +268,59 @@ describe("tool/background-offer", () => {
 
     const pending = vi.advanceTimersByTimeAsync(30_000);
     await pending;
-    // The 429 retry sleeps retry_after + 100ms before resending.
-    await vi.advanceTimersByTimeAsync(1_500);
+    // The 429 retry sleep carries jitter: advance past the worst case.
+    await vi.advanceTimersByTimeAsync(2_500);
     expect(api.sendMessage).toHaveBeenCalledTimes(2);
     expect(__backgroundOfferTestHooks.sizes().sentOffers).toBe(1);
+  });
+
+  it("schedules one delayed retry after 429 exhaustion, then stops", async () => {
+    const api = makeApi();
+    api.sendMessage.mockRejectedValue({ parameters: { retry_after: 1 } });
+    noteRunning(api, { delayMs: 100 });
+
+    // The delay fires, the shared budget burns out, and one retry is queued.
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(api.sendMessage.mock.calls.length).toBeGreaterThan(1);
+    const callsAfterExhaustion = api.sendMessage.mock.calls.length;
+    expect(__backgroundOfferTestHooks.sizes().sentOffers).toBe(0);
+
+    // A minute later the single retry fires and burns out the same way.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(api.sendMessage.mock.calls.length).toBeGreaterThan(callsAfterExhaustion);
+    const callsAfterRetry = api.sendMessage.mock.calls.length;
+    expect(__backgroundOfferTestHooks.sizes().sentOffers).toBe(0);
+
+    // No loop: nothing more is scheduled after the retry fails.
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(api.sendMessage.mock.calls.length).toBe(callsAfterRetry);
+  });
+
+  it("delivers the offer when the delayed retry succeeds", async () => {
+    const api = makeApi();
+    let calls = 0;
+    api.sendMessage.mockImplementation(async () => {
+      calls += 1;
+      if (calls <= 11) {
+        throw { parameters: { retry_after: 1 } };
+      }
+      return { message_id: 42 };
+    });
+    noteRunning(api, { delayMs: 100 });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(__backgroundOfferTestHooks.sizes().sentOffers).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(api.sendMessage).toHaveBeenCalledTimes(12);
+    expect(__backgroundOfferTestHooks.sizes().sentOffers).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(api.sendMessage).toHaveBeenCalledTimes(12);
   });
 
   it("expires the offer and its tracking after the TTL without leaking", async () => {

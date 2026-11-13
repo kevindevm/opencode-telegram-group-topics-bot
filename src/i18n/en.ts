@@ -106,6 +106,8 @@ export const en = {
     "⚠️ I could not deliver this message to OpenCode.\n\nLikely cause: a temporary connection hiccup between the bot and OpenCode server.\nWhat to do: send the message again. If it keeps happening, run /status and check that OpenCode is reachable.",
   "bot.prompt_send_error_session_not_found":
     "⚠️ I could not deliver this message because the active session is no longer available.\n\nWhy this happened: the session may have been reset, changed, or removed.\nWhat to do: choose a session with /sessions or create a new one with /new, then resend your message.",
+  "bot.delivery_failed_notice":
+    "⚠️ I could not deliver the answer after several retries. Please ask again.",
   "bot.session_error": "🔴 OpenCode returned an error: {message}",
   "bot.session_error_invalid_request":
     "🔴 The model rejected the request: {message}\n\nThe session context is probably too large or corrupted, retrying will not help. Compact it from 🎛️ Session Control, or start fresh with /new.",
@@ -249,6 +251,7 @@ export const en = {
   "sessions.loading_context": "⏳ Loading context and latest messages...",
   "sessions.selected": "✅ Session selected: {title}",
   "sessions.select_error": "🔴 Failed to select session.",
+  "sessions.rate_limited_retry": "Telegram is rate limited, please retry in a bit.",
   "sessions.preview.empty": "No recent messages.",
   "sessions.preview.title": "Recent messages:",
   "sessions.preview.you": "You:",
@@ -384,6 +387,8 @@ export const en = {
   "permission.outcome.always": "🔓 Allowed always",
   "permission.outcome.reject": "❌ Rejected",
   "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.rate_limited_notice":
+    "⚠️ Permission prompt lost to rate limits, please answer in Telegram/PC.",
 
   "recent.heading": "Recent sessions across projects:",
   "recent.empty": "📭 No recent sessions found.",

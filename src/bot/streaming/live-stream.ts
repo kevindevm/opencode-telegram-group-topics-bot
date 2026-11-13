@@ -6,9 +6,13 @@ import {
   getTelegramRetryAfterMs,
   isTelegramMessageNotModifiedError,
 } from "../utils/send-with-markdown-fallback.js";
+import { RateLimitExceededError, runWithRateLimitRetries } from "../telegram-rate-limiter.js";
 
 const DEFAULT_THROTTLE_MS = 1000;
 const TELEGRAM_MESSAGE_LIMIT = 4096;
+const MAX_RETRY_FLUSH_ATTEMPTS = 10;
+/** Wait after the queue already spent its own budget; storm is ongoing. */
+const EXHAUSTED_QUEUE_RETRY_DELAY_MS = 15_000;
 const THINKING_PREFIX = "__thinking__";
 const MAX_REPLACEABLE_SERVICE_LENGTH = 3500;
 const CLEAR_SESSION_TIMEOUT_MS = 5_000;
@@ -226,6 +230,7 @@ export class LiveStream {
   private readonly states = new Map<string, SessionState>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly sessionTasks = new Map<string, Promise<void>>();
+  private readonly retryFlushAttempts = new Map<string, number>();
 
   constructor(options: LiveStreamOptions) {
     this.sendText = options.sendText;
@@ -545,15 +550,7 @@ export class LiveStream {
         return;
       }
 
-      try {
-        await this.deleteText(sessionId, messageId);
-      } catch (error) {
-        logger.warn("[LiveStream] Failed to delete stream message during final cleanup", {
-          sessionId,
-          messageId,
-          error,
-        });
-      }
+      await this.deleteStreamMessage(sessionId, messageId);
     };
 
     this.clearTimer(sessionId);
@@ -650,15 +647,8 @@ export class LiveStream {
         return;
       }
 
-      try {
-        await this.deleteText(sessionId, latestState.messageId);
-      } catch (error) {
-        logger.warn("[LiveStream] Failed to delete live message after final delivery", {
-          sessionId,
-          messageId: latestState.messageId,
-          error,
-        });
-      }
+      const messageId = latestState.messageId;
+      await this.deleteStreamMessage(sessionId, messageId);
 
       latestState.messageId = null;
       latestState.lastSentText = "";
@@ -680,6 +670,7 @@ export class LiveStream {
     this.clearTimer(sessionId);
     await this.enqueueTask(sessionId, async () => undefined);
     this.states.delete(sessionId);
+    this.retryFlushAttempts.delete(sessionId);
   }
 
   async clearAll(reason: string): Promise<void> {
@@ -691,6 +682,9 @@ export class LiveStream {
       const done = cleared.then(() => false);
       if (await Promise.race([done, timedOut])) {
         logger.warn("[LiveStream] Timed out clearing session state", { sessionId, reason });
+        this.clearTimer(sessionId);
+        this.sessionTasks.delete(sessionId);
+        this.retryFlushAttempts.delete(sessionId);
         this.states.delete(sessionId);
       }
     }
@@ -832,6 +826,42 @@ export class LiveStream {
     this.timers.delete(sessionId);
   }
 
+  private resetRetryFlushAttempts(sessionId: string): void {
+    this.retryFlushAttempts.delete(sessionId);
+  }
+
+  /**
+   * Removes a stream message after its content went out another way. A 429
+   * here is retried like any other delivery: giving up leaves the stale
+   * message next to the finals and the turn reads twice. Never fails the
+   * caller: after the give-up budget the storm owns the outcome.
+   */
+  private async deleteStreamMessage(sessionId: string, messageId: number): Promise<void> {
+    const deleteText = this.deleteText;
+    if (!deleteText) {
+      return;
+    }
+
+    try {
+      await runWithRateLimitRetries(`delete-live:${sessionId}`, () =>
+        deleteText(sessionId, messageId),
+      );
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        logger.warn("[LiveStream] Storm outlasted stream message delete retries; leaving it", {
+          sessionId,
+          messageId,
+        });
+      } else {
+        logger.warn("[LiveStream] Failed to delete stream message", {
+          sessionId,
+          messageId,
+          error,
+        });
+      }
+    }
+  }
+
   private scheduleFlush(sessionId: string): void {
     if (this.timers.has(sessionId)) {
       return;
@@ -846,12 +876,34 @@ export class LiveStream {
   }
 
   private scheduleRetryFlush(sessionId: string, retryAfterMs: number): void {
-    this.clearTimer(sessionId);
+    const attempts = (this.retryFlushAttempts.get(sessionId) ?? 0) + 1;
+    this.retryFlushAttempts.set(sessionId, attempts);
+    if (attempts > MAX_RETRY_FLUSH_ATTEMPTS) {
+      logger.warn("[LiveStream] Retry budget exhausted; keeping entries until next mutation", {
+        sessionId,
+      });
+      return;
+    }
 
+    this.clearTimer(sessionId);
+    this.armRetryTimer(sessionId, retryAfterMs);
+  }
+
+  /**
+   * The queue already spent its own 429 budget before surfacing
+   * RateLimitExceededError, so retrying here must not consume the local
+   * budget too: wait out the storm without counting down.
+   */
+  private scheduleUnbudgetedRetry(sessionId: string, delayMs: number): void {
+    this.clearTimer(sessionId);
+    this.armRetryTimer(sessionId, delayMs);
+  }
+
+  private armRetryTimer(sessionId: string, delayMs: number): void {
     const timer = setTimeout(() => {
       this.timers.delete(sessionId);
       void this.enqueueTask(sessionId, () => this.flushSessionState(sessionId));
-    }, retryAfterMs);
+    }, delayMs);
 
     this.timers.set(sessionId, timer);
   }
@@ -911,6 +963,7 @@ export class LiveStream {
     while (true) {
       const text = renderEntries(state.entries);
       if (!text) {
+        this.resetRetryFlushAttempts(sessionId);
         return;
       }
 
@@ -924,8 +977,16 @@ export class LiveStream {
 
             state.messageId = messageId;
             state.lastSentText = text;
+            this.resetRetryFlushAttempts(sessionId);
             return;
           } catch (error) {
+            if (error instanceof RateLimitExceededError) {
+              logger.info("[LiveStream] Queue gave up on stream send; waiting out the storm", {
+                sessionId,
+              });
+              this.scheduleUnbudgetedRetry(sessionId, EXHAUSTED_QUEUE_RETRY_DELAY_MS);
+              return;
+            }
             const retryAfterMs = getTelegramRetryAfterMs(error);
             if (retryAfterMs) {
               logger.info(
@@ -939,18 +1000,28 @@ export class LiveStream {
             }
 
             logger.warn("[LiveStream] Failed to send stream message", { sessionId, error });
+            this.scheduleRetryFlush(sessionId, this.throttleMs);
             return;
           }
         }
 
         if (state.lastSentText === text) {
+          this.resetRetryFlushAttempts(sessionId);
           return;
         }
 
         try {
           await this.editText(sessionId, state.messageId, text, "raw", false);
           state.lastSentText = text;
+          this.resetRetryFlushAttempts(sessionId);
         } catch (error) {
+          if (error instanceof RateLimitExceededError) {
+            logger.info("[LiveStream] Queue gave up on stream edit; waiting out the storm", {
+              sessionId,
+            });
+            this.scheduleUnbudgetedRetry(sessionId, EXHAUSTED_QUEUE_RETRY_DELAY_MS);
+            return;
+          }
           const retryAfterMs = getTelegramRetryAfterMs(error);
           if (retryAfterMs) {
             logger.info(
@@ -973,6 +1044,7 @@ export class LiveStream {
           });
           state.messageId = null;
           state.lastSentText = "";
+          this.scheduleRetryFlush(sessionId, this.throttleMs);
         }
         return;
       }
@@ -995,6 +1067,13 @@ export class LiveStream {
           await this.editText(sessionId, state.messageId, prefixText, "raw", false);
         }
       } catch (error) {
+        if (error instanceof RateLimitExceededError) {
+          logger.info("[LiveStream] Queue gave up on rolled sync; waiting out the storm", {
+            sessionId,
+          });
+          this.scheduleUnbudgetedRetry(sessionId, EXHAUSTED_QUEUE_RETRY_DELAY_MS);
+          return;
+        }
         const retryAfterMs = getTelegramRetryAfterMs(error);
         if (retryAfterMs) {
           logger.info(
@@ -1016,6 +1095,7 @@ export class LiveStream {
         });
         state.messageId = null;
         state.lastSentText = "";
+        this.scheduleRetryFlush(sessionId, this.throttleMs);
         return;
       }
 

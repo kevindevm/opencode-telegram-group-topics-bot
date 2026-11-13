@@ -8,6 +8,7 @@ import { summaryAggregator } from "../../summary/aggregator.js";
 import { interactionManager } from "../../interaction/manager.js";
 import { INTERACTION_CLEAR_REASON } from "../../interaction/constants.js";
 import { logger } from "../../utils/logger.js";
+import { parseRetryAfterMs, RateLimitExceededError } from "../telegram-rate-limiter.js";
 import { PermissionRequest, PermissionReply } from "../../permission/types.js";
 import type { I18nKey } from "../../i18n/en.js";
 import { t } from "../../i18n/index.js";
@@ -20,8 +21,6 @@ const PERMISSION_CALLBACK = {
   ACTION_INDEX: 1,
   REQUEST_ID_INDEX: 2,
 } as const;
-
-const TELEGRAM_PERMISSION_SEND_RETRY_LIMIT = 3;
 
 /**
  * Grace period before a permission poll is shown. Requests resolved quickly
@@ -146,25 +145,7 @@ async function autoApprovePermissionRequest(
 type PermissionCallbackAction = PermissionReply;
 
 function getRetryAfterMs(error: unknown): number | null {
-  if (!error || typeof error !== "object") {
-    return null;
-  }
-
-  const params = Reflect.get(error, "parameters");
-  if (!params || typeof params !== "object") {
-    return null;
-  }
-
-  const retryAfter = Reflect.get(params, "retry_after");
-  if (typeof retryAfter !== "number" || retryAfter <= 0) {
-    return null;
-  }
-
-  return retryAfter * 1000;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return parseRetryAfterMs(error);
 }
 
 interface ParsedPermissionCallback {
@@ -552,34 +533,18 @@ export async function showPermissionRequest(
   const keyboard = buildPermissionKeyboard(request.id);
 
   try {
-    let message: Awaited<ReturnType<typeof sendBotText>> | null = null;
-
-    for (let attempt = 1; attempt <= TELEGRAM_PERMISSION_SEND_RETRY_LIMIT; attempt++) {
-      try {
-        message = await sendBotText({
-          api: bot,
-          chatId,
-          text,
-          options: {
-            reply_markup: keyboard,
-            ...getThreadSendOptions(threadId),
-          },
-        });
-        break;
-      } catch (err) {
-        const retryAfterMs = getRetryAfterMs(err);
-        const shouldRetry = retryAfterMs !== null && attempt < TELEGRAM_PERMISSION_SEND_RETRY_LIMIT;
-
-        if (!shouldRetry) {
-          throw err;
-        }
-
-        logger.warn(
-          `[PermissionHandler] Retrying permission message after Telegram 429: requestID=${request.id}, attempt=${attempt}, retryAfterMs=${retryAfterMs}`,
-        );
-        await delay(retryAfterMs + 100);
-      }
-    }
+    // Single attempt: api.sendMessage runs through the shared queue, which
+    // already owns 429 backoff with its own give-up budget. A manual loop
+    // here would multiply into ~100 sends per poll during a storm.
+    const message = await sendBotText({
+      api: bot,
+      chatId,
+      text,
+      options: {
+        reply_markup: keyboard,
+        ...getThreadSendOptions(threadId),
+      },
+    });
 
     if (!message) {
       throw new Error("Permission message send failed without Telegram response");
@@ -596,6 +561,11 @@ export async function showPermissionRequest(
     summaryAggregator.stopTypingIndicator(request.sessionID);
   } catch (err) {
     logger.error("[PermissionHandler] Failed to send permission message:", err);
+    if (err instanceof RateLimitExceededError || getRetryAfterMs(err) !== null) {
+      await bot
+        .sendMessage(chatId, t("permission.rate_limited_notice"), getThreadSendOptions(threadId))
+        .catch(() => {});
+    }
     throw err;
   }
 }

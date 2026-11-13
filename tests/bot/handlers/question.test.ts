@@ -10,6 +10,7 @@ import {
   showCurrentQuestion,
 } from "../../../src/bot/handlers/question.js";
 import type { Question } from "../../../src/question/types.js";
+import { RateLimitExceededError } from "../../../src/bot/telegram-rate-limiter.js";
 import { t } from "../../../src/i18n/index.js";
 
 vi.mock("../../../src/settings/manager.js", () => ({
@@ -425,5 +426,104 @@ describe("closeQuestionSettledOutside", () => {
 
     expect(closed).toBe(false);
     expect(editMessageText).not.toHaveBeenCalled();
+  });
+});
+
+describe("bot/handlers/question 429 retries", () => {
+  const scopeKey = "global";
+
+  function createFlakyApi(
+    failures: number,
+  ): { api: Context["api"]; sendMessage: ReturnType<typeof vi.fn> } {
+    const sendMessage = vi.fn().mockImplementation(async () => {
+      if (sendMessage.mock.calls.length <= failures) {
+        throw { parameters: { retry_after: 1 } };
+      }
+      return { message_id: 700 + sendMessage.mock.calls.length };
+    });
+    const api = { sendMessage } as unknown as Context["api"];
+    return { api, sendMessage };
+  }
+
+  beforeEach(() => {
+    vi.useRealTimers();
+    questionManager.clear(scopeKey);
+    interactionManager.clear("test_setup");
+  });
+
+  it("retries the poll send across a Telegram 429 instead of losing the question", async () => {
+    vi.useFakeTimers();
+    try {
+      questionManager.startQuestions([QUESTION_ONE], "req-429", scopeKey);
+      const { api, sendMessage } = createFlakyApi(1);
+
+      const promise = showCurrentQuestion(api, 123, scopeKey, null);
+      // The 429 retry sleep carries jitter: advance past the worst case.
+      await vi.advanceTimersByTimeAsync(2500);
+      await promise;
+
+      expect(sendMessage).toHaveBeenCalledTimes(2);
+      expect(questionManager.getMessageIds(scopeKey)).toHaveLength(1);
+      expect(questionManager.isActive(scopeKey)).toBe(true);
+      expect(interactionManager.getSnapshot(scopeKey)?.kind).toBe("question");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up after a persistent 429 storm instead of retrying forever", async () => {
+    vi.useFakeTimers();
+    try {
+      questionManager.startQuestions([QUESTION_ONE], "req-storm", scopeKey);
+      const { api, sendMessage } = createFlakyApi(100);
+
+      const promise = showCurrentQuestion(api, 123, scopeKey, null);
+      const assertion = expect(promise).rejects.toBeInstanceOf(RateLimitExceededError);
+      await vi.advanceTimersByTimeAsync(120_000);
+      await assertion;
+
+      expect(sendMessage.mock.calls.length).toBeGreaterThan(1);
+      expect(questionManager.getMessageIds(scopeKey)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries the empty poll summary after a 429", async () => {
+    vi.useFakeTimers();
+    try {
+      // A started but unanswered poll: the summary still runs with no answers.
+      questionManager.startQuestions([QUESTION_ONE], "req-empty", scopeKey);
+      questionManager.nextQuestion(scopeKey);
+      const { api, sendMessage } = createFlakyApi(1);
+
+      const promise = showCurrentQuestion(api, 123, scopeKey, null);
+      await vi.advanceTimersByTimeAsync(2500);
+      await promise;
+
+      expect(sendMessage).toHaveBeenCalledTimes(2);
+      expect(sendMessage.mock.calls[1]?.[1]).toBe(t("question.completed_no_answers"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries the answered poll summary after a 429", async () => {
+    vi.useFakeTimers();
+    try {
+      questionManager.startQuestions([QUESTION_ONE], "req-answered", scopeKey);
+      questionManager.selectOption(0, 0, scopeKey);
+      questionManager.nextQuestion(scopeKey);
+      const { api, sendMessage } = createFlakyApi(1);
+
+      const promise = showCurrentQuestion(api, 123, scopeKey, null);
+      await vi.advanceTimersByTimeAsync(2500);
+      await promise;
+
+      expect(sendMessage).toHaveBeenCalledTimes(2);
+      expect(String(sendMessage.mock.calls[1]?.[1])).toContain("Yes");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -30,6 +30,8 @@ export const de: I18nDictionary = {
   "permission.outcome.always": "🔓 Allowed always",
   "permission.outcome.reject": "❌ Rejected",
   "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.rate_limited_notice":
+    "⚠️ Permission prompt lost to rate limits, please answer in Telegram/PC.",
 
   "background.session_fallback": "session {id}",
   "background.assistant_response": "🔔 Assistant replied in background session: {session}",
@@ -108,6 +110,8 @@ export const de: I18nDictionary = {
     "⚠️ Ich konnte diese Nachricht nicht an OpenCode senden.\n\nWahrscheinliche Ursache: eine vorübergehende Verbindungsstörung zwischen Bot und OpenCode-Server.\nWas du tun kannst: sende die Nachricht erneut. Wenn es weiter passiert, nutze /status und prüfe, ob OpenCode erreichbar ist.",
   "bot.prompt_send_error_session_not_found":
     "⚠️ Ich konnte diese Nachricht nicht senden, weil die aktive Sitzung nicht mehr verfügbar ist.\n\nWarum das passiert ist: die Sitzung wurde möglicherweise zurückgesetzt, gewechselt oder gelöscht.\nWas du tun kannst: wähl eine Sitzung mit /sessions oder erstelle eine neue mit /new und sende die Nachricht dann erneut.",
+  "bot.delivery_failed_notice":
+    "⚠️ I could not deliver the answer after several retries. Please ask again.",
   "bot.session_error": "🔴 OpenCode meldete einen Fehler: {message}",
   "bot.session_error_invalid_request":
     "🔴 The model rejected the request: {message}\n\nThe session context is probably too large or corrupted, retrying will not help. Compact it from 🎛️ Session Control, or start fresh with /new.",
@@ -218,6 +222,7 @@ export const de: I18nDictionary = {
   "sessions.loading_context": "⏳ Lade Kontext und letzte Nachrichten...",
   "sessions.selected": "✅ Sitzung ausgewählt: {title}",
   "sessions.select_error": "🔴 Sitzung konnte nicht ausgewählt werden.",
+  "sessions.rate_limited_retry": "Telegram is rate limited, please retry in a bit.",
   "sessions.preview.empty": "Keine neuen Nachrichten.",
   "sessions.preview.title": "Letzte Nachrichten:",
   "sessions.preview.you": "Du:",

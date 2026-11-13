@@ -30,6 +30,8 @@ export const fr: I18nDictionary = {
   "permission.outcome.always": "🔓 Toujours autorisé",
   "permission.outcome.reject": "❌ Refusé",
   "permission.outcome.settled_outside": "☑️ Répondu hors Telegram",
+  "permission.rate_limited_notice":
+    "⚠️ Permission prompt lost to rate limits, please answer in Telegram/PC.",
 
   "background.session_fallback": "session {id}",
   "background.assistant_response": "🔔 Assistant replied in background session: {session}",

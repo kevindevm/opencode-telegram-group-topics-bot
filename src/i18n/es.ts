@@ -106,6 +106,8 @@ export const es: I18nDictionary = {
     "⚠️ No pude entregar este mensaje a OpenCode.\n\nCausa probable: un problema temporal de conexión entre el bot y el servidor OpenCode.\nQué hacer: envía el mensaje otra vez. Si sigue pasando, ejecuta /status y verifica que OpenCode esté accesible.",
   "bot.prompt_send_error_session_not_found":
     "⚠️ No pude entregar este mensaje porque la sesión activa ya no está disponible.\n\nPor qué pasó: la sesión pudo haberse reiniciado, cambiado o eliminado.\nQué hacer: selecciona una sesión con /sessions o crea una nueva con /new, y vuelve a enviar el mensaje.",
+  "bot.delivery_failed_notice":
+    "⚠️ No pude entregar la respuesta tras varios intentos. Pedila de nuevo.",
   "bot.session_error": "🔴 OpenCode devolvió un error: {message}",
   "bot.session_error_invalid_request":
     "🔴 El modelo rechazó el pedido: {message}\n\nSeguramente el contexto de la sesión es demasiado grande o se corrompió, reintentar no va a funcionar. Compactala desde 🎛️ Session Control, o empezá de nuevo con /new.",
@@ -214,6 +216,7 @@ export const es: I18nDictionary = {
   "sessions.loading_context": "⏳ Cargando contexto y los últimos mensajes...",
   "sessions.selected": "✅ Sesión seleccionada: {title}",
   "sessions.select_error": "🔴 No se pudo seleccionar la sesión.",
+  "sessions.rate_limited_retry": "Telegram está limitado, reintentá en un momento.",
   "sessions.preview.empty": "No hay mensajes recientes.",
   "sessions.preview.title": "Mensajes recientes:",
   "sessions.preview.you": "Tú:",
@@ -350,6 +353,8 @@ export const es: I18nDictionary = {
   "permission.outcome.always": "🔓 Permitido siempre",
   "permission.outcome.reject": "❌ Rechazado",
   "permission.outcome.settled_outside": "☑️ Respondido fuera de Telegram",
+  "permission.rate_limited_notice":
+    "⚠️ Permiso perdido por límite de frecuencia, respondé en Telegram/PC.",
 
   "background.session_fallback": "sesión {id}",
   "background.assistant_response": "🔔 El asistente respondió en una sesión en segundo plano: {session}",

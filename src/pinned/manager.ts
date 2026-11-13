@@ -28,7 +28,8 @@ interface ScopeContext {
   lastEditAt: number;
   /**
    * Drop repaints while in cooldown. Set after a 429 so retries do not
-   * feed the flood.
+   * feed the flood. A dashboard that goes stale during cooldown refreshes
+   * on the next post-cooldown trigger; there is no trailing timer by design.
    */
   cooldownUntil: number;
 }
@@ -969,7 +970,19 @@ class PinnedMessageManager {
       if (err instanceof Error && err.message.includes("message to edit not found")) {
         context.state.messageId = null;
         this.clearPersistedPinnedId(scopeKey);
-        await this.createPinnedMessageOnce(scopeKey);
+        // Storm guard: a send+pin recreate would only extend the flood. The
+        // id stays null so the next post-cooldown flush recreates it.
+        if (Date.now() < context.cooldownUntil) {
+          return;
+        }
+        try {
+          await this.createPinnedMessageOnce(scopeKey);
+        } catch (recreateError) {
+          if (recreateError instanceof RateLimitExceededError) {
+            this.openStormCooldown(context);
+          }
+          throw recreateError;
+        }
         return;
       }
 
@@ -978,7 +991,18 @@ class PinnedMessageManager {
         // expired): post a fresh dashboard instead of freezing on the dead id.
         context.state.messageId = null;
         this.clearPersistedPinnedId(scopeKey);
-        await this.createPinnedMessageOnce(scopeKey);
+        // Same storm guard as above: skip the recreate while cooling.
+        if (Date.now() < context.cooldownUntil) {
+          return;
+        }
+        try {
+          await this.createPinnedMessageOnce(scopeKey);
+        } catch (recreateError) {
+          if (recreateError instanceof RateLimitExceededError) {
+            this.openStormCooldown(context);
+          }
+          throw recreateError;
+        }
         return;
       }
 

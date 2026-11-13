@@ -1,7 +1,6 @@
 import { logger } from "../utils/logger.js";
 import { getTopicBindingBySessionId, updateTopicBindingNameBySessionId } from "./manager.js";
 import { formatTopicTitle } from "./title-format.js";
-import { getTelegramRetryAfterMs } from "../bot/utils/send-with-markdown-fallback.js";
 
 interface TopicEditApi {
   editForumTopic: (
@@ -32,29 +31,20 @@ export async function syncTopicTitleForSession(
     return false;
   }
 
-  while (true) {
-    try {
-      await api.editForumTopic(binding.chatId, binding.threadId, { name: topicName });
-      break;
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("TOPIC_NOT_MODIFIED")) {
-        updateTopicBindingNameBySessionId(sessionId, topicName);
-        return false;
-      }
-
-      const retryAfterMs = getTelegramRetryAfterMs(error);
-      if (!retryAfterMs) {
-        throw error;
-      }
-
-      logger.info(
-        `[TopicTitle] Telegram rate limit; retrying topic title sync in ${retryAfterMs}ms`,
-        {
-          sessionId,
-        },
-      );
-      await new Promise((resolve) => setTimeout(resolve, retryAfterMs + 100));
+  try {
+    await api.editForumTopic(binding.chatId, binding.threadId, { name: topicName });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("TOPIC_NOT_MODIFIED")) {
+      updateTopicBindingNameBySessionId(sessionId, topicName);
+      return false;
     }
+
+    // Single attempt: api.editForumTopic runs through the shared queue,
+    // which already owns 429 backoff with its own budget. Retrying here
+    // would stack a second budget on top; on exhaustion the error
+    // propagates to the caller's safeBackgroundTask instead of hanging
+    // event processing.
+    throw error;
   }
 
   updateTopicBindingNameBySessionId(sessionId, topicName);

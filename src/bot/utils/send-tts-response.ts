@@ -4,9 +4,17 @@ import { getPromptResponseMode } from "../handlers/prompt.js";
 import { isTtsConfigured, synthesizeSpeech, type TtsResult } from "../../tts/client.js";
 import { t } from "../../i18n/index.js";
 import { logger } from "../../utils/logger.js";
-import { runWithRateLimitRetries } from "../telegram-rate-limiter.js";
+import {
+  parseRetryAfterMs,
+  RateLimitExceededError,
+  runWithRateLimitRetries,
+} from "../telegram-rate-limiter.js";
 
 const MAX_TTS_INPUT_CHARS = 4_000;
+
+function isRateLimitFailure(error: unknown): boolean {
+  return error instanceof RateLimitExceededError || parseRetryAfterMs(error) !== null;
+}
 
 interface TelegramAudioApi {
   sendAudio: (
@@ -75,6 +83,13 @@ export async function sendTtsResponseForSession({
     logger.info(`[TTS] Sent audio reply for session ${sessionId}`);
     return true;
   } catch (error) {
+    if (isRateLimitFailure(error)) {
+      // A 429 storm already burned the shared retry budget above: stay
+      // silent instead of spending another send on the fallback text.
+      logger.warn(`[TTS] Skipping audio reply for session ${sessionId}: Telegram rate limited`, error);
+      return false;
+    }
+
     logger.warn(`[TTS] Failed to send audio reply for session ${sessionId}`, error);
 
     await api
