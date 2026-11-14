@@ -3,6 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pinnedMessageManager } from "../../src/pinned/manager.js";
+// Storm tests mix fake timers with real disk I/O: under CI load the
+// default 5s timeout kills them. Suite-level budget instead.
+vi.setConfig({ testTimeout: 30_000 });
+// Real timers at import time: the flush path mixes disk I/O (real) with
+// 429 sleeps (fake). Pump both or a slow CI runner hangs the test.
+const realSetTimeout = setTimeout;
 import {
   __resetSettingsForTests,
   setCurrentProject,
@@ -862,7 +868,7 @@ describe("pinned manager scoped state", () => {
     }
   });
 
-  it("skips dashboard creation while the storm cooldown lasts", async () => {
+  it("skips dashboard creation while the storm cooldown lasts", { timeout: 30_000 }, async () => {
     vi.useFakeTimers();
     try {
       const api = createApi();
@@ -889,15 +895,20 @@ describe("pinned manager scoped state", () => {
       contexts.get("chat:-1:10")!.state.messageId = null;
       // Run the flush concurrently with the fake clock, stepping so each
       // retry sleep resolves: creation burns its retries against 429s and
-      // opens the cooldown.
+      // opens the cooldown. The budget is generous on purpose: backoff
+      // carries random jitter, and a fixed small count hangs the test on
+      // a slow runner instead of failing loudly.
       const failingFlush = pinnedMessageManager.flush("chat:-1:10");
       let failedSettled = false;
       void failingFlush.then(
         () => { failedSettled = true; },
         () => { failedSettled = true; },
       );
-      for (let i = 0; i < 30 && !failedSettled; i++) {
+      for (let i = 0; i < 120 && !failedSettled; i++) {
         await vi.advanceTimersByTimeAsync(1_000);
+        if (!failedSettled) {
+          await new Promise((resolve) => realSetTimeout(resolve, 10));
+        }
       }
       await failingFlush;
       // Cooldown is now open: further flushes must not attempt more sends.

@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+// Storm tests mix fake timers with real disk I/O: under CI load the
+// default 5s timeout kills them. Suite-level budget instead.
+vi.setConfig({ testTimeout: 30_000 });
 import {
   __resetSettingsForTests,
   getScheduledTasks,
@@ -66,7 +69,7 @@ describe("scheduled-task/runtime", () => {
     );
   });
 
-  it("executes due one-time tasks and removes them after delivery", async () => {
+  it("executes due one-time tasks and removes them after delivery", { timeout: 30_000 }, async () => {
     await setScheduledTasks([
       {
         id: "task-1",
