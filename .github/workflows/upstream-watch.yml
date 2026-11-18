@@ -39,7 +39,10 @@ jobs:
 
       - name: Compare and notify
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Personal token (see repo secret WATCH_PAT): the automatic
+          # GITHUB_TOKEN is denied issue:create in this repo even with
+          # issues:write declared. Empty here falls back to GITHUB_TOKEN.
+          GH_TOKEN: ${{ secrets.WATCH_PAT }}
         run: |
           set -euo pipefail
           MARKER="${{ steps.marker.outputs.sha }}"
