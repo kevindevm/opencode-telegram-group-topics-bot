@@ -69,7 +69,7 @@ describe("scheduled-task/runtime", () => {
     );
   });
 
-  it("executes due one-time tasks and removes them after delivery", { timeout: 30_000 }, async () => {
+  it("executes due one-time tasks and removes them after delivery", async () => {
     await setScheduledTasks([
       {
         id: "task-1",
